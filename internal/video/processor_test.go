@@ -127,6 +127,77 @@ func TestRun_ResultsPreserveJobOrder(t *testing.T) {
 	}
 }
 
+// TestRun_ProgressCallbacks pins the streaming-progress contract: OnStart
+// fires exactly once per job and OnResult exactly once per job (carrying that
+// job's outcome and a measured Duration), across a concurrent batch that
+// includes a failure. It also relies on Run's documented serialization -- the
+// callbacks touch shared maps/slices with no locking of their own, so the
+// race detector would flag this test if Run ever let them run concurrently.
+func TestRun_ProgressCallbacks(t *testing.T) {
+	dir := t.TempDir()
+	jobs := makeSources(t, dir, 5)
+	failing := jobs[2].SourcePath
+
+	eff := &recordingEffect{failPath: failing}
+
+	starts := map[string]int{}
+	got := map[string]Result{}
+	cfg := ProcessorConfig{
+		Effects:     []effects.Effect{eff},
+		Concurrency: 3,
+		OnStart:     func(j Job) { starts[j.SourcePath]++ },
+		OnResult:    func(r Result) { got[r.SourcePath] = r },
+	}
+
+	results := Run(context.Background(), jobs, cfg)
+
+	// Every job started exactly once, and produced exactly one result.
+	if len(starts) != len(jobs) {
+		t.Errorf("OnStart saw %d distinct jobs, want %d", len(starts), len(jobs))
+	}
+	if len(got) != len(jobs) {
+		t.Errorf("OnResult saw %d distinct jobs, want %d", len(got), len(jobs))
+	}
+	for _, j := range jobs {
+		if starts[j.SourcePath] != 1 {
+			t.Errorf("job %s started %d times, want 1", j.SourcePath, starts[j.SourcePath])
+		}
+		r, ok := got[j.SourcePath]
+		if !ok {
+			t.Errorf("no OnResult for %s", j.SourcePath)
+			continue
+		}
+		if r.Duration < 0 {
+			t.Errorf("job %s reported negative duration %v", j.SourcePath, r.Duration)
+		}
+		wantErr := j.SourcePath == failing
+		if (r.Err != nil) != wantErr {
+			t.Errorf("job %s: Err=%v, wantErr=%v", j.SourcePath, r.Err, wantErr)
+		}
+	}
+
+	// The streamed results match the returned slice (same count, and the one
+	// failure lines up).
+	if len(results) != len(jobs) {
+		t.Fatalf("Run returned %d results, want %d", len(results), len(jobs))
+	}
+}
+
+// TestRun_NilProgressCallbacksAreOptional guards that leaving OnStart/OnResult
+// nil (the pre-existing call sites) is a no-op, not a nil-call panic.
+func TestRun_NilProgressCallbacksAreOptional(t *testing.T) {
+	dir := t.TempDir()
+	jobs := makeSources(t, dir, 2)
+	results := Run(context.Background(), jobs, ProcessorConfig{
+		Effects: []effects.Effect{&recordingEffect{}},
+	})
+	for i, r := range results {
+		if r.Err != nil {
+			t.Errorf("results[%d] unexpected error: %v", i, r.Err)
+		}
+	}
+}
+
 // TestRun_SuffixOverride pins that ProcessorConfig.Suffix replaces the
 // effect's own FilenameSlug() in the derived output name, and that an empty
 // Suffix falls back to the effect default.

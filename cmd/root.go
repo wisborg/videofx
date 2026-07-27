@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -307,6 +308,17 @@ func configureTelemetry(effect effects.Effect) {
 	}
 }
 
+// formatJobDuration renders a per-file processing time for the progress
+// line: rounded to 10ms under a second and to 100ms above it, so a fast
+// telemetry mux reads "0.62s" while a long stabilize reads "1m48.3s" rather
+// than a noisy full-precision value.
+func formatJobDuration(d time.Duration) string {
+	if d < time.Second {
+		return d.Round(10 * time.Millisecond).String()
+	}
+	return d.Round(100 * time.Millisecond).String()
+}
+
 func joinEffectNames() string {
 	names := effects.Names()
 	out := ""
@@ -377,16 +389,34 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		Concurrency: concurrency,
 	}
 
+	// Stream progress as the batch runs rather than printing everything at
+	// the end: a "processing" line as each file starts (so a slow multi-
+	// minute stabilize isn't silent), and a counted OK/FAILED line the
+	// moment it finishes. Run serializes these callbacks, so `completed` is
+	// safe to bump without locking. At --concurrency > 1 they arrive in
+	// start/finish order, not the order the files were listed.
+	total := len(jobs)
+	completed := 0
+	cfg.OnStart = func(job video.Job) {
+		fmt.Fprintf(cmd.ErrOrStderr(), "processing %s ...\n", job.SourcePath)
+	}
+	cfg.OnResult = func(res video.Result) {
+		completed++
+		if res.Err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "[%d/%d] FAILED  %s: %v\n", completed, total, res.SourcePath, res.Err)
+			return
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "[%d/%d] OK      %s -> %s  (%s)\n",
+			completed, total, res.SourcePath, res.OutputPath, formatJobDuration(res.Duration))
+	}
+
 	results := video.Run(cmd.Context(), jobs, cfg)
 
 	failed := 0
 	for _, r := range results {
 		if r.Err != nil {
 			failed++
-			fmt.Fprintf(cmd.ErrOrStderr(), "FAILED  %s: %v\n", r.SourcePath, r.Err)
-			continue
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "OK      %s -> %s\n", r.SourcePath, r.OutputPath)
 	}
 
 	if failed > 0 {

@@ -415,10 +415,33 @@ area is a constant factor and this is just ordering by frame count.) It is
 a cheap `ffprobe` per file, done up front only when concurrency and job
 count make reordering worthwhile; a probe failure is non-fatal (that clip
 sorts last and its real error surfaces when processing actually reaches it).
-The returned per-file results are always reported in the original
-command-line order regardless of the order they ran in. This ordering is
-handled in `internal/video` and applies to every effect, but it matters
-most for the compute-heavy stabilizers, where a bad order costs the most.
+This ordering is handled in `internal/video` and applies to every effect, but
+it matters most for the compute-heavy stabilizers, where a bad order costs
+the most.
+
+### Progress output
+
+The batch reports progress as it runs rather than staying silent until the
+end. Each file prints a `processing <file> ...` line when it starts and a
+counted result line the moment it finishes:
+
+```
+processing clip1.mp4 ...
+processing clip2.mp4 ...
+[1/4] OK      clip1.mp4 -> clip1 - telemetry.mp4  (410ms)
+processing clip3.mp4 ...
+[2/4] OK      clip2.mp4 -> clip2 - telemetry.mp4  (410ms)
+[3/4] FAILED  clip3.mp4: <error>
+...
+```
+
+The `[k/N]` counter climbs as files complete, and each success shows how long
+it took — useful for spotting a slow clip in a large batch. At
+`--concurrency` > 1 several files are in flight at once, so lines appear in
+**start/finish order, not command-line order** (the example above shows two
+starting together under `--concurrency 2`). `OK` lines go to stdout and
+`processing`/`FAILED` lines to stderr, so redirecting stdout keeps a clean
+result log while the live status still shows on the terminal.
 
 ## Design
 

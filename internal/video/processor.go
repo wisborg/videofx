@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 
 	"videofx/internal/effects"
 	"videofx/internal/naming"
@@ -23,6 +24,10 @@ type Result struct {
 	SourcePath string
 	OutputPath string
 	Err        error
+	// Duration is the wall-clock time processOne took for this job (the
+	// actual effect pipeline, not the pre-dispatch cost estimation). Set by
+	// Run; useful for progress reporting.
+	Duration time.Duration
 }
 
 // ProcessorConfig controls a batch run.
@@ -41,6 +46,18 @@ type ProcessorConfig struct {
 	// naming.Resolve's, applied consistently across the batch.
 	Suffix      string
 	Concurrency int // <=0 means sequential (concurrency of 1)
+
+	// OnStart, if non-nil, is called just before each job begins processing;
+	// OnResult, if non-nil, as soon as each job finishes. They exist so a
+	// caller (the CLI) can stream progress instead of waiting for the whole
+	// batch: at Concurrency > 1 they fire in dispatch/completion order, not
+	// job order. Run SERIALIZES both across workers (they never run
+	// concurrently with each other), so a callback may freely touch shared
+	// state -- e.g. a completion counter -- without its own locking. Keep
+	// them quick: they run on the worker goroutines and block further
+	// progress while executing.
+	OnStart  func(job Job)
+	OnResult func(res Result)
 }
 
 // Run processes every job, applying cfg.Effects (a left-to-right pipeline)
@@ -97,13 +114,30 @@ func Run(ctx context.Context, jobs []Job, cfg ProcessorConfig) []Result {
 	}
 	ch := make(chan item)
 
+	// progressMu serializes the OnStart/OnResult callbacks across workers, so
+	// the caller's progress output never interleaves and its callbacks can
+	// touch shared state without their own locking (see ProcessorConfig).
+	var progressMu sync.Mutex
 	var wg sync.WaitGroup
 	for w := 0; w < concurrency; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for it := range ch {
-				results[it.idx] = processOne(ctx, it.job, cfg)
+				if cfg.OnStart != nil {
+					progressMu.Lock()
+					cfg.OnStart(it.job)
+					progressMu.Unlock()
+				}
+				started := time.Now()
+				res := processOne(ctx, it.job, cfg)
+				res.Duration = time.Since(started)
+				results[it.idx] = res
+				if cfg.OnResult != nil {
+					progressMu.Lock()
+					cfg.OnResult(res)
+					progressMu.Unlock()
+				}
 			}
 		}()
 	}
