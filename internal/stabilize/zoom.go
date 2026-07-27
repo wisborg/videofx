@@ -207,3 +207,142 @@ func AdaptiveZoom(corrections []Correction, scaleFactor float64, frameW, frameH 
 		ClampedFrames:     clamped,
 	}
 }
+
+// zoomEnvelopeRadiusMultiple sets the zoom envelope's dilation/smoothing
+// half-width as a multiple of its sigma, matching SmoothOptions'
+// RadiusMultiple (3 sigma). The SAME multiple is used for both the dilation
+// window and the smoothing kernel on purpose: the running max must span at
+// least the kernel's radius so that low-passing the dilated requirement can
+// never dip below the original per-frame requirement (see
+// AdaptiveZoomTimeVarying).
+const zoomEnvelopeRadiusMultiple = 3.0
+
+// AdaptiveZoomEnvelope is AdaptiveZoomTimeVarying's output: a per-frame zoom
+// that eases between calm and shaky regions instead of one global worst-case
+// value.
+type AdaptiveZoomEnvelope struct {
+	// Zooms is the zoom to render each frame with (multiplicative: 1.0 = no
+	// zoom), one per input correction, in order. Every element is >= that
+	// frame's own minZoomForCorrection (so no black border) except where
+	// maxZoom clamped it -- in which case that frame's correction was
+	// attenuated to fit, exactly as global AdaptiveZoom's cap does.
+	Zooms []float64
+	// ScaledCorrections is the input corrections with any frame whose own
+	// requirement exceeded the (maxZoom-clamped) envelope attenuated just
+	// enough to fit; identical to the input when maxZoom does not bind.
+	ScaledCorrections []Correction
+	// ClampedFrames is how many frames the maxZoom cap attenuated.
+	ClampedFrames int
+	// PeakZoom is the largest applied zoom, PeakRequired the largest
+	// unclamped per-frame requirement, and MinZoom the smallest applied zoom
+	// (~1.0 for a clip with a genuinely calm stretch). Diagnostics only.
+	PeakZoom, PeakRequired, MinZoom float64
+}
+
+// AdaptiveZoomTimeVarying computes EdgeModeAdaptive's zoom as a per-frame
+// envelope that tracks how much each part of the clip actually needs, rather
+// than the single global worst case AdaptiveZoom applies uniformly. It is for
+// footage that is calm in places and shaky in others: a global zoom crops the
+// calm parts as hard as the worst shaky frame, whereas this keeps the calm
+// parts near their own ~1.0 requirement and eases the zoom up only where the
+// shake demands it.
+//
+// sigmaFrames is the envelope's smoothing timescale in frames (the caller
+// converts a duration via the source fps): larger = slower, gentler zoom
+// changes. As sigmaFrames grows past the clip length the envelope flattens
+// toward AdaptiveZoom's single global value, so this degrades gracefully to
+// the global behavior.
+//
+// The result is a SMOOTH UPPER envelope, built so it is both breathe-free and
+// black-border-free:
+//
+//  1. raw[i] = minZoomForCorrection(i): each frame's own requirement. Applied
+//     directly this pulses frame-to-frame -- the very thing a per-frame zoom
+//     must avoid (a visibly breathing crop).
+//  2. Dilate raw to its running max over +/- the smoothing radius, THEN
+//     low-pass that. Spreading each peak wider than the kernel BEFORE blurring
+//     is what guarantees the blurred result never drops below raw at any
+//     frame: a symmetric blur of raw itself would sag below the requirement on
+//     a peak's RISING edge, exposing a border exactly where the shake starts.
+//  3. Floor with raw once more (max(env, raw)) as float-rounding insurance,
+//     then apply the maxZoom cap per frame via the same attenuate-to-fit path
+//     AdaptiveZoom uses (scaleBackToZoom).
+func AdaptiveZoomTimeVarying(corrections []Correction, scaleFactor float64, frameW, frameH int, maxZoom float64, sigmaFrames float64) AdaptiveZoomEnvelope {
+	n := len(corrections)
+
+	raw := make([]float64, n)
+	for i, c := range corrections {
+		raw[i] = minZoomForCorrection(c, scaleFactor, frameW, frameH, maxZoomSearchBound)
+	}
+
+	kernel := gaussianKernel(sigmaFrames, zoomEnvelopeRadiusMultiple)
+	radius := (len(kernel) - 1) / 2
+	env := smoothSeries(runningMax(raw, radius), kernel)
+
+	// Floor with the per-frame requirement so no frame is ever rendered
+	// below the zoom it needs (guards float rounding in dilate+smooth).
+	for i := range env {
+		if env[i] < raw[i] {
+			env[i] = raw[i]
+		}
+	}
+
+	res := AdaptiveZoomEnvelope{
+		Zooms:             env, // env is mutated in-place by the cap below
+		ScaledCorrections: make([]Correction, n),
+	}
+	haveMin := false
+	for i, c := range corrections {
+		if raw[i] > res.PeakRequired {
+			res.PeakRequired = raw[i]
+		}
+		// Per-frame maxZoom cap: if the envelope wants more than allowed,
+		// clamp this frame and weaken its correction just enough to fit.
+		if maxZoom > 0 && env[i] > maxZoom {
+			env[i] = maxZoom
+			scaled, alpha := scaleBackToZoom(c, scaleFactor, frameW, frameH, maxZoom)
+			res.ScaledCorrections[i] = scaled
+			if alpha < 1 {
+				res.ClampedFrames++
+			}
+		} else {
+			res.ScaledCorrections[i] = c
+		}
+		if env[i] > res.PeakZoom {
+			res.PeakZoom = env[i]
+		}
+		if !haveMin || env[i] < res.MinZoom {
+			res.MinZoom = env[i]
+			haveMin = true
+		}
+	}
+	return res
+}
+
+// runningMax returns, for each index i, the maximum of values over the window
+// [i-radius, i+radius] (clamped to the ends). It dilates a signal so a later
+// low-pass cannot pull a peak below its original height -- see
+// AdaptiveZoomTimeVarying. O(n*radius); n is a frame count and radius a modest
+// multiple of the zoom sigma, negligible next to the analyze/render passes.
+func runningMax(values []float64, radius int) []float64 {
+	n := len(values)
+	out := make([]float64, n)
+	for i := 0; i < n; i++ {
+		lo := i - radius
+		if lo < 0 {
+			lo = 0
+		}
+		hi := i + radius
+		if hi > n-1 {
+			hi = n - 1
+		}
+		m := values[lo]
+		for j := lo + 1; j <= hi; j++ {
+			if values[j] > m {
+				m = values[j]
+			}
+		}
+		out[i] = m
+	}
+	return out
+}

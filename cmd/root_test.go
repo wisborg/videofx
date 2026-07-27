@@ -103,6 +103,27 @@ func TestPrintCalibration(t *testing.T) {
 	})
 }
 
+func TestValidateZoomTransition(t *testing.T) {
+	cases := []struct {
+		name    string
+		seconds float64
+		wantErr bool
+	}{
+		{"zero is fine (constant zoom, original behavior)", 0, false},
+		{"positive seconds", 0.75, false},
+		{"large positive", 5, false},
+		{"negative rejected", -0.1, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateZoomTransition(c.seconds)
+			if (err != nil) != c.wantErr {
+				t.Errorf("validateZoomTransition(%v) = %v, wantErr %v", c.seconds, err, c.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateSuffix(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -336,14 +357,15 @@ func TestNewRootCmd_QualityFlagRegistered(t *testing.T) {
 	}
 }
 
-// TestConfigureEffect_GoCVQuality pins that --quality (the package-level
-// `quality` var, as Cobra would set it) lands on a *effects.GoCVStabilizer's
-// Quality field via configureEffect.
+// TestConfigureEffect_GoCVQuality pins that gocv-only flags (the package-level
+// `quality`/`zoomTransition` vars, as Cobra would set them) land on a
+// *effects.GoCVStabilizer's fields via configureEffect.
 func TestConfigureEffect_GoCVQuality(t *testing.T) {
-	origQuality, origEdge := quality, edgeMode
-	t.Cleanup(func() { quality, edgeMode = origQuality, origEdge })
+	origQuality, origZoom, origEdge := quality, zoomTransition, edgeMode
+	t.Cleanup(func() { quality, zoomTransition, edgeMode = origQuality, origZoom, origEdge })
 
 	quality = 60
+	zoomTransition = 0.75
 	edgeMode = "adaptive" // configureEffect parses this; must be valid
 
 	gs := &effects.GoCVStabilizer{}
@@ -352,5 +374,22 @@ func TestConfigureEffect_GoCVQuality(t *testing.T) {
 	}
 	if gs.Quality != 60 {
 		t.Errorf("Quality = %d, want 60", gs.Quality)
+	}
+	if gs.ZoomTransition != 0.75 {
+		t.Errorf("ZoomTransition = %v, want 0.75", gs.ZoomTransition)
+	}
+}
+
+// TestNewRootCmd_ZoomTransitionFlagRegistered guards the --zoom-transition
+// flag's existence (a typo would otherwise surface only as a runtime error)
+// and pins its default: adaptive stabilization uses the time-varying zoom
+// envelope by default (0.5s), not the old constant-zoom behavior.
+func TestNewRootCmd_ZoomTransitionFlagRegistered(t *testing.T) {
+	f := NewRootCmd().Flags().Lookup("zoom-transition")
+	if f == nil {
+		t.Fatal("flag --zoom-transition not registered")
+	}
+	if f.DefValue != "0.5" {
+		t.Errorf("--zoom-transition default = %q, want \"0.5\" (time-varying zoom on by default)", f.DefValue)
 	}
 }

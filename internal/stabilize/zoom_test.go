@@ -268,3 +268,130 @@ func TestAttenuateCorrection_BoundaryAlphaValues(t *testing.T) {
 		t.Errorf("attenuateCorrection(c, 1) = %+v, want unchanged %+v", unchanged, c)
 	}
 }
+
+func TestRunningMax(t *testing.T) {
+	in := []float64{1, 3, 2, 5, 1, 1, 1}
+	got := runningMax(in, 1) // window [i-1, i+1]
+	want := []float64{3, 3, 5, 5, 5, 1, 1}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("runningMax(%v,1)[%d] = %v, want %v (full: %v)", in, i, got[i], want[i], got)
+		}
+	}
+	// radius 0 is the identity.
+	id := runningMax(in, 0)
+	for i := range in {
+		if id[i] != in[i] {
+			t.Errorf("runningMax radius 0 must be identity, got %v", id)
+		}
+	}
+}
+
+// mixedShakeCorrections builds a corrections series that is calm (identity)
+// for the first calmN frames and then needs a real zoom (a pure DX shift) for
+// the rest -- a synthetic stand-in for footage like test_mixed_shake.mp4.
+func mixedShakeCorrections(calmN, shakyN int, shakyDX float64) []Correction {
+	out := make([]Correction, 0, calmN+shakyN)
+	for i := 0; i < calmN; i++ {
+		out = append(out, Correction{Scale: 1})
+	}
+	for i := 0; i < shakyN; i++ {
+		out = append(out, Correction{DX: shakyDX, Scale: 1})
+	}
+	return out
+}
+
+// TestAdaptiveZoomTimeVarying_NeverBelowRequirement is the black-border
+// invariant: the per-frame envelope must be >= that frame's own
+// minZoomForCorrection everywhere (barring a maxZoom cap, not used here), or
+// that frame would expose a border. This is the property the dilate-then-
+// smooth construction exists to guarantee.
+func TestAdaptiveZoomTimeVarying_NeverBelowRequirement(t *testing.T) {
+	const w, h = 2000, 1500
+	corr := mixedShakeCorrections(100, 100, 240)
+
+	env := AdaptiveZoomTimeVarying(corr, 1.0, w, h, 0, 10)
+
+	if len(env.Zooms) != len(corr) {
+		t.Fatalf("Zooms length = %d, want %d", len(env.Zooms), len(corr))
+	}
+	for i, c := range corr {
+		req := minZoomForCorrection(c, 1.0, w, h, maxZoomSearchBound)
+		if env.Zooms[i] < req-1e-6 {
+			t.Errorf("frame %d: envelope zoom %.6f is below its requirement %.6f (would show a black border)", i, env.Zooms[i], req)
+		}
+	}
+}
+
+// TestAdaptiveZoomTimeVarying_CalmStaysNearOne pins the whole point of the
+// feature: a frame deep in the calm region keeps ~zoom 1.0 (its own minimal
+// crop), while a global adaptive zoom would crop it to the shaky part's
+// requirement.
+func TestAdaptiveZoomTimeVarying_CalmStaysNearOne(t *testing.T) {
+	const w, h = 2000, 1500
+	corr := mixedShakeCorrections(200, 200, 240) // shaky needs 1 + 240/1000 = 1.24
+
+	env := AdaptiveZoomTimeVarying(corr, 1.0, w, h, 0, 10) // sigma 10 -> radius 30
+
+	// Frame 0 is ~170 frames from the boundary, far past the ~30-frame
+	// dilation+smoothing reach, so it must sit at 1.0.
+	if math.Abs(env.Zooms[0]-1.0) > 1e-3 {
+		t.Errorf("calm frame 0 zoom = %.4f, want ~1.0", env.Zooms[0])
+	}
+	// Deep in the shaky region the envelope reaches the sustained requirement.
+	if math.Abs(env.Zooms[350]-1.24) > 1e-2 {
+		t.Errorf("shaky frame 350 zoom = %.4f, want ~1.24", env.Zooms[350])
+	}
+	// The global adaptive zoom, by contrast, would crop frame 0 to ~1.24 too.
+	global := AdaptiveZoom(corr, 1.0, w, h, 0)
+	if global.Zoom-env.Zooms[0] < 0.2 {
+		t.Errorf("expected the calm frame (%.3f) to be cropped far less than the global zoom (%.3f)", env.Zooms[0], global.Zoom)
+	}
+}
+
+// TestAdaptiveZoomTimeVarying_LargeSigmaApproachesGlobal checks the graceful-
+// degradation property: as the transition timescale grows past the clip, the
+// envelope flattens to the single global value AdaptiveZoom would apply.
+func TestAdaptiveZoomTimeVarying_LargeSigmaApproachesGlobal(t *testing.T) {
+	const w, h = 2000, 1500
+	corr := mixedShakeCorrections(100, 100, 240)
+
+	env := AdaptiveZoomTimeVarying(corr, 1.0, w, h, 0, 1000) // sigma >> clip length
+	global := AdaptiveZoom(corr, 1.0, w, h, 0)
+
+	if math.Abs(env.PeakZoom-global.Zoom) > 1e-3 {
+		t.Errorf("large-sigma PeakZoom = %.5f, want ~global %.5f", env.PeakZoom, global.Zoom)
+	}
+	// Flat: min and peak coincide when the envelope has collapsed to a constant.
+	if math.Abs(env.PeakZoom-env.MinZoom) > 1e-3 {
+		t.Errorf("large-sigma envelope should be ~flat, got min %.5f peak %.5f", env.MinZoom, env.PeakZoom)
+	}
+}
+
+// TestAdaptiveZoomTimeVarying_MaxZoomClampsAndAttenuates pins that the
+// per-frame maxZoom cap behaves like the global one: frames wanting more than
+// the cap are held at the cap and their corrections weakened to fit.
+func TestAdaptiveZoomTimeVarying_MaxZoomClampsAndAttenuates(t *testing.T) {
+	const w, h = 2000, 1500
+	corr := mixedShakeCorrections(50, 50, 400) // shaky wants 1 + 400/1000 = 1.40
+	const cap = 1.1                            // 10% cap, below the requirement
+
+	env := AdaptiveZoomTimeVarying(corr, 1.0, w, h, cap, 10)
+
+	if env.ClampedFrames == 0 {
+		t.Error("expected some frames to be clamped by the cap")
+	}
+	for i, z := range env.Zooms {
+		if z > cap+1e-6 {
+			t.Errorf("frame %d zoom %.4f exceeds the cap %.4f", i, z, cap)
+		}
+	}
+	// A deep shaky frame must have been attenuated (not left at full strength).
+	if env.ScaledCorrections[80] == corr[80] {
+		t.Errorf("shaky frame 80 should have been attenuated to fit the cap")
+	}
+	// PeakRequired still reports the true (unclamped) requirement.
+	if math.Abs(env.PeakRequired-1.40) > 1e-2 {
+		t.Errorf("PeakRequired = %.4f, want ~1.40 (the unclamped requirement)", env.PeakRequired)
+	}
+}

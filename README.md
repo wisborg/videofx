@@ -88,6 +88,7 @@ Flags:
 - `--edge-mode` — **gocv-stabilizer only**: how the border a corrective warp exposes is handled — `fixed` (scale up by a fixed `--fixed-zoom` and crop back), `adaptive` (compute the smallest zoom this clip actually needs, the recommended default), or `flow-fill` (**EXPERIMENTAL** — fill the exposed border from the previous frame instead of cropping; a first cut, not tuned/validated by eye, expect a visible seam). Default `adaptive`.
 - `--fixed-zoom` — gocv-stabilizer only: `--edge-mode=fixed`'s zoom fraction (`0.12` = 12%). Ignored by the other two modes. Default `0.12`.
 - `--max-zoom` — gocv-stabilizer only: `--edge-mode=adaptive`'s zoom cap fraction (`0` = uncapped, the default). When it binds, the offending frames' stabilization is weakened rather than exposing a black border — measured **worse** for crop-vs-shake-reduction than simply lowering `--sigma` for the same crop budget (see Performance below), so prefer that first.
+- `--zoom-transition` — gocv-stabilizer + `--edge-mode adaptive` only: ease the adaptive crop between calm and shaky sections over this many **seconds**, so steady stretches keep their own minimal crop and the zoom eases in only where shake demands it — **the key setting for footage that needs stabilizing only in places** (see [Partial / mixed-shake footage](#partial--mixed-shake-footage)). **Default `0.5`** (measured to keep the most calm framing while the easing still tested smooth by eye). Raise toward `1.0` for a gentler, slower zoom at a little more calm-side crop; set `0` to disable it and crop the whole clip to its single worst frame (the original constant-zoom behavior).
 - `--sigma` — gocv-stabilizer only: override the strength-derived Gaussian smoothing sigma directly, in analysis frames (`0` = derive from `--strength`; the `--strength` default of `0.5` derives sigma `17`, this project's measured default).
 - `--quality` — gocv-stabilizer only: constant-quality level for the HEVC (`hevc_videotoolbox`) encode, `1`–`100` on VideoToolbox's own scale where **higher is better quality / larger file**. **Default `55`**, measured to keep the re-encode visually transparent to the source on typical 4K action footage (VMAF ~98, landing near the source's own bitrate) — run [`videofx calibrate`](#calibrating-quality) to find the right value for a different camera. Pass `0` to leave the encoder's built-in default rate control in place (no `-q:v` emitted — the original, much lower-bitrate behavior). This is `gocv-stabilizer`'s counterpart to warp-stabilizer's `--crf`, but the scales are **unrelated and opposite** (CRF is x264/x265, `0`–`51`, lower-is-better), so `--crf` is ignored here and `--quality` is ignored by `warp-stabilizer`. Constant-quality HEVC via VideoToolbox is Apple-Silicon-only.
 - `--sidecar` — gocv-stabilizer only: path to cache the (expensive, multi-minute on a long 4K60 clip) motion-analysis pass so it can be reused across renders — if the file exists it's read instead of re-analyzing; otherwise a fresh analysis is written there. Useful for iterating on `--edge-mode`/`--sigma`/`--max-zoom` without re-analyzing every time. **Not safe to share across a concurrent multi-file batch** (`--concurrency` > 1 with more than one input) — use it only when processing a single input file.
@@ -442,6 +443,60 @@ it took — useful for spotting a slow clip in a large batch. At
 starting together under `--concurrency 2`). `OK` lines go to stdout and
 `processing`/`FAILED` lines to stderr, so redirecting stdout keeps a clean
 result log while the live status still shows on the terminal.
+
+## Partial / mixed-shake footage
+
+Some clips are steady for a stretch and shaky elsewhere — a run that starts
+on smooth ground and gets rough, say. Cropping such a clip to a single
+worst-frame zoom would crop the calm section (and soften it through the
+re-encode) exactly as hard as the roughest moment, even though it needed no
+correction at all.
+
+`--edge-mode adaptive` avoids that by making the crop a smooth per-frame
+**envelope** — controlled by `--zoom-transition` (**default `0.5` s**): each part
+of the clip is cropped for what *it* needs, and the zoom eases between calm and
+shaky over the transition time (so it never visibly pulses). It never lowers the
+*peak* crop — the shaky part is stabilized just as hard — it only relaxes the crop
+where the footage is calm. Set `--zoom-transition 0` for the older behavior of one
+constant zoom across the whole clip.
+
+**Choosing a value.** Measured on a 25s span of `test_videos/test_mixed_shake.mp4`
+(calm, then shaky ~10s in; a constant zoom crops the whole span **20.8%**),
+sweeping the setting:
+
+```
+  --zoom-transition   calm crop   crop 1s pre-boundary   zoom velocity
+  0.5                   5.4%           10.5%                 7.0 %/s
+  0.75                  6.1%           13.7%                 6.0 %/s
+  1.0                   6.5%           14.8%                 3.3 %/s
+  1.5                   8.8%           16.1%                 2.3 %/s
+  3.0                  16.3%           19.9%                 1.7 %/s
+```
+
+There's a genuine tradeoff: **smaller** values keep the calm section closer to its
+own minimal crop (~5–6% vs the 20.8% a constant zoom applies) but ramp the zoom
+**faster** (higher velocity); **larger** values ease the zoom more gently but spread
+the crop back into the calm footage (by 3 s the benefit is nearly gone). The default
+**`0.5`** favours the calm-framing side — it keeps the most picture, and its faster
+easing still tested smooth by eye on this footage. If the zoom ever looks like it
+moves too quickly on your own clips, **raise toward `1.0`** for a gentler ramp
+(velocity 3.3 vs 7.0 %/s) at a little more calm-side crop. The peak crop is the same
+at every setting.
+
+The transition is gradual by construction — the envelope is a dilate-then-smooth
+*upper* bound of each frame's own requirement, so it eases in without ever dropping
+below what a frame needs (which would expose a black border). A very large
+`--zoom-transition`, past the clip length, collapses back to a single constant zoom.
+`--max-zoom` still applies as a per-frame cap.
+
+**What stabilization can't fix.** It removes camera-*path* shake — on the test clip
+~99% of the frame-to-frame motion, at any `--sigma` at or above the default — but it
+cannot un-blur an individual frame. Footage shot with a slow shutter (e.g. in low
+light) bakes motion blur into each frame during fast movement: the result stabilizes
+to steady *framing* but still looks soft, and the crop's upscale adds a touch more
+softness. That's a capture-time issue (use a faster shutter), not something any 2D
+stabilizer can recover — so on visibly motion-blurred footage, don't spend extra crop
+raising `--sigma` chasing shake that's already essentially gone.
 
 ## Design
 

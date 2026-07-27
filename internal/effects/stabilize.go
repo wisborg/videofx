@@ -144,6 +144,16 @@ type GoCVStabilizer struct {
 	// defaults this to 55 (measured visually transparent on 4K action
 	// footage -- see cmd/root.go and internal/calibrate).
 	Quality int
+
+	// ZoomTransition, when > 0, switches EdgeModeAdaptive to a per-frame zoom
+	// envelope that eases the crop between calm and shaky sections over this
+	// many seconds (see stabilize.RenderOptions.ZoomTransitionSeconds and
+	// AdaptiveZoomTimeVarying) -- for footage that only needs stabilizing in
+	// places, so the steady stretches aren't cropped to the worst frame. 0
+	// keeps one constant clip-wide zoom; the --zoom-transition flag defaults
+	// this to 0.5. Wired from --zoom-transition; only meaningful with EdgeMode
+	// adaptive.
+	ZoomTransition float64
 }
 
 func (g *GoCVStabilizer) Name() string         { return "gocv-stabilizer" }
@@ -204,10 +214,11 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 	result := stabilize.Smooth(series, smoothOpts)
 
 	renderOpts := stabilize.RenderOptions{
-		EdgeMode:  edgeMode,
-		FixedZoom: g.FixedZoom,
-		MaxZoom:   g.MaxZoom,
-		Quality:   g.Quality,
+		EdgeMode:              edgeMode,
+		FixedZoom:             g.FixedZoom,
+		MaxZoom:               g.MaxZoom,
+		Quality:               g.Quality,
+		ZoomTransitionSeconds: g.ZoomTransition,
 	}
 
 	if _, err := stabilize.Render(ctx, in.SourcePath, series, result, renderOpts, in.OutputPath); err != nil {

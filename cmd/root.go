@@ -35,13 +35,14 @@ var (
 	vidstabStepSize    int
 	vidstabMinContrast float64
 
-	edgeMode      string
-	fixedZoom     float64
-	maxZoom       float64
-	sigma         float64
-	sidecarPath   string
-	analysisWidth int
-	quality       int
+	edgeMode       string
+	fixedZoom      float64
+	maxZoom        float64
+	sigma          float64
+	sidecarPath    string
+	analysisWidth  int
+	quality        int
+	zoomTransition float64
 
 	fitPath        string
 	offsetSeconds  float64
@@ -103,6 +104,8 @@ func NewRootCmd() *cobra.Command {
 		"gocv-stabilizer only: --edge-mode=fixed's zoom fraction (0.12 = 12%); ignored by the other two edge modes")
 	root.Flags().Float64Var(&maxZoom, "max-zoom", defRender.MaxZoom,
 		"gocv-stabilizer only: --edge-mode=adaptive's zoom cap fraction (0 = uncapped, the default); when it binds, the offending frames' stabilization is weakened rather than exposing a black border -- measured WORSE for crop-vs-shake-reduction than simply lowering --sigma, see README, so prefer that first")
+	root.Flags().Float64Var(&zoomTransition, "zoom-transition", 0.5,
+		"gocv-stabilizer + --edge-mode adaptive only: ease the crop between calm and shaky sections over this many seconds, so steady stretches keep their own minimal crop and the zoom eases in only where shake demands it. Default 0.5 (measured to keep the most calm framing while the easing still tested smooth by eye). Raise toward 1.0 for a gentler, slower zoom at a little more calm-side crop; set 0 to disable it and crop the whole clip to its single worst frame (the original constant-zoom behavior)")
 	root.Flags().Float64Var(&sigma, "sigma", 0,
 		"gocv-stabilizer only: override the strength-derived Gaussian smoothing sigma, in analysis frames (0 = derive from --strength; the --strength default of 0.5 derives sigma=20, this project's measured default -- see README)")
 	root.Flags().StringVar(&sidecarPath, "sidecar", "",
@@ -227,6 +230,17 @@ func warnCRFIgnoredByGoCV(w io.Writer, crfChanged bool, effs []effects.Effect) {
 	}
 }
 
+// validateZoomTransition rejects a negative --zoom-transition. 0 (constant
+// zoom, the original behavior) and any positive number of seconds are valid;
+// a negative duration is meaningless. Split out from runRoot so it is
+// testable in isolation, alongside the other up-front validators.
+func validateZoomTransition(seconds float64) error {
+	if seconds < 0 {
+		return fmt.Errorf("--zoom-transition %v is invalid; use 0 (one constant zoom) or a positive number of seconds", seconds)
+	}
+	return nil
+}
+
 // validateSuffix rejects a --suffix override that would break the
 // non-destructive-sibling-filename invariant. naming.Resolve enforces the
 // same rule (it is the actual path constructor), but checking here too
@@ -291,6 +305,7 @@ func configureEffect(effect effects.Effect) error {
 		gs.SidecarPath = sidecarPath
 		gs.AnalysisWidth = analysisWidth
 		gs.Quality = quality
+		gs.ZoomTransition = zoomTransition
 	}
 	configureTelemetry(effect)
 	return nil
@@ -351,6 +366,9 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := validateQuality(quality); err != nil {
+		return err
+	}
+	if err := validateZoomTransition(zoomTransition); err != nil {
 		return err
 	}
 

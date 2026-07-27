@@ -31,12 +31,17 @@ const (
 	// necessary on every other frame, if it's sized for the worst case).
 	EdgeModeFixed EdgeMode = "fixed"
 
-	// EdgeModeAdaptive computes the minimum uniform zoom that covers
-	// every frame's corrected content (see AdaptiveZoom), optionally
-	// capped by RenderOptions.MaxZoom, in which case frames needing more
-	// than the cap have their correction scaled back rather than
-	// exposing a black border. This is the mode that answers "how much
-	// crop does this clip actually need" instead of guessing.
+	// EdgeModeAdaptive crops by the minimum zoom each frame actually needs
+	// (see AdaptiveZoom / minZoomForCorrection) rather than a fixed guess --
+	// answering "how much crop does this clip need" instead of guessing.
+	// By default (RenderOptions.ZoomTransitionSeconds > 0, which the CLI sets
+	// to 0.5) the zoom is a smooth per-frame ENVELOPE that eases between calm
+	// and shaky sections (see AdaptiveZoomTimeVarying), so a clip that only
+	// needs stabilizing in places doesn't crop its calm stretches to the
+	// worst frame; with ZoomTransitionSeconds == 0 it collapses to a single
+	// uniform clip-wide zoom. Either way RenderOptions.MaxZoom optionally
+	// caps it, scaling back the correction on frames that need more than the
+	// cap rather than exposing a black border.
 	EdgeModeAdaptive EdgeMode = "adaptive"
 
 	// EdgeModeFlowFill is EXPERIMENTAL. Instead of cropping, it fills the
@@ -93,6 +98,16 @@ type RenderOptions struct {
 	// cap binds, the frames that needed more are scaled back (see
 	// AdaptiveZoom) rather than left with a black border.
 	MaxZoom float64
+
+	// ZoomTransitionSeconds, when > 0, switches EdgeModeAdaptive from one
+	// constant clip-wide zoom to a per-frame zoom ENVELOPE that eases between
+	// calm and shaky sections over this timescale (see
+	// AdaptiveZoomTimeVarying) -- so a clip that is steady for a stretch and
+	// shaky elsewhere no longer crops the steady part to the worst frame's
+	// requirement. 0 keeps the original single-zoom behavior; the
+	// --zoom-transition flag defaults this to 0.5. Ignored by the other two
+	// edge modes.
+	ZoomTransitionSeconds float64
 
 	// Quality is passed straight through to the output encoder's
 	// constant-quality control (vidio.EncoderConfig.Quality): 1-100, higher
@@ -201,7 +216,8 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 
 	corrections := result.Corrections
 	stats := RenderStats{}
-	var zoomFactor float64 // multiplicative: 1.0 = no zoom
+	var zoomFactor float64 // constant multiplicative zoom (1.0 = no zoom)
+	var zooms []float64    // per-frame zoom, when non-nil overrides zoomFactor
 
 	switch opts.EdgeMode {
 	case EdgeModeFixed:
@@ -212,12 +228,24 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 		if opts.MaxZoom > 0 {
 			maxZoomFactor = 1 + opts.MaxZoom
 		}
-		az := AdaptiveZoom(corrections, scaleFactor, w, h, maxZoomFactor)
-		zoomFactor = az.Zoom
-		corrections = az.ScaledCorrections
-		stats.Zoom = az.Zoom - 1
-		stats.RequiredZoom = az.RequiredZoom - 1
-		stats.ClampedFrames = az.ClampedFrames
+		if opts.ZoomTransitionSeconds > 0 {
+			// Time-varying envelope: zoom eases between calm and shaky
+			// regions over ZoomTransitionSeconds. sigma is in frames, so
+			// convert the requested duration via the source frame rate.
+			env := AdaptiveZoomTimeVarying(corrections, scaleFactor, w, h, maxZoomFactor, opts.ZoomTransitionSeconds*info.FPS)
+			zooms = env.Zooms
+			corrections = env.ScaledCorrections
+			stats.Zoom = env.PeakZoom - 1
+			stats.RequiredZoom = env.PeakRequired - 1
+			stats.ClampedFrames = env.ClampedFrames
+		} else {
+			az := AdaptiveZoom(corrections, scaleFactor, w, h, maxZoomFactor)
+			zoomFactor = az.Zoom
+			corrections = az.ScaledCorrections
+			stats.Zoom = az.Zoom - 1
+			stats.RequiredZoom = az.RequiredZoom - 1
+			stats.ClampedFrames = az.ClampedFrames
+		}
 	case EdgeModeFlowFill:
 		zoomFactor = 1.0 // no crop -- borders are filled, not hidden by zooming
 	}
@@ -267,7 +295,18 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 		if frames < len(corrections) {
 			corr = corrections[frames]
 		}
-		transform := buildCorrectionTransform(corr, scaleFactor, w, h, zoomFactor)
+		// z is the constant zoom, unless a per-frame envelope is in effect.
+		// Past the envelope's end (only on a frame/correction-count mismatch,
+		// which also yields identityCorrection above) fall back to 1.0 -- an
+		// unmodified frame needs no crop -- never to the unset zoomFactor(0).
+		z := zoomFactor
+		if zooms != nil {
+			z = 1.0
+			if frames < len(zooms) {
+				z = zooms[frames]
+			}
+		}
+		transform := buildCorrectionTransform(corr, scaleFactor, w, h, z)
 
 		if ff != nil {
 			if err := ff.render(src, transform, &dst); err != nil {
