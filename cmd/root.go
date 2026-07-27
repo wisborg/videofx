@@ -108,8 +108,8 @@ func NewRootCmd() *cobra.Command {
 		"gocv-stabilizer only: path to cache/reuse the (expensive, multi-minute on a long 4K60 clip) motion-analysis pass across renders -- if the file exists it is read instead of re-analyzing, otherwise a fresh analysis is written there; useful for iterating on --edge-mode/--sigma/--max-zoom without re-analyzing every time, but NOT safe to share across a concurrent multi-file batch (process one input file at a time when using this)")
 	root.Flags().IntVar(&analysisWidth, "analysis-width", 0,
 		"gocv-stabilizer only: width in pixels at which motion is estimated (0 = default 960; height derived). Larger localizes features more finely but is slower; EXPERIMENTAL -- on the test footage it did not measurably reduce residual shake (whether it yields visibly cleaner warps is an eyeball call). NOTE: baked into a --sidecar's cached analysis, so change --analysis-width and --sidecar together (or delete the sidecar) to re-analyze")
-	root.Flags().IntVar(&quality, "quality", 0,
-		"gocv-stabilizer only: constant-quality level for the HEVC (hevc_videotoolbox) encode, 1-100 on VideoToolbox's own scale where HIGHER is better quality/larger file (0 = the encoder's built-in default rate control, the original behavior). This is the gocv-stabilizer counterpart to warp-stabilizer's --crf; the two scales are unrelated (CRF is x264/x265, lower-is-better), so --crf is ignored by gocv-stabilizer and --quality is ignored by warp-stabilizer")
+	root.Flags().IntVar(&quality, "quality", 55,
+		"gocv-stabilizer only: constant-quality level for the HEVC (hevc_videotoolbox) encode, 1-100 on VideoToolbox's own scale where HIGHER is better quality/larger file. Default 55, measured to keep the re-encode visually transparent to typical 4K action footage (VMAF ~98); run 'videofx calibrate <video>' to find the right value for a different source. Pass 0 for the encoder's built-in default rate control (the original, lower-bitrate behavior). This is the gocv-stabilizer counterpart to warp-stabilizer's --crf; the two scales are unrelated (CRF is x264/x265, lower-is-better), so --crf is ignored by gocv-stabilizer and --quality is ignored by warp-stabilizer")
 
 	root.Flags().StringVar(&fitPath, "fit", "",
 		"telemetry only: path to a Garmin FIT activity file to sync GPS/telemetry from (required with --effect telemetry)")
@@ -123,6 +123,12 @@ func NewRootCmd() *cobra.Command {
 		"telemetry only: include Stryd running-dynamics developer fields in the GPX sidecar and muxed SRT")
 
 	_ = root.MarkFlagRequired("effect")
+
+	// `videofx calibrate <video>` is a sibling subcommand, not an effect: it
+	// measures the --quality value the encoder needs, it does not process a
+	// clip. --effect (a local, required flag on root) is not inherited by
+	// it, so `videofx calibrate` runs without demanding --effect.
+	root.AddCommand(newCalibrateCmd())
 
 	return root
 }

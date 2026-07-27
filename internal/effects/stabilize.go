@@ -139,8 +139,10 @@ type GoCVStabilizer struct {
 	// VideoToolbox, whose quality scale is unrelated to x264/x265's CRF, so
 	// GoCVStabilizer does not implement Tunable and takes this as its own
 	// field (wired from --quality, alongside Sigma/MaxZoom/... in
-	// cmd/root.go's configureEffect). 0 (the default) leaves the encoder's
-	// built-in default rate control untouched.
+	// cmd/root.go's configureEffect). 0 (the zero value) leaves the
+	// encoder's built-in default rate control untouched; the --quality flag
+	// defaults this to 55 (measured visually transparent on 4K action
+	// footage -- see cmd/root.go and internal/calibrate).
 	Quality int
 }
 

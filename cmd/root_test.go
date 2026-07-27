@@ -5,6 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
+	"videofx/internal/calibrate"
 	"videofx/internal/effects"
 )
 
@@ -35,6 +38,69 @@ func TestWarnTelemetryNotLast(t *testing.T) {
 	if buf.Len() != 0 {
 		t.Errorf("no telemetry must not warn, got: %q", buf.String())
 	}
+}
+
+// TestCalibrateSubcommandRegistered guards that `videofx calibrate` is wired
+// onto the root as a subcommand (and so does NOT inherit --effect's required
+// constraint, which lives on the root's local flags).
+func TestCalibrateSubcommandRegistered(t *testing.T) {
+	root := NewRootCmd()
+	var found *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Name() == "calibrate" {
+			found = c
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("`calibrate` subcommand not registered on root")
+	}
+	for _, name := range []string{"target-vmaf", "candidates", "duration", "ss"} {
+		if found.Flags().Lookup(name) == nil {
+			t.Errorf("calibrate flag --%s not registered", name)
+		}
+	}
+}
+
+// TestPrintCalibration covers the two report shapes: a target that was met
+// (a suggested value, marked in the table) and one that was not (best-found
+// plus a hint to try higher).
+func TestPrintCalibration(t *testing.T) {
+	points := []calibrate.Point{
+		{Quality: 50, VMAF: 94.0, Bitrate: 51.7},
+		{Quality: 55, VMAF: 97.7, Bitrate: 69.7},
+	}
+
+	t.Run("target met names the suggested value and marks it", func(t *testing.T) {
+		var buf bytes.Buffer
+		printCalibration(&buf, "clip.mp4", calibrate.Result{
+			Points: points, Target: 96.0, Suggested: 55, Met: true,
+		})
+		out := buf.String()
+		if !strings.Contains(out, "Suggested: --quality 55") {
+			t.Errorf("expected a suggestion of 55, got:\n%s", out)
+		}
+		if !strings.Contains(out, "<- suggested") {
+			t.Errorf("suggested row should be marked, got:\n%s", out)
+		}
+	})
+
+	t.Run("target unmet reports the best and hints higher", func(t *testing.T) {
+		var buf bytes.Buffer
+		printCalibration(&buf, "clip.mp4", calibrate.Result{
+			Points: points, Target: 99.0, Met: false,
+		})
+		out := buf.String()
+		if !strings.Contains(out, "No tested quality reached") {
+			t.Errorf("expected an unmet-target message, got:\n%s", out)
+		}
+		if strings.Contains(out, "<- suggested") {
+			t.Errorf("nothing should be marked suggested when the target is unmet, got:\n%s", out)
+		}
+		if !strings.Contains(out, "--candidates 60,65,70") {
+			t.Errorf("expected a higher-candidates hint past the best (55), got:\n%s", out)
+		}
+	})
 }
 
 func TestValidateSuffix(t *testing.T) {

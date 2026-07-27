@@ -96,7 +96,7 @@ type RenderOptions struct {
 
 	// Quality is passed straight through to the output encoder's
 	// constant-quality control (vidio.EncoderConfig.Quality): 1-100, higher
-	// is better/larger; 0 (the default) leaves the encoder's own default
+	// is better/larger; 0 (the zero value) leaves the encoder's own default
 	// rate control in place. See that field's doc comment for the scale.
 	Quality int
 }

@@ -68,6 +68,7 @@ make build
 
 ```
 videofx [videos...] --effect <name[,name...]> [flags]
+videofx calibrate <source-video> [flags]          # suggest a --quality value; see Calibrating quality
 ```
 
 Flags:
@@ -88,7 +89,7 @@ Flags:
 - `--fixed-zoom` — gocv-stabilizer only: `--edge-mode=fixed`'s zoom fraction (`0.12` = 12%). Ignored by the other two modes. Default `0.12`.
 - `--max-zoom` — gocv-stabilizer only: `--edge-mode=adaptive`'s zoom cap fraction (`0` = uncapped, the default). When it binds, the offending frames' stabilization is weakened rather than exposing a black border — measured **worse** for crop-vs-shake-reduction than simply lowering `--sigma` for the same crop budget (see Performance below), so prefer that first.
 - `--sigma` — gocv-stabilizer only: override the strength-derived Gaussian smoothing sigma directly, in analysis frames (`0` = derive from `--strength`; the `--strength` default of `0.5` derives sigma `17`, this project's measured default).
-- `--quality` — gocv-stabilizer only: constant-quality level for the HEVC (`hevc_videotoolbox`) encode, `1`–`100` on VideoToolbox's own scale where **higher is better quality / larger file**. Default `0` = leave the encoder's built-in default rate control in place (the original behavior — no `-q:v` emitted). This is `gocv-stabilizer`'s counterpart to warp-stabilizer's `--crf`, but the scales are **unrelated and opposite** (CRF is x264/x265, `0`–`51`, lower-is-better), so `--crf` is ignored here and `--quality` is ignored by `warp-stabilizer`. Constant-quality HEVC via VideoToolbox is Apple-Silicon-only.
+- `--quality` — gocv-stabilizer only: constant-quality level for the HEVC (`hevc_videotoolbox`) encode, `1`–`100` on VideoToolbox's own scale where **higher is better quality / larger file**. **Default `55`**, measured to keep the re-encode visually transparent to the source on typical 4K action footage (VMAF ~98, landing near the source's own bitrate) — run [`videofx calibrate`](#calibrating-quality) to find the right value for a different camera. Pass `0` to leave the encoder's built-in default rate control in place (no `-q:v` emitted — the original, much lower-bitrate behavior). This is `gocv-stabilizer`'s counterpart to warp-stabilizer's `--crf`, but the scales are **unrelated and opposite** (CRF is x264/x265, `0`–`51`, lower-is-better), so `--crf` is ignored here and `--quality` is ignored by `warp-stabilizer`. Constant-quality HEVC via VideoToolbox is Apple-Silicon-only.
 - `--sidecar` — gocv-stabilizer only: path to cache the (expensive, multi-minute on a long 4K60 clip) motion-analysis pass so it can be reused across renders — if the file exists it's read instead of re-analyzing; otherwise a fresh analysis is written there. Useful for iterating on `--edge-mode`/`--sigma`/`--max-zoom` without re-analyzing every time. **Not safe to share across a concurrent multi-file batch** (`--concurrency` > 1 with more than one input) — use it only when processing a single input file.
 - `--analysis-width` — gocv-stabilizer only: width in pixels at which motion is estimated (`0` = default `960`; height derived). Larger localizes features more finely but is slower. **Experimental**: on the test footage it did not measurably reduce residual shake — the residual there is real low-frequency motion the smoother keeps, not estimation noise — so whether a higher width yields visibly cleaner warps is an eyeball call. The chosen width is baked into a `--sidecar`'s cached analysis, so change `--analysis-width` and `--sidecar` together (or delete the sidecar) to re-analyze.
 - `--fit` — **telemetry only**, and **required** when `--effect telemetry` (Cobra can't express a conditional-required flag, so this is validated by hand at startup with a clear error if missing). Path to the Garmin FIT activity file to sync GPS/telemetry from.
@@ -236,6 +237,47 @@ produces `run - telemetry.mp4` (stream-copied video + audio + muxed SRT +
 location tag) and, because `--gpx` was passed, `run - telemetry.gpx` next to
 the original. Drop `--subtitle`/`--gpx` (the defaults) to get just the
 location-tagged clip.
+
+## Calibrating quality
+
+`gocv-stabilizer` re-encodes with `hevc_videotoolbox`, and its `--quality`
+default of `55` is tuned for typical 4K action footage. A different camera
+(or bitrate/codec profile) may want a different number. There is **no way to
+read the right value off the source** — HEVC files don't store the quality
+they were encoded at, and VideoToolbox's `-q:v` is an opaque encoder-internal
+index — so `videofx calibrate` **measures** it:
+
+```
+videofx calibrate "my-clip.mp4"
+```
+
+It encodes a short segment of the source at several `-q:v` values, scores
+each against the source with **VMAF**, and reports the lowest `--quality`
+that stays visually transparent (VMAF ≥ `--target-vmaf`, default `96`):
+
+```
+  --quality   VMAF      segment bitrate
+  45          87.04     39.8 Mbps
+  55          97.66     69.8 Mbps   <- suggested
+  65          99.58     103.0 Mbps
+
+Suggested: --quality 55  (lowest tested value reaching VMAF 96.0)
+```
+
+Reuse that number for every clip from the same camera — the transparent
+`-q:v` is a property of the codec and the footage, not the individual file.
+
+Notes:
+
+- Requires an ffmpeg built with **libvmaf** (Homebrew's ffmpeg has it).
+- Calibration measures the encoder against the **unstabilized** source on
+  purpose: stabilization warps and crops the frame, and comparing the
+  stabilized result to the source with VMAF would measure the *warp*, not the
+  encode. The transparent quality transfers to the stabilized render anyway.
+- Point `--ss` at a **busy** (motion/detail-heavy) stretch — a static opening
+  under-estimates the quality busier footage needs. Tune the sweep with
+  `--candidates`, the segment length with `--duration`, and strictness with
+  `--target-vmaf`.
 
 ## Performance
 
