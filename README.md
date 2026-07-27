@@ -2,15 +2,21 @@
 
 A CLI that applies effects to video files without ever modifying the originals.
 
-Two independent video stabilizers are available, selected via `--effect`:
+Three effects are available, selected via `--effect` (and combinable — pass
+several to apply them as a pipeline, see [Chaining effects](#chaining-effects)):
 
 - **`gocv-stabilizer`** — this project's own GoCV/OpenCV-based implementation
   (feature tracking + RANSAC motion estimation, Gaussian trajectory smoothing,
-  single-warp correction). Faster, and the recommended default.
+  single-warp correction). Faster, and the recommended default stabilizer.
 - **`warp-stabilizer`** — ffmpeg's `libvidstab` filters
   (`vidstabdetect`/`vidstabtransform`). Kept working as an A/B baseline to
   compare `gocv-stabilizer` against; much slower on 4K+ footage (see
   Performance below).
+- **`telemetry`** — copies GPS and exercise telemetry from a Garmin FIT
+  activity file onto a video clip: a location tag, plus an optional GPX
+  sidecar (`--gpx`) and/or muxed subtitle track (`--subtitle`), time-synced
+  to the clip. The video/audio are stream-copied (no re-encode — lossless and
+  fast). See Telemetry below.
 
 ## Requirements
 
@@ -46,6 +52,9 @@ Two independent video stabilizers are available, selected via `--effect`:
 
   `gocv-stabilizer` has no dependency on libvidstab at all — the two effects'
   dependency checks are independent, so missing one never blocks the other.
+- `telemetry` needs only the same generic `ffmpeg`/`ffprobe` baseline as
+  `gocv-stabilizer` — its mux is stream-copy only, so it has no libvidstab
+  dependency either.
 
 ## Build
 
@@ -58,17 +67,18 @@ make build
 ## Usage
 
 ```
-videofx [videos...] --effect <name> [flags]
+videofx [videos...] --effect <name[,name...]> [flags]
 ```
 
 Flags:
 
-- `--effect` (required) — effect to apply: `gocv-stabilizer` or `warp-stabilizer`.
+- `--effect` (required) — effect(s) to apply: `gocv-stabilizer`, `warp-stabilizer`, or `telemetry`. Comma-separate (or repeat the flag) to **chain** several, applied left-to-right — see [Chaining effects](#chaining-effects). Each effect's flags still apply to whichever effect in the chain they belong to.
 - `--strength` — effect strength, `0.0` (subtle) to `1.0` (strong). Default `0.5`.
 - `--output-dir` — write results here instead of alongside each input.
-- `--concurrency` — number of videos to process in parallel. Default `1`.
+- `--suffix` — override the filename suffix appended before the extension. By default each effect supplies its own (`gocv-stabilizer` → `gocv-stabilized`, `warp-stabilizer` → `stabilized`, `telemetry` → `telemetry`), so `clip.mp4` becomes e.g. `clip - gocv-stabilized.mp4`; `--suffix stable` makes it `clip - stable.mp4` instead. The ` - ` separator and the collision counter (`clip - stable - 1.mp4`, …) are added automatically, so give just the word. Applies to every input in the batch, and to any sidecar an effect derives from the output name (e.g. `telemetry`'s `.gpx`). Must not contain a path separator (the output is always a sibling of the input, never redirected elsewhere — use `--output-dir` to change the directory).
+- `--concurrency` — number of videos to process in parallel. Default `1`. When it is greater than `1` and more than one file is given, the batch is dispatched **largest-first** (see [Batch ordering](#batch-ordering) below) so the overall run finishes as quickly as possible.
 - `--preset` — encoder speed/quality preset (`ultrafast`…`veryslow`). **warp-stabilizer only** — see Performance below; `gocv-stabilizer`'s encoder is currently hardcoded (see Design) and ignores this. Default `veryfast`.
-- `--crf` — encoder constant rate factor: lower = higher quality/bigger file, higher = faster/smaller. **warp-stabilizer only**, same reason as `--preset`. Default `23`.
+- `--crf` — encoder constant rate factor: lower = higher quality/bigger file, higher = faster/smaller. **warp-stabilizer only** (libx264), same reason as `--preset`. Default `23`. For `gocv-stabilizer`'s quality use `--quality` instead — the scales are unrelated (see below); passing `--crf` with `gocv-stabilizer` prints a warning and is otherwise ignored.
 - `--threads` — encoder/decoder thread count. **warp-stabilizer only**, same reason. `0` (default) lets ffmpeg pick, which is normally all cores.
 - `--hwaccel-decode` — use hardware-accelerated decode where available. **warp-stabilizer only** (`gocv-stabilizer`'s decoder already always requests hardware decode, unconditionally).
 - `--vidstab-accuracy` — warp-stabilizer only: motion search accuracy, `1` (fast) to `15` (slow/precise). Default `9`. This is a compute/precision dial, independent of `--strength`.
@@ -78,8 +88,15 @@ Flags:
 - `--fixed-zoom` — gocv-stabilizer only: `--edge-mode=fixed`'s zoom fraction (`0.12` = 12%). Ignored by the other two modes. Default `0.12`.
 - `--max-zoom` — gocv-stabilizer only: `--edge-mode=adaptive`'s zoom cap fraction (`0` = uncapped, the default). When it binds, the offending frames' stabilization is weakened rather than exposing a black border — measured **worse** for crop-vs-shake-reduction than simply lowering `--sigma` for the same crop budget (see Performance below), so prefer that first.
 - `--sigma` — gocv-stabilizer only: override the strength-derived Gaussian smoothing sigma directly, in analysis frames (`0` = derive from `--strength`; the `--strength` default of `0.5` derives sigma `17`, this project's measured default).
+- `--quality` — gocv-stabilizer only: constant-quality level for the HEVC (`hevc_videotoolbox`) encode, `1`–`100` on VideoToolbox's own scale where **higher is better quality / larger file**. Default `0` = leave the encoder's built-in default rate control in place (the original behavior — no `-q:v` emitted). This is `gocv-stabilizer`'s counterpart to warp-stabilizer's `--crf`, but the scales are **unrelated and opposite** (CRF is x264/x265, `0`–`51`, lower-is-better), so `--crf` is ignored here and `--quality` is ignored by `warp-stabilizer`. Constant-quality HEVC via VideoToolbox is Apple-Silicon-only.
 - `--sidecar` — gocv-stabilizer only: path to cache the (expensive, multi-minute on a long 4K60 clip) motion-analysis pass so it can be reused across renders — if the file exists it's read instead of re-analyzing; otherwise a fresh analysis is written there. Useful for iterating on `--edge-mode`/`--sigma`/`--max-zoom` without re-analyzing every time. **Not safe to share across a concurrent multi-file batch** (`--concurrency` > 1 with more than one input) — use it only when processing a single input file.
 - `--analysis-width` — gocv-stabilizer only: width in pixels at which motion is estimated (`0` = default `960`; height derived). Larger localizes features more finely but is slower. **Experimental**: on the test footage it did not measurably reduce residual shake — the residual there is real low-frequency motion the smoother keeps, not estimation noise — so whether a higher width yields visibly cleaner warps is an eyeball call. The chosen width is baked into a `--sidecar`'s cached analysis, so change `--analysis-width` and `--sidecar` together (or delete the sidecar) to re-analyze.
+- `--fit` — **telemetry only**, and **required** when `--effect telemetry` (Cobra can't express a conditional-required flag, so this is validated by hand at startup with a clear error if missing). Path to the Garmin FIT activity file to sync GPS/telemetry from.
+- `--offset` — telemetry only: clock-skew offset in seconds between the camera and the FIT-recording device, signed and fractional. Default `0`. See Telemetry below for the sync model. A **non-zero** offset also rewrites the output's `creation_time` to the corrected instant (and re-bases the GPX/subtitle timeline to match), so the clip finally carries its true wall-clock start.
+- `--subtitle` — telemetry only: **also** mux a `mov_text` subtitle track of the telemetry (one cue per second). **Off by default** — the location tag is always produced regardless; the subtitle track is opt-in because many players show it unbidden.
+- `--gpx` — telemetry only: **also** write a GPX sidecar next to the output (`clip - telemetry.gpx`). **Off by default** — most runs just want the muxed clip; the sidecar is a separate deliverable for map tools and re-syncing, so it's opt-in.
+- `--telemetry-stryd` — telemetry only: include Stryd running-dynamics developer fields (Form Power, Leg Spring Stiffness, ...) in the GPX sidecar and muxed SRT. Off by default.
+- `--strength` is accepted but **ignored** by `telemetry` — there is no "how strong" dial for attaching telemetry to a clip, so `ValidateStrength` accepts any value.
 
 Example:
 
@@ -87,21 +104,138 @@ Example:
 videofx vacation.mp4 hike.mov --effect gocv-stabilizer --strength 0.7
 ```
 
-This produces `vacation_gocv-stabilized.mp4` and `hike_gocv-stabilized.mov`
+This produces `vacation - gocv-stabilized.mp4` and `hike - gocv-stabilized.mov`
 next to the originals (`warp-stabilizer` instead produces
-`vacation_stabilized.mp4`/`hike_stabilized.mov` — the two effects use
+`vacation - stabilized.mp4`/`hike - stabilized.mov` — the two effects use
 different filename suffixes so their outputs never collide, which matters
 for A/B comparison). Originals are never touched. If the target filename
-already exists, a numeric counter is appended (`vacation_gocv-stabilized_1.mp4`,
+already exists, a numeric counter is appended (`vacation - gocv-stabilized - 1.mp4`,
 etc.) instead of overwriting anything.
 
-Both effects preserve the source's audio and metadata. In particular the
+Both stabilizers preserve the source's audio and metadata. In particular the
 container- and stream-level **`creation_time`** is copied onto the output
 (downstream tools rely on it to sync a clip with external data such as
 Garmin FIT GPS/exercise tracks), along with other original tags like
 `language` and `handler_name`. This is a merge: the structural tags that
 describe the newly encoded file (codec brands, encoder string) stay
 correct — the source's tags do not overwrite them.
+
+### Chaining effects
+
+Pass several effects to `--effect` (comma-separated, or by repeating the
+flag) to apply them as a **pipeline**, left to right: the first effect reads
+the original file, and each subsequent effect reads the previous effect's
+output. Only the final result is kept — the intermediate between two effects
+is written to a temp file and deleted as soon as the next effect has
+consumed it (so a long clip needs room for one extra copy, not one per
+stage). The original is only ever read.
+
+```
+videofx run.mp4 --effect gocv-stabilizer,telemetry --fit "run.fit"
+```
+
+produces `run - gocv-stabilized - telemetry.mp4` (add `--gpx` for its
+`.gpx` sidecar): the clip is stabilized first, then the FIT telemetry is
+attached to the stabilized video. The final filename **chains each effect's
+suffix** in
+order (a `--suffix` override replaces the whole chain with one word); the
+` - ` separator and collision counter work exactly as for a single effect.
+
+Notes:
+
+- **Order matters, and it's yours to choose.** `gocv-stabilizer,telemetry`
+  is the sensible order — the stabilizer preserves `creation_time` onto its
+  output, which telemetry then reads to sync (see [Sync model](#sync-model)).
+  The reverse, `telemetry,gocv-stabilizer`, would have the stabilizer
+  re-encode away the telemetry the first step just muxed in, so videofx
+  prints a warning if `telemetry` is not last (a `--gpx` sidecar, if
+  requested, survives either way).
+- Each effect's own flags apply to whichever effect in the chain they belong
+  to (`--sigma` to `gocv-stabilizer`, `--offset` to `telemetry`, …). A single
+  `--strength` is shared by all (each maps it its own way; `telemetry`
+  ignores it).
+- Listing the same effect twice is rejected.
+- A failure partway through the chain reports which effect failed and leaves
+  no partial output behind; other input files in the batch are unaffected.
+
+## Telemetry
+
+`--effect telemetry` copies GPS and exercise telemetry from a Garmin FIT
+activity file onto a video clip, producing:
+
+- The output video. Only when `--subtitle` is passed is a `mov_text`
+  subtitle track muxed in (one cue per second: GPS coordinates or an
+  explicit "GPS: no fix" marker, plus a pipe-separated readout of
+  distance/pace/heart rate/elevation/power/cadence/temperature — see
+  `internal/telemetry`'s `WriteSRT` for the exact format). Without it the
+  video/audio pass through untouched.
+- A GPX 1.1 sidecar next to the output (`clip - telemetry.mp4` ->
+  `clip - telemetry.gpx`), **only when `--gpx` is passed**, for tools that
+  consume a track file directly (Garmin Connect, DashWare, GPS-overlay
+  software, ...) rather than reading the muxed subtitle.
+- A global `location` metadata tag (and, for Apple players, the
+  `com.apple.quicktime.location.ISO6709` variant), set from the clip's
+  first GPS-having telemetry point. When that point also has an elevation
+  reading, the tag carries the three-component ISO 6709 form
+  (`±lat±lon±alt/`, e.g. `-27.9445+153.4102+005.584/`) — the same shape
+  iPhones write — and falls back to lat/lon only (`±lat±lon/`) otherwise.
+
+**The video and audio are stream-copied, not re-encoded** — the whole
+operation is just an ffmpeg mux (`-c:v copy -c:a copy`), so it is lossless
+and fast (well under 2 seconds on a 16s 4K60 clip; see Performance below),
+unlike the stabilizers which fully decode and re-encode every frame.
+Container metadata (`creation_time` above all) is carried through via
+`-map_metadata 0`, same rationale as the stabilizers.
+
+### Sync model
+
+Telemetry sync depends on the clip's container **`creation_time`** — the
+same tag the stabilizers preserve onto their own output (see above), which
+means `telemetry` composes with them: stabilize first, then run `telemetry`
+against the stabilized output, and the sync still works. A clip with no
+`creation_time` at all cannot be synced and `telemetry` fails with a clear
+error rather than guessing; a `creation_time` with no timezone marker is
+assumed to be UTC with a warning printed to stderr.
+
+The FIT file's timestamps are matched against the clip using:
+
+```
+fit_time(pts) = creation_time + offset + pts
+```
+
+`--offset` corrects clock skew between the camera and the FIT-recording
+device (a watch's clock and a camera's clock are rarely in perfect sync):
+a **positive** offset means the camera's clock reads **behind** the
+watch's, so `creation_time` needs to be pushed forward to line up with the
+FIT timeline. `--offset 0` (the default) assumes the two clocks agreed
+exactly.
+
+When `--offset` is **non-zero**, `telemetry` also rewrites the output's
+`creation_time` to the corrected instant (`creation_time + offset`) so the
+clip's own metadata finally reads the true recording time — the whole point
+of measuring the skew — and it re-bases the GPX/subtitle timeline onto that
+same corrected clock so the sidecar stays aligned with the (now-corrected)
+video. With `--offset 0` the `creation_time` is left exactly as the source
+carried it. (Previously the output always kept the camera's original,
+possibly-skewed `creation_time`; a non-zero offset now folds the correction
+into the file itself.)
+
+If the clip's resolved time window falls entirely outside the FIT file's
+recorded coverage, `telemetry` fails with an error (wrong FIT file, or a
+wrong `--offset`, are the two likely causes). If only part of the window
+overlaps, it proceeds but warns on stderr and emits telemetry for the
+overlapping part only — it never silently truncates without saying so.
+
+Example:
+
+```
+videofx run.mp4 --effect telemetry --fit "2026-07-05 063256 Run.fit" --offset 0 --subtitle --gpx
+```
+
+produces `run - telemetry.mp4` (stream-copied video + audio + muxed SRT +
+location tag) and, because `--gpx` was passed, `run - telemetry.gpx` next to
+the original. Drop `--subtitle`/`--gpx` (the defaults) to get just the
+location-tagged clip.
 
 ## Performance
 
@@ -122,10 +256,13 @@ on the same footage (below). Peak RSS stays flat (~120-135MB) regardless of
 frame count — every `gocv.Mat` this pipeline allocates per frame is reused,
 not leaked; see `internal/vidio`'s and `internal/stabilize`'s doc comments.
 
-`--preset`/`--crf`/`--threads`/`--hwaccel-decode` currently do nothing for
-this effect: `internal/vidio`'s decoder/encoder are hardcoded to
-`-hwaccel videotoolbox` decode and `hevc_videotoolbox` hardware encode, with
-no exposed knobs to plumb those flags into yet.
+`--preset`/`--crf`/`--threads`/`--hwaccel-decode` do nothing for this effect:
+`internal/vidio`'s decoder/encoder use `-hwaccel videotoolbox` decode and
+`hevc_videotoolbox` hardware encode, whose knobs don't match those
+libx264-shaped flags (`--preset`/`--threads` have no VideoToolbox equivalent;
+CRF is an x264/x265 concept unrelated to VideoToolbox's scale). Encode
+**quality** is exposed instead via `--quality` (VideoToolbox's native `-q:v`,
+`1`–`100`, higher-is-better) — see the Usage flag list.
 
 **Crop vs. shake reduction is the real tuning knob**, controlled by `--sigma`
 (or `--strength`, which derives it). Larger sigma removes more shake but
@@ -201,6 +338,46 @@ Other levers, roughly in order of impact:
   count of the same-length 30fps clip, so total run time scales linearly
   with fps as well as resolution.
 
+### telemetry
+
+`telemetry` does no decode/encode at all — the entire cost is one ffmpeg
+mux (stream-copy in, stream-copy out). Measured end to end on
+`test_videos/test_small.mp4` (4K60 HEVC, ~16.2s, 972 frames) against the
+real `test_videos/2026-07-05 063256 Run.fit` sample: **under 2 seconds**
+total (ffmpeg's own reported mux speed was 100x+ realtime — 0.13-0.15s of
+actual ffmpeg time; the rest is process startup, the FIT decode, and
+writing the GPX/SRT sidecars), versus the many seconds to minutes a
+decode+re-encode pass would cost the stabilizers on the same clip. There is
+nothing to tune here — no `--preset`/`--crf`/`--threads`/`--hwaccel-decode`
+apply, since there is no encoder in the pipeline at all.
+
+### Batch ordering
+
+When `--concurrency` > 1 and more than one file is given, the batch is
+dispatched **largest-first** (Longest-Processing-Time-first scheduling): the
+estimated most-time-consuming clip starts first, the shortest last. This
+minimizes the batch's overall wall-clock time (its *makespan*). The failure
+mode it avoids is a big clip getting picked up last and running alone, long
+after the other workers have finished their share and gone idle; starting
+the big ones first means the small clips are what fill the tail, keeping
+every worker busy for as long as there is any work left.
+
+The per-clip cost estimate is **total pixels processed** — frame count
+(ffprobe's `nb_frames`, or `duration × fps` when the container doesn't
+record a count) times frame area. Stabilization is a per-frame decode →
+analyze → warp → encode pipeline, so its cost scales with frame count, and
+the per-frame decode/warp/encode cost scales with pixel area — so
+`frames × width × height` tracks real processing time across clips that
+differ in both length and resolution. (For a uniform-resolution batch the
+area is a constant factor and this is just ordering by frame count.) It is
+a cheap `ffprobe` per file, done up front only when concurrency and job
+count make reordering worthwhile; a probe failure is non-fatal (that clip
+sorts last and its real error surfaces when processing actually reaches it).
+The returned per-file results are always reported in the original
+command-line order regardless of the order they ran in. This ordering is
+handled in `internal/video` and applies to every effect, but it matters
+most for the compute-heavy stabilizers, where a bad order costs the most.
+
 ## Design
 
 See `internal/effects` for the `Effect` interface and registry — new effects
@@ -227,6 +404,15 @@ detail:
 `warp-stabilizer` (`internal/effects/warpstab.go`) is independent of both —
 it shells out directly to `vidstabdetect`/`vidstabtransform` and does not
 use `internal/vidio` or `internal/stabilize` at all.
+
+`telemetry` (`internal/effects/telemetry.go`) is independent of all three of
+the above. It is a thin CLI wrapper around `internal/telemetry` (FIT decode,
+time sync, GPX/SRT emission — see that package's own doc comment for the
+full decode → sync → re-basing → emission pipeline) plus one ffmpeg mux
+command (`muxArgs`) it drives through the same `runner.Runner` abstraction
+`warp-stabilizer` uses, so the exact mux flags are unit-testable without a
+real ffmpeg. It uses `internal/vidio` only for `Probe` (to read the source's
+`creation_time`/duration), never its decode/encode pipeline.
 
 ## A note on go.mod
 

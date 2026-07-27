@@ -51,14 +51,17 @@ func init() {
 //
 // PerfOptions/Tunable is deliberately NOT implemented here: unlike
 // WarpStabilizer (which builds its own ffmpeg command lines and can wire
-// -preset/-crf/-threads/-hwaccel straight through), internal/vidio's
-// Decoder/Encoder are currently hardcoded to `-hwaccel videotoolbox`
-// decode and `hevc_videotoolbox` hardware encode with no
-// preset/CRF/thread knobs at all (see internal/vidio/decoder.go,
-// encoder.go) -- there is nothing for PerfOptions to plumb through yet,
-// and implementing Tunable as a silent no-op would be misleading about
-// what --preset/--crf/--threads/--hwaccel-decode actually do for this
-// effect (nothing, currently).
+// -preset/-crf/-threads/-hwaccel straight through to libx264), internal/
+// vidio's Decoder/Encoder use `-hwaccel videotoolbox` decode and
+// `hevc_videotoolbox` hardware encode, whose knobs do NOT match
+// PerfOptions' libx264-shaped fields: -preset/-threads have no
+// VideoToolbox equivalent, and CRF is an x264/x265 concept unrelated to
+// VideoToolbox's own 1-100 quality scale. Implementing Tunable would
+// therefore be misleading about what --preset/--crf/--threads actually do
+// for this effect (nothing). Quality IS controllable, but through this
+// effect's own Quality field (wired from --quality) which maps to
+// VideoToolbox's native -q:v -- not through the mismatched PerfOptions.CRF;
+// see the Quality field below and vidio.EncoderConfig.Quality.
 type GoCVStabilizer struct {
 	// TrackOptions controls Phase 2's feature tracking / RANSAC fit
 	// (corner count, quality, forward-backward threshold, ...). Not
@@ -128,6 +131,17 @@ type GoCVStabilizer struct {
 	// to read/write the same file. Use SidecarPath only when processing a
 	// single input file.
 	SidecarPath string
+
+	// Quality selects the HEVC encoder's constant-quality level for the
+	// render pass, on hevc_videotoolbox's native 1-100 scale (higher =
+	// better/larger) -- see vidio.EncoderConfig.Quality. It is deliberately
+	// NOT the same knob as PerfOptions.CRF: this effect encodes with
+	// VideoToolbox, whose quality scale is unrelated to x264/x265's CRF, so
+	// GoCVStabilizer does not implement Tunable and takes this as its own
+	// field (wired from --quality, alongside Sigma/MaxZoom/... in
+	// cmd/root.go's configureEffect). 0 (the default) leaves the encoder's
+	// built-in default rate control untouched.
+	Quality int
 }
 
 func (g *GoCVStabilizer) Name() string         { return "gocv-stabilizer" }
@@ -191,6 +205,7 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 		EdgeMode:  edgeMode,
 		FixedZoom: g.FixedZoom,
 		MaxZoom:   g.MaxZoom,
+		Quality:   g.Quality,
 	}
 
 	if _, err := stabilize.Render(ctx, in.SourcePath, series, result, renderOpts, in.OutputPath); err != nil {

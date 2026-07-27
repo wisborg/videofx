@@ -1,6 +1,9 @@
 package vidio
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestParseFrameRate(t *testing.T) {
 	cases := []struct {
@@ -85,6 +88,81 @@ func TestParseProbeJSON_NoVideoStreamIsError(t *testing.T) {
 	data := []byte(`{"streams": [{"codec_type": "audio"}], "format": {"duration": "1.0"}}`)
 	if _, err := parseProbeJSON(data); err == nil {
 		t.Fatal("expected an error when the source has no video stream")
+	}
+}
+
+func TestParseProbeJSON_CreationTime_ZForm(t *testing.T) {
+	// This is the exact string ffprobe emits for test_videos/test_small.mp4
+	// (measured by hand: `ffprobe -show_format` against that file).
+	data := []byte(`{
+		"streams": [{"codec_type": "video", "width": 3840, "height": 2160, "r_frame_rate": "60000/1001", "avg_frame_rate": "60000/1001"}],
+		"format": {"duration": "16.216200", "tags": {"creation_time": "2026-07-04T21:05:53.000000Z"}}
+	}`)
+	info, err := parseProbeJSON(data)
+	if err != nil {
+		t.Fatalf("parseProbeJSON returned error: %v", err)
+	}
+	if !info.HasCreationTime {
+		t.Fatal("HasCreationTime = false, want true")
+	}
+	if info.CreationTimeNaive {
+		t.Error("CreationTimeNaive = true, want false: this value has a trailing Z")
+	}
+	want := time.Date(2026, 7, 4, 21, 5, 53, 0, time.UTC)
+	if !info.CreationTime.Equal(want) {
+		t.Errorf("CreationTime = %v, want %v", info.CreationTime, want)
+	}
+}
+
+func TestParseProbeJSON_CreationTime_Absent(t *testing.T) {
+	data := []byte(`{
+		"streams": [{"codec_type": "video", "width": 640, "height": 480, "r_frame_rate": "25/1", "avg_frame_rate": "25/1"}],
+		"format": {"duration": "1.0"}
+	}`)
+	info, err := parseProbeJSON(data)
+	if err != nil {
+		t.Fatalf("parseProbeJSON returned error: %v", err)
+	}
+	if info.HasCreationTime {
+		t.Errorf("HasCreationTime = true (CreationTime=%v), want false: no tags object at all", info.CreationTime)
+	}
+	if info.CreationTimeNaive {
+		t.Error("CreationTimeNaive = true, want false when the tag is absent")
+	}
+}
+
+func TestParseProbeJSON_CreationTime_NaiveNoTimezone(t *testing.T) {
+	data := []byte(`{
+		"streams": [{"codec_type": "video", "width": 640, "height": 480, "r_frame_rate": "25/1", "avg_frame_rate": "25/1"}],
+		"format": {"duration": "1.0", "tags": {"creation_time": "2026-07-04T21:05:53"}}
+	}`)
+	info, err := parseProbeJSON(data)
+	if err != nil {
+		t.Fatalf("parseProbeJSON returned error: %v", err)
+	}
+	if !info.HasCreationTime {
+		t.Fatal("HasCreationTime = false, want true: the value parses, just with no timezone marker")
+	}
+	if !info.CreationTimeNaive {
+		t.Error("CreationTimeNaive = false, want true: this value has no Z/offset, so its true timezone is unknown")
+	}
+	want := time.Date(2026, 7, 4, 21, 5, 53, 0, time.UTC)
+	if !info.CreationTime.Equal(want) {
+		t.Errorf("CreationTime = %v, want %v (parsed as if UTC)", info.CreationTime, want)
+	}
+}
+
+func TestParseProbeJSON_CreationTime_Garbage(t *testing.T) {
+	data := []byte(`{
+		"streams": [{"codec_type": "video", "width": 640, "height": 480, "r_frame_rate": "25/1", "avg_frame_rate": "25/1"}],
+		"format": {"duration": "1.0", "tags": {"creation_time": "not-a-timestamp"}}
+	}`)
+	info, err := parseProbeJSON(data)
+	if err != nil {
+		t.Fatalf("parseProbeJSON returned error: %v, want a successful parse with creation_time simply unresolved", err)
+	}
+	if info.HasCreationTime {
+		t.Errorf("HasCreationTime = true (CreationTime=%v), want false for an unparseable tag value", info.CreationTime)
 	}
 }
 

@@ -63,6 +63,47 @@ func TestEncoderArgs_CopiesMetadataWhenSourceGiven(t *testing.T) {
 	}
 }
 
+// TestEncoderArgs_Quality pins VideoToolbox's constant-quality wiring: a
+// positive Quality emits `-q:v N` bound to the video encoder (immediately
+// after -c:v, before -tag:v), and the zero value emits no -q:v at all so the
+// default-rate-control argument list is byte-for-byte the pre-existing one.
+func TestEncoderArgs_Quality(t *testing.T) {
+	t.Run("positive quality emits -q:v after the codec", func(t *testing.T) {
+		args := encoderArgs(EncoderConfig{
+			OutputPath: "out.mp4", Width: 1920, Height: 1080, FPS: 30, Quality: 60,
+		})
+		if !containsPair(args, "-q:v", "60") {
+			t.Fatalf("expected -q:v 60 in args: %v", args)
+		}
+		// -q:v must follow -c:v hevc_videotoolbox (so it binds to this
+		// encoder) and precede the output path.
+		ci, qi := -1, -1
+		for i, a := range args {
+			switch a {
+			case "-c:v":
+				ci = i
+			case "-q:v":
+				qi = i
+			}
+		}
+		oi := len(args) - 1
+		if !(ci >= 0 && ci < qi && qi < oi) {
+			t.Errorf("expected order -c:v(%d) < -q:v(%d) < output(%d): %v", ci, qi, oi, args)
+		}
+	})
+
+	t.Run("zero quality omits -q:v entirely", func(t *testing.T) {
+		args := encoderArgs(EncoderConfig{
+			OutputPath: "out.mp4", Width: 1920, Height: 1080, FPS: 30, Quality: 0,
+		})
+		for _, a := range args {
+			if a == "-q:v" {
+				t.Errorf("Quality 0 must not emit -q:v (leaves encoder default): %v", args)
+			}
+		}
+	})
+}
+
 func TestOpenEncoder_RejectsBadConfig(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
@@ -73,6 +114,8 @@ func TestOpenEncoder_RejectsBadConfig(t *testing.T) {
 		{"zero width", EncoderConfig{OutputPath: "out.mp4", Width: 0, Height: 10, FPS: 30}},
 		{"negative height", EncoderConfig{OutputPath: "out.mp4", Width: 10, Height: -1, FPS: 30}},
 		{"zero fps", EncoderConfig{OutputPath: "out.mp4", Width: 10, Height: 10, FPS: 0}},
+		{"quality below range", EncoderConfig{OutputPath: "out.mp4", Width: 10, Height: 10, FPS: 30, Quality: -1}},
+		{"quality above range", EncoderConfig{OutputPath: "out.mp4", Width: 10, Height: 10, FPS: 30, Quality: 101}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

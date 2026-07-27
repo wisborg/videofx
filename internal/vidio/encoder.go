@@ -45,6 +45,15 @@ type EncoderConfig struct {
 	// Leave empty to produce a video-only file with default metadata (e.g.
 	// in tests with a synthetic source).
 	SourcePath string
+	// Quality selects hevc_videotoolbox's constant-quality mode via -q:v,
+	// on VideoToolbox's own 1-100 scale where HIGHER is better quality (and
+	// a larger file) -- the opposite direction and a different scale from
+	// x264/x265's CRF. Constant-quality HEVC is Apple-Silicon-only, which is
+	// this encoder's target. 0 (the zero value) omits -q:v entirely, leaving
+	// the encoder's built-in default rate control untouched -- so a
+	// zero-value config encodes byte-for-byte as it did before this field
+	// existed. OpenEncoder rejects values outside 0..100.
+	Quality int
 }
 
 // Encoder drives an ffmpeg subprocess that reads raw BGR24 frames from a
@@ -104,7 +113,15 @@ func encoderArgs(cfg EncoderConfig) []string {
 	// present and decode fine everywhere else. "hvc1" is the tag Apple
 	// requires, and is what the source footage itself uses. See
 	// https://trac.ffmpeg.org/ticket/6389.
-	args = append(args, "-c:v", "hevc_videotoolbox", "-tag:v", "hvc1", cfg.OutputPath)
+	args = append(args, "-c:v", "hevc_videotoolbox")
+	// -q:v engages VideoToolbox constant-quality mode (see
+	// EncoderConfig.Quality). It must follow -c:v so it binds to this
+	// encoder; omitted when Quality is 0 so the default-rate-control path is
+	// exactly the pre-existing argument list.
+	if cfg.Quality > 0 {
+		args = append(args, "-q:v", strconv.Itoa(cfg.Quality))
+	}
+	args = append(args, "-tag:v", "hvc1", cfg.OutputPath)
 	return args
 }
 
@@ -122,6 +139,9 @@ func OpenEncoder(ctx context.Context, cfg EncoderConfig) (*Encoder, error) {
 	}
 	if cfg.FPS <= 0 {
 		return nil, fmt.Errorf("vidio: opening encoder: FPS must be positive, got %v", cfg.FPS)
+	}
+	if cfg.Quality < 0 || cfg.Quality > 100 {
+		return nil, fmt.Errorf("vidio: opening encoder: Quality must be in 0..100 (0 = encoder default), got %d", cfg.Quality)
 	}
 
 	cmd, capture := newFFmpegCmd(ctx, encoderArgs(cfg)...)

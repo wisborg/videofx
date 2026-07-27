@@ -30,7 +30,7 @@ type Effect interface {
 
 	// FilenameSlug is the short word/phrase appended to the input
 	// filename when deriving the default output filename, e.g.
-	// "stabilized" -> clip_stabilized.mp4.
+	// "stabilized" -> "clip - stabilized.mp4".
 	FilenameSlug() string
 
 	// ValidateStrength returns an error if strength is out of range for

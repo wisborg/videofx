@@ -4,7 +4,10 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -16,9 +19,10 @@ import (
 )
 
 var (
-	effectName  string
+	effectNames []string
 	strength    float64
 	outputDir   string
+	suffix      string
 	concurrency int
 
 	preset        string
@@ -36,6 +40,13 @@ var (
 	sigma         float64
 	sidecarPath   string
 	analysisWidth int
+	quality       int
+
+	fitPath        string
+	offsetSeconds  float64
+	subtitle       bool
+	gpx            bool
+	telemetryStryd bool
 )
 
 // NewRootCmd builds the videofx root command.
@@ -52,12 +63,14 @@ func NewRootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 
-	root.Flags().StringVar(&effectName, "effect", "", fmt.Sprintf(
-		"effect to apply (available: %s)", joinEffectNames()))
+	root.Flags().StringSliceVar(&effectNames, "effect", nil, fmt.Sprintf(
+		"effect(s) to apply; comma-separate (or repeat the flag) to chain several, applied left-to-right so each reads the previous one's output, e.g. --effect gocv-stabilizer,telemetry (available: %s)", joinEffectNames()))
 	root.Flags().Float64Var(&strength, "strength", 0.5,
 		"effect strength, from 0.0 (subtle) to 1.0 (strong)")
 	root.Flags().StringVar(&outputDir, "output-dir", "",
 		"directory to write results to (default: alongside each input file)")
+	root.Flags().StringVar(&suffix, "suffix", "",
+		"override the filename suffix added before the extension (default: the effect's own, e.g. gocv-stabilizer uses \"gocv-stabilized\" to produce \"clip - gocv-stabilized.mp4\"). Joined to the name with \" - \"; must not contain a path separator")
 	root.Flags().IntVar(&concurrency, "concurrency", 1,
 		"number of videos to process in parallel")
 
@@ -95,10 +108,197 @@ func NewRootCmd() *cobra.Command {
 		"gocv-stabilizer only: path to cache/reuse the (expensive, multi-minute on a long 4K60 clip) motion-analysis pass across renders -- if the file exists it is read instead of re-analyzing, otherwise a fresh analysis is written there; useful for iterating on --edge-mode/--sigma/--max-zoom without re-analyzing every time, but NOT safe to share across a concurrent multi-file batch (process one input file at a time when using this)")
 	root.Flags().IntVar(&analysisWidth, "analysis-width", 0,
 		"gocv-stabilizer only: width in pixels at which motion is estimated (0 = default 960; height derived). Larger localizes features more finely but is slower; EXPERIMENTAL -- on the test footage it did not measurably reduce residual shake (whether it yields visibly cleaner warps is an eyeball call). NOTE: baked into a --sidecar's cached analysis, so change --analysis-width and --sidecar together (or delete the sidecar) to re-analyze")
+	root.Flags().IntVar(&quality, "quality", 0,
+		"gocv-stabilizer only: constant-quality level for the HEVC (hevc_videotoolbox) encode, 1-100 on VideoToolbox's own scale where HIGHER is better quality/larger file (0 = the encoder's built-in default rate control, the original behavior). This is the gocv-stabilizer counterpart to warp-stabilizer's --crf; the two scales are unrelated (CRF is x264/x265, lower-is-better), so --crf is ignored by gocv-stabilizer and --quality is ignored by warp-stabilizer")
+
+	root.Flags().StringVar(&fitPath, "fit", "",
+		"telemetry only: path to a Garmin FIT activity file to sync GPS/telemetry from (required with --effect telemetry)")
+	root.Flags().Float64Var(&offsetSeconds, "offset", 0,
+		"telemetry only: clock-skew offset in seconds between the camera and the FIT-recording device, signed and fractional -- fit_time = creation_time + offset + pts, so a positive offset means the camera's clock reads behind the watch's. A non-zero offset also rewrites the output's creation_time to the corrected instant (and re-bases the GPX/subtitle to match)")
+	root.Flags().BoolVar(&subtitle, "subtitle", false,
+		"telemetry only: also mux a mov_text subtitle track of the telemetry (off by default; the location tag is always produced regardless)")
+	root.Flags().BoolVar(&gpx, "gpx", false,
+		"telemetry only: also write a GPX sidecar next to the output (off by default)")
+	root.Flags().BoolVar(&telemetryStryd, "telemetry-stryd", false,
+		"telemetry only: include Stryd running-dynamics developer fields in the GPX sidecar and muxed SRT")
 
 	_ = root.MarkFlagRequired("effect")
 
 	return root
+}
+
+// resolveEffects turns the raw --effect values into an ordered pipeline of
+// Effect instances. It trims surrounding whitespace on each name (so
+// "--effect a, b" works), rejects an empty name and a duplicate (a chain
+// applying the same effect twice is almost always a mistake and would
+// produce a confusingly doubled slug), and resolves each via the registry.
+// Split out from runRoot so the parsing/validation is testable in isolation.
+func resolveEffects(names []string) ([]effects.Effect, error) {
+	if len(names) == 0 {
+		return nil, fmt.Errorf("at least one --effect is required")
+	}
+	seen := make(map[string]bool, len(names))
+	effs := make([]effects.Effect, 0, len(names))
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			return nil, fmt.Errorf("--effect contains an empty effect name")
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("effect %q is listed more than once in --effect", name)
+		}
+		seen[name] = true
+		eff, err := effects.Get(name)
+		if err != nil {
+			return nil, err
+		}
+		effs = append(effs, eff)
+	}
+	return effs, nil
+}
+
+// requireFitPath enforces --fit's conditional requirement: mandatory when
+// telemetry is one of the selected effects, irrelevant (and left
+// unvalidated) otherwise. Split out from runRoot so it's testable without
+// exercising the rest of the command (dependency checks, file
+// validation, ...).
+func requireFitPath(effectNames []string, fitPath string) error {
+	if slices.Contains(effectNames, "telemetry") && fitPath == "" {
+		return fmt.Errorf("--fit is required when --effect includes telemetry (path to a Garmin FIT activity file)")
+	}
+	return nil
+}
+
+// warnTelemetryNotLast prints a warning if telemetry appears anywhere but
+// last in the chain: a later effect that re-encodes (either stabilizer)
+// drops the muxed telemetry subtitle track and the location tag telemetry
+// just added, so "telemetry then stabilize" almost certainly isn't what the
+// user meant. It's a warning, not an error -- the ordering is the user's to
+// choose, and the GPX sidecar survives regardless.
+func warnTelemetryNotLast(w io.Writer, effs []effects.Effect) {
+	for i, e := range effs {
+		if e.Name() == "telemetry" && i != len(effs)-1 {
+			fmt.Fprintln(w, "videofx: warning: telemetry is not the last effect in the chain; a later re-encoding effect will strip the muxed telemetry subtitle track and location tag from the video (the GPX sidecar is unaffected)")
+			return
+		}
+	}
+}
+
+// validateQuality rejects a --quality outside the encoder's accepted range.
+// 0 is allowed and means "leave the encoder's default rate control in place"
+// (the pre-existing behavior); 1..100 is VideoToolbox's constant-quality
+// scale (higher = better). vidio.OpenEncoder enforces the same bound as a
+// backstop, but checking here fails the whole run once, up front, with a
+// CLI-worded message rather than a per-file encoder error. Split out from
+// runRoot so it is testable in isolation.
+func validateQuality(quality int) error {
+	if quality < 0 || quality > 100 {
+		return fmt.Errorf("--quality %d is out of range; use 1-100 (higher = better quality/larger file), or 0 for the encoder's default", quality)
+	}
+	return nil
+}
+
+// warnCRFIgnoredByGoCV prints a warning when --crf was explicitly set on the
+// command line while gocv-stabilizer is in the chain: gocv-stabilizer encodes
+// with hevc_videotoolbox, whose quality is controlled by --quality on an
+// unrelated scale, so --crf does nothing for it (it applies only to
+// warp-stabilizer's libx264 encode). Without this, a --crf that silently has
+// no effect looks exactly like the bug the user originally reported. It is a
+// warning, not an error: a chain may legitimately set --crf for a
+// warp-stabilizer step and --quality for a gocv-stabilizer step at once.
+// crfChanged is cmd.Flags().Changed("crf") -- only an explicitly-set --crf
+// warns, never the default value. Split out from runRoot so it's testable.
+func warnCRFIgnoredByGoCV(w io.Writer, crfChanged bool, effs []effects.Effect) {
+	if !crfChanged {
+		return
+	}
+	for _, e := range effs {
+		if e.Name() == "gocv-stabilizer" {
+			fmt.Fprintln(w, "videofx: warning: --crf is ignored by gocv-stabilizer (it encodes with hevc_videotoolbox, not libx264/x265); use --quality (1-100, higher = better) to control its quality")
+			return
+		}
+	}
+}
+
+// validateSuffix rejects a --suffix override that would break the
+// non-destructive-sibling-filename invariant. naming.Resolve enforces the
+// same rule (it is the actual path constructor), but checking here too
+// fails the whole run once, up front, with a clear message rather than
+// reporting the same error against every input file in the batch. Split out
+// from runRoot so it is testable in isolation.
+func validateSuffix(suffix string) error {
+	if strings.ContainsAny(suffix, `/\`) {
+		return fmt.Errorf("--suffix %q must not contain a path separator", suffix)
+	}
+	return nil
+}
+
+// checkAvailable verifies effect's external-tool dependency. It is
+// effect-specific: warp-stabilizer needs a vidstab-CAPABLE ffmpeg (a
+// stronger, differently-resolved requirement than "ffmpeg is on PATH"),
+// while every other effect (gocv-stabilizer, telemetry) needs only the
+// generic ffmpeg/ffprobe baseline. Checking the wrong one would either make
+// gocv-stabilizer fail for lacking libvidstab it never uses, or let
+// warp-stabilizer pass a check that never verified the one thing it
+// actually depends on -- see effects.AvailabilityChecker's doc comment. In
+// a chain this runs once per effect, so every effect's own requirement is
+// verified.
+func checkAvailable(effect effects.Effect) error {
+	if checker, ok := effect.(effects.AvailabilityChecker); ok {
+		return checker.CheckAvailable()
+	}
+	return runner.CheckAvailable()
+}
+
+// configureEffect applies the flag values relevant to effect's concrete
+// type. Each block is a direct type assertion rather than a generic
+// interface because the knobs are effect-specific: not every effect has a
+// perf profile, a vidstab motion-analysis pass, gocv edge-handling, or
+// telemetry-sync inputs. In a chain this is called once per effect, so each
+// effect in the pipeline picks up the flags meant for it.
+func configureEffect(effect effects.Effect) error {
+	if tunable, ok := effect.(effects.Tunable); ok {
+		tunable.SetPerfOptions(effects.PerfOptions{
+			Preset:        preset,
+			CRF:           crf,
+			Threads:       threads,
+			HWAccelDecode: hwaccelDecode,
+		})
+	}
+	if ws, ok := effect.(*effects.WarpStabilizer); ok {
+		ws.SetAnalysisOptions(effects.AnalysisOptions{
+			Accuracy:    vidstabAccuracy,
+			StepSize:    vidstabStepSize,
+			MinContrast: vidstabMinContrast,
+		})
+	}
+	if gs, ok := effect.(*effects.GoCVStabilizer); ok {
+		parsedEdgeMode, err := stabilize.ParseEdgeMode(edgeMode)
+		if err != nil {
+			return err
+		}
+		gs.EdgeMode = parsedEdgeMode
+		gs.FixedZoom = fixedZoom
+		gs.MaxZoom = maxZoom
+		gs.Sigma = sigma
+		gs.SidecarPath = sidecarPath
+		gs.AnalysisWidth = analysisWidth
+		gs.Quality = quality
+	}
+	configureTelemetry(effect)
+	return nil
+}
+
+// configureTelemetry applies --fit/--offset/--subtitle/--gpx/--telemetry-stryd
+// to effect if it is a *effects.Telemetry.
+func configureTelemetry(effect effects.Effect) {
+	if tel, ok := effect.(*effects.Telemetry); ok {
+		tel.FitPath = fitPath
+		tel.OffsetSeconds = offsetSeconds
+		tel.Subtitle = subtitle
+		tel.GPX = gpx
+		tel.IncludeStryd = telemetryStryd
+	}
 }
 
 func joinEffectNames() string {
@@ -114,66 +314,46 @@ func joinEffectNames() string {
 }
 
 func runRoot(cmd *cobra.Command, args []string) error {
-	effect, err := effects.Get(effectName)
+	effs, err := resolveEffects(effectNames)
 	if err != nil {
 		return err
 	}
+	effectCanonicalNames := make([]string, len(effs))
+	for i, e := range effs {
+		effectCanonicalNames[i] = e.Name()
+	}
 
-	// Dependency checking is effect-specific: warp-stabilizer needs a
-	// vidstab-CAPABLE ffmpeg (a stronger, differently-resolved
-	// requirement than "ffmpeg is on PATH"), while every other effect
-	// (currently gocv-stabilizer) needs the generic ffmpeg/ffprobe
-	// baseline instead. Checking the wrong one would either make
-	// gocv-stabilizer fail for lacking libvidstab it never uses, or let
-	// warp-stabilizer pass a check that never verified the one thing it
-	// actually depends on -- see effects.AvailabilityChecker's doc
-	// comment.
-	if checker, ok := effect.(effects.AvailabilityChecker); ok {
-		if err := checker.CheckAvailable(); err != nil {
-			return err
-		}
-	} else if err := runner.CheckAvailable(); err != nil {
+	// Cobra can't express "--fit is required only when telemetry is
+	// selected" (MarkFlagRequired is unconditional), so this is checked by
+	// hand, right after the effects resolve and before any I/O.
+	if err := requireFitPath(effectCanonicalNames, fitPath); err != nil {
+		return err
+	}
+	if err := validateSuffix(suffix); err != nil {
+		return err
+	}
+	if err := validateQuality(quality); err != nil {
 		return err
 	}
 
-	if err := effect.ValidateStrength(strength); err != nil {
-		return err
-	}
-	if tunable, ok := effect.(effects.Tunable); ok {
-		tunable.SetPerfOptions(effects.PerfOptions{
-			Preset:        preset,
-			CRF:           crf,
-			Threads:       threads,
-			HWAccelDecode: hwaccelDecode,
-		})
-	}
-	// vidstab-* flags are specific to the warp-stabilizer effect (not
-	// every effect has a motion-analysis pass to tune), so this is a
-	// direct type assertion rather than a generic capability interface.
-	if ws, ok := effect.(*effects.WarpStabilizer); ok {
-		ws.SetAnalysisOptions(effects.AnalysisOptions{
-			Accuracy:    vidstabAccuracy,
-			StepSize:    vidstabStepSize,
-			MinContrast: vidstabMinContrast,
-		})
-	}
-	// --edge-mode/--fixed-zoom/--max-zoom/--sigma/--sidecar are specific
-	// to the gocv-stabilizer effect, same rationale as the vidstab-*
-	// block above: a direct type assertion, not a generic interface,
-	// since not every effect has this shape of edge-handling/smoothing
-	// knobs to tune.
-	if gs, ok := effect.(*effects.GoCVStabilizer); ok {
-		parsedEdgeMode, err := stabilize.ParseEdgeMode(edgeMode)
-		if err != nil {
+	// Verify dependencies, validate strength, and apply per-effect flags for
+	// every effect in the pipeline -- see the helpers' doc comments for why
+	// each is effect-specific.
+	for _, effect := range effs {
+		if err := checkAvailable(effect); err != nil {
 			return err
 		}
-		gs.EdgeMode = parsedEdgeMode
-		gs.FixedZoom = fixedZoom
-		gs.MaxZoom = maxZoom
-		gs.Sigma = sigma
-		gs.SidecarPath = sidecarPath
-		gs.AnalysisWidth = analysisWidth
+		if err := effect.ValidateStrength(strength); err != nil {
+			return err
+		}
+		if err := configureEffect(effect); err != nil {
+			return err
+		}
 	}
+
+	warnTelemetryNotLast(cmd.ErrOrStderr(), effs)
+	warnCRFIgnoredByGoCV(cmd.ErrOrStderr(), cmd.Flags().Changed("crf"), effs)
+
 	if err := cliutil.ValidateInputFiles(args); err != nil {
 		return err
 	}
@@ -184,9 +364,10 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	}
 
 	cfg := video.ProcessorConfig{
-		Effect:      effect,
+		Effects:     effs,
 		Strength:    strength,
 		OutputDir:   outputDir,
+		Suffix:      suffix,
 		Concurrency: concurrency,
 	}
 

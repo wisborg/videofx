@@ -93,6 +93,12 @@ type RenderOptions struct {
 	// cap binds, the frames that needed more are scaled back (see
 	// AdaptiveZoom) rather than left with a black border.
 	MaxZoom float64
+
+	// Quality is passed straight through to the output encoder's
+	// constant-quality control (vidio.EncoderConfig.Quality): 1-100, higher
+	// is better/larger; 0 (the default) leaves the encoder's own default
+	// rate control in place. See that field's doc comment for the scale.
+	Quality int
 }
 
 // DefaultRenderOptions returns EdgeModeFixed at a 12% zoom -- the Phase 4
@@ -222,6 +228,7 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 		Height:     h,
 		FPS:        info.FPS,
 		SourcePath: sourcePath,
+		Quality:    opts.Quality,
 	})
 	if err != nil {
 		return RenderStats{}, fmt.Errorf("stabilize: rendering %s: %w", sourcePath, err)

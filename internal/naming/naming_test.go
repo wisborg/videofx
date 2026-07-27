@@ -10,11 +10,11 @@ func TestResolve_NoCollision(t *testing.T) {
 	dir := t.TempDir()
 	input := filepath.Join(dir, "clip.mp4")
 
-	got, err := Resolve(input, "stabilized", "")
+	got, err := Resolve(input, []string{"stabilized"}, "")
 	if err != nil {
 		t.Fatalf("Resolve returned error: %v", err)
 	}
-	want := filepath.Join(dir, "clip_stabilized.mp4")
+	want := filepath.Join(dir, "clip - stabilized.mp4")
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -26,14 +26,14 @@ func TestResolve_CollisionAppendsCounter(t *testing.T) {
 
 	// Pre-create the default candidate and the first counter candidate,
 	// so Resolve must skip both.
-	mustCreate(t, filepath.Join(dir, "clip_stabilized.mp4"))
-	mustCreate(t, filepath.Join(dir, "clip_stabilized_1.mp4"))
+	mustCreate(t, filepath.Join(dir, "clip - stabilized.mp4"))
+	mustCreate(t, filepath.Join(dir, "clip - stabilized - 1.mp4"))
 
-	got, err := Resolve(input, "stabilized", "")
+	got, err := Resolve(input, []string{"stabilized"}, "")
 	if err != nil {
 		t.Fatalf("Resolve returned error: %v", err)
 	}
-	want := filepath.Join(dir, "clip_stabilized_2.mp4")
+	want := filepath.Join(dir, "clip - stabilized - 2.mp4")
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -44,11 +44,11 @@ func TestResolve_OutputDirOverride(t *testing.T) {
 	outDir := t.TempDir()
 	input := filepath.Join(srcDir, "clip.mov")
 
-	got, err := Resolve(input, "stabilized", outDir)
+	got, err := Resolve(input, []string{"stabilized"}, outDir)
 	if err != nil {
 		t.Fatalf("Resolve returned error: %v", err)
 	}
-	want := filepath.Join(outDir, "clip_stabilized.mov")
+	want := filepath.Join(outDir, "clip - stabilized.mov")
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -58,12 +58,76 @@ func TestResolve_NeverReturnsInputPath(t *testing.T) {
 	dir := t.TempDir()
 	input := filepath.Join(dir, "clip.mp4")
 
-	got, err := Resolve(input, "stabilized", "")
+	got, err := Resolve(input, []string{"stabilized"}, "")
 	if err != nil {
 		t.Fatalf("Resolve returned error: %v", err)
 	}
 	if got == input {
 		t.Errorf("Resolve must never return the original input path, got %q", got)
+	}
+}
+
+// TestResolve_MultipleSlugs pins the effect-chain naming: one slug per
+// effect, in order, all joined to the stem by the separator, with the
+// collision counter appended after the whole chain.
+func TestResolve_MultipleSlugs(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "clip.mp4")
+
+	got, err := Resolve(input, []string{"gocv-stabilized", "telemetry"}, "")
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	want := filepath.Join(dir, "clip - gocv-stabilized - telemetry.mp4")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+
+	// Collision counter goes after the entire chain.
+	mustCreate(t, want)
+	got2, err := Resolve(input, []string{"gocv-stabilized", "telemetry"}, "")
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	want2 := filepath.Join(dir, "clip - gocv-stabilized - telemetry - 1.mp4")
+	if got2 != want2 {
+		t.Errorf("got %q, want %q", got2, want2)
+	}
+}
+
+// TestResolve_CustomSlug pins that an arbitrary slug (as a --suffix
+// override would supply) flows straight through, keeping the " - "
+// separator convention.
+func TestResolve_CustomSlug(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "clip.mp4")
+
+	got, err := Resolve(input, []string{"final-v2"}, "")
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	want := filepath.Join(dir, "clip - final-v2.mp4")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestResolve_RejectsSlugWithPathSeparator guards the sibling-filename
+// invariant: a slug carrying a path separator (only possible now that the
+// slug can be a user-supplied --suffix) must be rejected, not silently used
+// to redirect the output into another directory. The bad slug is rejected
+// even when it is only one of several in a chain.
+func TestResolve_RejectsSlugWithPathSeparator(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "clip.mp4")
+
+	for _, bad := range []string{"../evil", "a/b", `a\b`} {
+		if _, err := Resolve(input, []string{bad}, ""); err == nil {
+			t.Errorf("Resolve with slug %q should have failed", bad)
+		}
+		if _, err := Resolve(input, []string{"stabilized", bad}, ""); err == nil {
+			t.Errorf("Resolve with a chain containing bad slug %q should have failed", bad)
+		}
 	}
 }
 

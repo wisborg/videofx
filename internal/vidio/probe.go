@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Info describes the properties of a source file's primary video (and,
@@ -35,6 +36,35 @@ type Info struct {
 	// Encoder uses this indirectly (via EncoderConfig.SourcePath)
 	// when deciding whether to map an audio track through.
 	HasAudio bool
+
+	// CreationTime is the container's format-level creation_time tag
+	// (ffprobe's format_tags.creation_time), the wall-clock instant the
+	// recording device believes the file started. internal/telemetry's
+	// sync engine (Phase 2 of the FIT-telemetry-overlay feature) anchors
+	// its fit_time(pts) = creation_time + offset + pts model on this
+	// value. It is valid only when HasCreationTime is true.
+	CreationTime time.Time
+	// HasCreationTime reports whether CreationTime was parsed from the
+	// container. The tag is optional — a clip transcoded through a tool
+	// that drops metadata, or recorded on a device that never wrote it,
+	// simply won't have one — so callers must check this rather than
+	// assume CreationTime is populated. Probe does not treat a missing or
+	// unparseable tag as an error: it is additive, cheap, general-purpose
+	// metadata that most callers (the stabilizer pipeline) have no use
+	// for at all, so a telemetry-specific problem here must not fail
+	// every other caller's Probe.
+	HasCreationTime bool
+	// CreationTimeNaive reports whether the creation_time tag's value
+	// lacked a UTC/offset marker (e.g. "2026-07-04T21:05:53" rather than
+	// "...Z" or "...+02:00"). ffmpeg/ffprobe's own convention is to
+	// always write creation_time in UTC with a trailing Z, so a naive
+	// value here signals metadata written or edited by something else,
+	// and the true timezone is unknowable from the tag alone. Probe still
+	// parses it (treating it as UTC, the least-wrong assumption available
+	// without more information) rather than discarding it, but flags it
+	// so a later phase can warn the user instead of silently trusting an
+	// ambiguous timestamp. Meaningless when HasCreationTime is false.
+	CreationTimeNaive bool
 }
 
 // ffprobeOutput mirrors the subset of `ffprobe -show_format -show_streams
@@ -58,7 +88,16 @@ type ffprobeStream struct {
 }
 
 type ffprobeFormat struct {
-	Duration string `json:"duration"`
+	Duration string            `json:"duration"`
+	Tags     ffprobeFormatTags `json:"tags"`
+}
+
+// ffprobeFormatTags mirrors the subset of ffprobe's format.tags object
+// this package needs. ffprobe only includes tags a container actually
+// carries, so a zero-value CreationTime here is expected and common, not
+// a parse failure.
+type ffprobeFormatTags struct {
+	CreationTime string `json:"creation_time"`
 }
 
 // Probe runs ffprobe against path and extracts the video (and audio
@@ -146,14 +185,66 @@ func parseProbeJSON(data []byte) (Info, error) {
 		}
 	}
 
+	creationTime, hasCreationTime, creationTimeNaive := parseCreationTime(parsed.Format.Tags.CreationTime)
+
 	return Info{
-		Width:    videoStream.Width,
-		Height:   videoStream.Height,
-		FPS:      fps,
-		NBFrames: nbFrames,
-		Duration: duration,
-		HasAudio: hasAudio,
+		Width:             videoStream.Width,
+		Height:            videoStream.Height,
+		FPS:               fps,
+		NBFrames:          nbFrames,
+		Duration:          duration,
+		HasAudio:          hasAudio,
+		CreationTime:      creationTime,
+		HasCreationTime:   hasCreationTime,
+		CreationTimeNaive: creationTimeNaive,
 	}, nil
+}
+
+// creationTimeLayouts are the naive (no UTC/offset marker) timestamp
+// forms parseCreationTime falls back to when raw doesn't parse as
+// RFC3339. ffmpeg/ffprobe itself never emits these — they exist to
+// tolerate metadata written or hand-edited by something else — so a
+// match here is what sets CreationTimeNaive.
+var creationTimeLayouts = []string{
+	"2006-01-02T15:04:05.999999999",
+	"2006-01-02 15:04:05.999999999",
+}
+
+// parseCreationTime parses ffprobe's format_tags.creation_time value,
+// e.g. "2026-07-04T21:05:53.000000Z" (the form ffmpeg/ffprobe itself
+// always writes: UTC, trailing Z). It reports ok=false for both an empty
+// tag (not present in this container) and a value that fails every
+// layout attempted (malformed metadata) — Probe treats both the same way
+// (HasCreationTime left false) since neither gives it real data to
+// return, and it is not this package's job to decide how a caller should
+// react to missing telemetry-sync metadata.
+//
+// naive reports whether raw parsed successfully but had no UTC/offset
+// marker; see Info.CreationTimeNaive.
+func parseCreationTime(raw string) (t time.Time, ok bool, naive bool) {
+	if raw == "" {
+		return time.Time{}, false, false
+	}
+
+	// RFC3339Nano's "...999999999Z07:00" layout accepts any number of
+	// fractional digits (including ffprobe's fixed six, e.g.
+	// ".000000Z") and either a "Z" or a numeric offset, so this alone
+	// covers every timezone-qualified form ffprobe is known to emit.
+	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return parsed.UTC(), true, false
+	}
+
+	// Fall back to layouts with no timezone at all. time.Parse leaves a
+	// parsed value's Location as UTC when the layout carries no zone
+	// info, which is exactly the "treat as UTC, but flag it" behavior
+	// documented on Info.CreationTimeNaive.
+	for _, layout := range creationTimeLayouts {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed, true, true
+		}
+	}
+
+	return time.Time{}, false, false
 }
 
 // parseFrameRate parses ffprobe's "num/den" (or occasionally plain
