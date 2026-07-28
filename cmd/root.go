@@ -17,6 +17,7 @@ import (
 	"videofx/internal/effects"
 	"videofx/internal/runner"
 	"videofx/internal/stabilize"
+	"videofx/internal/telemetry"
 	"videofx/internal/video"
 )
 
@@ -57,6 +58,7 @@ var (
 	telemetryStryd bool
 	hudTimeZone    string
 	hudLayout      string
+	powerSource    string
 	elevSmoothing  float64
 	elevGain       float64
 	elevLoss       float64
@@ -148,6 +150,8 @@ func NewRootCmd() *cobra.Command {
 		"telemetry-hud only: timezone the on-screen clock displays in -- an IANA name (e.g. \"Australia/Brisbane\") or a fixed offset (e.g. \"+10:00\"). Default: UTC. Only affects the clock gauge; telemetry sync is always UTC")
 	root.Flags().StringVar(&hudLayout, "hud-layout", "auto",
 		"telemetry-hud only: gauge arrangement -- \"auto\" (default: picks a vertical layout for portrait clips, the full layout otherwise), \"default\" (the full landscape set), or \"vertical\" (distance/map/elevation only, for portrait videos)")
+	root.Flags().StringVar(&powerSource, "power-source", "auto",
+		"telemetry-hud only: which power reading the metrics gauge shows when the FIT carries both a footpod (Stryd) developer field and the standard FIT power field -- \"auto\" (default: prefer Stryd, fall back to native), \"stryd\" (force the footpod's developer field), or \"native\" (force the standard FIT power field). The two can disagree since they are different sensors")
 	root.Flags().Float64Var(&elevSmoothing, "elevation-smoothing", 0,
 		"telemetry-hud only: Gaussian smoothing width (in FIT samples, ~seconds) applied to the noisy GPS/barometric elevation before the profile/gain-loss/incline gauges use it. 0 (default) = auto: tuned from --elevation-gain/--elevation-loss, or the FIT device's own totals, or a mild default")
 	root.Flags().Float64Var(&elevGain, "elevation-gain", 0,
@@ -300,6 +304,28 @@ func validateHUDLayout(mode string) error {
 	}
 }
 
+// powerSourceModes maps the --power-source flag values to their telemetry
+// enum; it is the single source of truth for both validation and parsing.
+var powerSourceModes = map[string]telemetry.PowerSource{
+	"auto":   telemetry.PowerAuto,
+	"stryd":  telemetry.PowerStryd,
+	"native": telemetry.PowerNative,
+}
+
+// validatePowerSource rejects an unknown --power-source up front.
+func validatePowerSource(mode string) error {
+	if _, ok := powerSourceModes[mode]; !ok {
+		return fmt.Errorf("--power-source %q is invalid; use auto, stryd, or native", mode)
+	}
+	return nil
+}
+
+// parsePowerSource maps a --power-source value to its enum; an unknown value
+// (already rejected by validatePowerSource) falls back to PowerAuto.
+func parsePowerSource(mode string) telemetry.PowerSource {
+	return powerSourceModes[mode] // zero value is PowerAuto
+}
+
 // validateTrim rejects a nonsensical --start/--end range up front: negative
 // times, or an --end at or before --start. An --end past the actual clip
 // length isn't an error here (it's clamped per file to each clip's duration in
@@ -423,6 +449,7 @@ func configureEffect(effect effects.Effect) error {
 		h.ElevationGain = elevGain
 		h.ElevationLoss = elevLoss
 		h.LayoutMode = hudLayout
+		h.PowerSource = parsePowerSource(powerSource)
 	}
 	configureTelemetry(effect)
 	return nil
@@ -544,6 +571,9 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := validateHUDLayout(hudLayout); err != nil {
+		return err
+	}
+	if err := validatePowerSource(powerSource); err != nil {
 		return err
 	}
 

@@ -23,7 +23,7 @@ func (MetricsGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
 	lines := []string{
 		optU8(f.HasSample && s.HasHeartRate, s.HeartRate, "bpm"),
 		cadenceLine(f.HasSample && s.HasCadence, s.Cadence),
-		optU16(f.HasSample && s.HasPower, s.Power, "W"),
+		powerLine(f),
 		inclineLine(f),
 		paceLine(f.HasSample && s.HasSpeed, s.Speed),
 		speedLine(f.HasSample && s.HasSpeed, s.Speed),
@@ -208,9 +208,9 @@ func courseElevation(f Frame) *telemetry.ElevationModel {
 	return f.Course.Elevation
 }
 
-// optU8 / optU16 render "value unit" when present, or "-- unit" when a sensor
-// is momentarily (or entirely) absent, so a dropout shows a placeholder
-// rather than a misleading zero -- the same convention as the telemetry SRT.
+// optU8 renders "value unit" when present, or "-- unit" when a sensor is
+// momentarily (or entirely) absent, so a dropout shows a placeholder rather
+// than a misleading zero -- the same convention as the telemetry SRT.
 func optU8(present bool, v uint8, unit string) string {
 	if !present {
 		return "-- " + unit
@@ -218,11 +218,19 @@ func optU8(present bool, v uint8, unit string) string {
 	return fmt.Sprintf("%d %s", v, unit)
 }
 
-func optU16(present bool, v uint16, unit string) string {
-	if !present {
-		return "-- " + unit
+// powerLine renders running power in watts, resolving which of the FIT's two
+// possible power readings to show (footpod/Stryd developer field vs the
+// standard FIT power field) via the frame's PowerSource. Shows the "-- W"
+// dropout marker when no value is present for the chosen source.
+func powerLine(f Frame) string {
+	if !f.HasSample {
+		return "-- W"
 	}
-	return fmt.Sprintf("%d %s", v, unit)
+	watts, ok := f.Sample.ResolvedPower(f.PowerSource)
+	if !ok {
+		return "-- W"
+	}
+	return fmt.Sprintf("%.0f W", watts)
 }
 
 // cadenceLine renders running cadence in steps per minute. FIT reports run

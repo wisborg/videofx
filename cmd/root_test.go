@@ -170,6 +170,27 @@ func TestValidateHUDLayout(t *testing.T) {
 	}
 }
 
+func TestValidatePowerSource(t *testing.T) {
+	cases := []struct {
+		mode    string
+		wantErr bool
+	}{
+		{"auto", false},
+		{"stryd", false},
+		{"native", false},
+		{"", true},
+		{"garmin", true},
+		{"Stryd", true}, // case-sensitive
+	}
+	for _, c := range cases {
+		t.Run(c.mode, func(t *testing.T) {
+			if err := validatePowerSource(c.mode); (err != nil) != c.wantErr {
+				t.Errorf("validatePowerSource(%q) = %v, wantErr %v", c.mode, err, c.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateSuffix(t *testing.T) {
 	cases := []struct {
 		name    string

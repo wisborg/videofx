@@ -50,6 +50,11 @@ type TelemetryHUD struct {
 	// the target when present, else a mild default sigma.
 	ElevationSmoothing           float64
 	ElevationGain, ElevationLoss float64
+	// PowerSource selects which power reading the metrics gauge shows when the
+	// FIT carries both a footpod (Stryd) developer field and the standard FIT
+	// power field. The zero value is telemetry.PowerAuto (prefer Stryd, fall
+	// back to native). Wired from --power-source.
+	PowerSource telemetry.PowerSource
 	// LayoutMode selects the gauge arrangement by name: "auto" (the default)
 	// picks the vertical layout for portrait clips and the default otherwise,
 	// or "default"/"vertical" to force one. Wired from --hud-layout; ignored
@@ -232,10 +237,11 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		renderer.RenderDynamic(img, hud.Frame{
 			Width: dw, Height: dh,
 			Index: i, Total: frameCount,
-			Time:      display,
-			Sample:    sample,
-			HasSample: ok,
-			Course:    course,
+			Time:        display,
+			Sample:      sample,
+			HasSample:   ok,
+			PowerSource: t.PowerSource,
+			Course:      course,
 		})
 		if err := enc.WriteFrame(img); err != nil {
 			_ = enc.Close()

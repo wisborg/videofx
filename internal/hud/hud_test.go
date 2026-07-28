@@ -430,7 +430,40 @@ func TestOptPlaceholders(t *testing.T) {
 	if got := optU8(false, 0, "bpm"); got != "-- bpm" {
 		t.Errorf("optU8(absent) = %q", got)
 	}
-	if got := optU16(true, 300, "W"); got != "300 W" {
-		t.Errorf("optU16(300) = %q", got)
+	if got := optU8(true, 144, "bpm"); got != "144 bpm" {
+		t.Errorf("optU8(144) = %q", got)
+	}
+}
+
+// TestPowerLine pins the power-source resolution the metrics gauge uses.
+func TestPowerLine(t *testing.T) {
+	// A sample carrying both a native FIT power field and a Stryd developer
+	// field, with deliberately different values so we can tell them apart.
+	both := telemetry.Sample{
+		HasPower: true, Power: 277,
+		DevFields: map[string]float64{telemetry.StrydPowerField: 159},
+	}
+	nativeOnly := telemetry.Sample{HasPower: true, Power: 277}
+	strydOnly := telemetry.Sample{DevFields: map[string]float64{telemetry.StrydPowerField: 159}}
+
+	cases := []struct {
+		name string
+		f    Frame
+		want string
+	}{
+		{"auto prefers stryd", Frame{HasSample: true, Sample: both, PowerSource: telemetry.PowerAuto}, "159 W"},
+		{"native forced", Frame{HasSample: true, Sample: both, PowerSource: telemetry.PowerNative}, "277 W"},
+		{"stryd forced", Frame{HasSample: true, Sample: both, PowerSource: telemetry.PowerStryd}, "159 W"},
+		{"auto falls back to native", Frame{HasSample: true, Sample: nativeOnly, PowerSource: telemetry.PowerAuto}, "277 W"},
+		{"stryd forced, none present", Frame{HasSample: true, Sample: nativeOnly, PowerSource: telemetry.PowerStryd}, "-- W"},
+		{"native forced, none present", Frame{HasSample: true, Sample: strydOnly, PowerSource: telemetry.PowerNative}, "-- W"},
+		{"no sample", Frame{HasSample: false, Sample: both, PowerSource: telemetry.PowerAuto}, "-- W"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := powerLine(c.f); got != c.want {
+				t.Errorf("powerLine = %q, want %q", got, c.want)
+			}
+		})
 	}
 }

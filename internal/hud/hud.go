@@ -55,6 +55,11 @@ type Frame struct {
 	// placeholders rather than stale/zero data).
 	Sample    telemetry.Sample
 	HasSample bool
+	// PowerSource selects which power reading the metrics gauge displays when
+	// the FIT carries both a footpod (Stryd) developer field and the standard
+	// FIT power field; the zero value is telemetry.PowerAuto (prefer Stryd,
+	// fall back to native). See telemetry.Sample.ResolvedPower.
+	PowerSource telemetry.PowerSource
 	// Course carries whole-activity context (elevation profile, GPS track,
 	// splits) for the graphical gauges; nil until those phases populate it.
 	Course *Course

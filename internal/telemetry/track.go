@@ -84,6 +84,58 @@ type Sample struct {
 	DevFields map[string]float64
 }
 
+// StrydPowerField is the developer-field key a Stryd footpod registers its
+// running power under (resolved from the FIT file's own FieldDescription
+// messages — see resolveDevFields). A file can carry both this and the
+// standard FIT power field (Sample.Power) with different values, since they
+// are literally different sensors' readings.
+const StrydPowerField = "Power"
+
+// PowerSource selects which of a Sample's two possible power readings the
+// caller wants displayed: the vendor footpod's developer field (Stryd), the
+// standard FIT Record.power field (native), or automatic preference.
+type PowerSource int
+
+const (
+	// PowerAuto prefers the Stryd developer field when present and falls back
+	// to the native FIT power field otherwise.
+	PowerAuto PowerSource = iota
+	// PowerStryd forces the Stryd developer-field power; no native fallback.
+	PowerStryd
+	// PowerNative forces the standard FIT Record.power field.
+	PowerNative
+)
+
+// ResolvedPower returns the watts to display for the given source preference,
+// and whether a value is present. The forced modes (PowerStryd, PowerNative)
+// are strict -- they return present=false rather than silently substituting
+// the other source -- so a caller that asked for one specifically gets a
+// placeholder, not a different sensor's number, when it is absent. PowerAuto
+// prefers Stryd and falls back to native.
+func (s Sample) ResolvedPower(src PowerSource) (float64, bool) {
+	stryd, hasStryd := s.DevFields[StrydPowerField]
+	switch src {
+	case PowerNative:
+		if s.HasPower {
+			return float64(s.Power), true
+		}
+		return 0, false
+	case PowerStryd:
+		if hasStryd {
+			return stryd, true
+		}
+		return 0, false
+	default: // PowerAuto: Stryd if present, else native
+		if hasStryd {
+			return stryd, true
+		}
+		if s.HasPower {
+			return float64(s.Power), true
+		}
+		return 0, false
+	}
+}
+
 // Track is a decoded FIT activity file: metadata about its source plus
 // every Sample it contains, sorted ascending by Time.
 type Track struct {
