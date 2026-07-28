@@ -20,8 +20,8 @@ several to apply them as a pipeline, see [Chaining effects](#chaining-effects)):
   to the clip. The video/audio are stream-copied (no re-encode — lossless and
   fast). See Telemetry below.
 - **`telemetry-hud`** — burns a telemetry **heads-up display** (gauges) onto the
-  video from a Garmin FIT file: the instantaneous metric readout and clock in
-  v1, with more gauges landing incrementally. Unlike `telemetry` this re-encodes
+  video from a Garmin FIT file: metric readout, clock, km splits, distance progress,
+  course map, and elevation profile/gain-loss. Unlike `telemetry` this re-encodes
   the video (the overlay is burned in). See [Telemetry HUD](#telemetry-hud) below.
 
 ## Requirements
@@ -314,14 +314,19 @@ you set apply to it. So `--effect telemetry-hud` produces `clip - hud - telemetr
 It's appended last on purpose: a telemetry pass before the overlay re-encode would have
 its embedded subtitle/location dropped by that encode.
 
-**Gauges** are landing incrementally:
+**Gauges:**
 
 - Lower-left metric readout: heart rate, cadence, power, **incline**, pace, speed.
 - Upper-right clock: time + date (in `--hud-timezone`).
-- Bottom-center **elevation profile** vs. distance, with the current position marked
-  in red and min/max-elevation + start/end-distance labels.
+- Upper-left **kilometre splits**: recent laps with the fastest highlighted, and the
+  in-progress lap's live timer.
+- Top-center **distance progress bar**: current distance, filled to the current
+  position, with per-km ticks over the remainder.
+- Middle-left **course map**: the whole GPS route with the covered portion
+  highlighted and the current position marked in red.
+- Bottom-center **elevation profile** vs. distance, current position marked in red,
+  with min/max-elevation + start/end-distance labels.
 - Lower-right **total elevation gain / loss** so far.
-- **Next:** course map (covered vs. remaining), km splits, distance progress bar.
 
 **Elevation smoothing.** GPS/barometric elevation is noisy, and a raw per-sample sum
 wildly overcounts gain/loss (and jitters the incline). The elevation gauges smooth it

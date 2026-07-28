@@ -68,6 +68,20 @@ type Course struct {
 	// carried no usable elevation, in which case those gauges show
 	// placeholders or draw nothing.
 	Elevation *telemetry.ElevationModel
+	// Splits are the whole-activity kilometre boundaries the splits gauge
+	// reads; nil / Empty() when the FIT carried no distance.
+	Splits *telemetry.Splits
+	// Route is the (downsampled) GPS track the course-map gauge draws; each
+	// point carries its time so the gauge can highlight the covered portion.
+	// Empty when the FIT carried no GPS fix.
+	Route []GeoPoint
+}
+
+// GeoPoint is one GPS point of the course route, with the instant it was
+// recorded (so the map gauge can split covered from remaining).
+type GeoPoint struct {
+	Lat, Lon float64
+	Time     time.Time
 }
 
 // Gauge is one HUD element that can draw itself.
@@ -120,6 +134,9 @@ func DefaultLayout() Layout {
 			{Gauge: TimeDateGauge{}, Anchor: TopRight, Enabled: true},
 			{Gauge: ElevationProfileGauge{}, Anchor: BottomCenter, Enabled: true},
 			{Gauge: GainLossGauge{}, Anchor: BottomRight, Enabled: true},
+			{Gauge: SplitsGauge{}, Anchor: TopLeft, Enabled: true},
+			{Gauge: ProgressBarGauge{}, Anchor: TopCenter, Enabled: true},
+			{Gauge: CourseMapGauge{}, Anchor: MiddleRight, Enabled: true},
 		},
 	}
 }
@@ -169,26 +186,44 @@ func (r *Renderer) FontPx(f Frame) float64 {
 	return float64(f.Height) * r.layout.FontScale
 }
 
-// Text draws s at size px as white text over a soft dark shadow (legible over
-// any footage). (x, y) is the TOP of the glyphs -- not the baseline -- so a
-// caller positioning by the visible box keeps text inside the frame edge it
-// inset from; ax selects horizontal alignment to x (0 = x is the left edge,
-// 0.5 = centered, 1 = x is the right edge). The baseline is derived from the
-// face's ascent so vertical placement is predictable regardless of font size.
+// Text draws s in white; see TextColored for the positioning contract.
 func (r *Renderer) Text(dc *gg.Context, s string, x, y, ax, px float64) {
+	r.TextColored(dc, s, x, y, ax, px, 1, 1, 1)
+}
+
+// TextColored draws s at size px in colour (cr,cg,cb) over a soft dark shadow
+// (legible over any footage). (x, y) is the TOP of the glyphs -- not the
+// baseline -- so a caller positioning by the visible box keeps text inside the
+// frame edge it inset from; ax selects horizontal alignment to x (0 = x is the
+// left edge, 0.5 = centered, 1 = x is the right edge). The baseline is derived
+// from the face's ascent so vertical placement is predictable regardless of
+// font size.
+func (r *Renderer) TextColored(dc *gg.Context, s string, x, y, ax, px, cr, cg, cb float64) {
 	face := r.face(px)
 	dc.SetFontFace(face)
 	baseline := y + float64(face.Metrics().Ascent)/64 // Int26_6 -> px
 	off := math.Max(1, px*0.06)
 	dc.SetRGBA(0, 0, 0, 0.55)
 	dc.DrawStringAnchored(s, x+off, baseline+off, ax, 0)
-	dc.SetRGBA(1, 1, 1, 1)
+	dc.SetRGBA(cr, cg, cb, 1)
 	dc.DrawStringAnchored(s, x, baseline, ax, 0)
 }
 
-// Render clears img and draws every enabled gauge for frame f. img must be a
-// tightly-packed RGBA of f.Width x f.Height; it is reused across frames by the
-// caller, so Render zeroes it first.
+// StaticGauge is an optional Gauge whose drawing has a part that does not
+// change frame to frame -- a route outline, an elevation profile shape, axis
+// labels. Rasterizing those (polyline strokes and filled bands at 4K) is
+// expensive, so the renderer draws them ONCE via DrawStatic and reuses the
+// result, running only the gauge's per-frame Draw (its markers/live values) on
+// top. A gauge with no static content simply doesn't implement this.
+type StaticGauge interface {
+	Gauge
+	DrawStatic(r *Renderer, dc *gg.Context, box Box, f Frame)
+}
+
+// Render clears img and draws every enabled gauge in full (static content, then
+// per-frame content). It is the simple path used by tests and one-off renders;
+// the per-frame render pipeline uses RenderStatic once + RenderDynamic per
+// frame instead (see the telemetry-hud effect).
 func (r *Renderer) Render(img *image.RGBA, f Frame) {
 	clear(img.Pix)
 	dc := gg.NewContextForRGBA(img)
@@ -197,7 +232,40 @@ func (r *Renderer) Render(img *image.RGBA, f Frame) {
 			continue
 		}
 		box := r.resolveBox(p, f)
+		if sg, ok := p.Gauge.(StaticGauge); ok {
+			sg.DrawStatic(r, dc, box, f)
+		}
 		p.Gauge.Draw(r, dc, box, f)
+	}
+}
+
+// RenderStatic clears img and draws every enabled gauge's static content once
+// (the parts that don't vary per frame). f need only carry Course and the
+// frame dimensions -- no per-frame sample. The caller keeps this image as a
+// base and composites it under each frame's dynamic content.
+func (r *Renderer) RenderStatic(img *image.RGBA, f Frame) {
+	clear(img.Pix)
+	dc := gg.NewContextForRGBA(img)
+	for _, p := range r.layout.Placements {
+		if !p.Enabled {
+			continue
+		}
+		if sg, ok := p.Gauge.(StaticGauge); ok {
+			sg.DrawStatic(r, dc, r.resolveBox(p, f), f)
+		}
+	}
+}
+
+// RenderDynamic draws every enabled gauge's per-frame content onto img WITHOUT
+// clearing it -- the caller first copies a RenderStatic base into img, so the
+// two compose into the full HUD at a fraction of a full Render's cost.
+func (r *Renderer) RenderDynamic(img *image.RGBA, f Frame) {
+	dc := gg.NewContextForRGBA(img)
+	for _, p := range r.layout.Placements {
+		if !p.Enabled {
+			continue
+		}
+		p.Gauge.Draw(r, dc, r.resolveBox(p, f), f)
 	}
 }
 

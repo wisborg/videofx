@@ -214,6 +214,101 @@ func elevSamples(dist, elev []float64) []telemetry.Sample {
 	return s
 }
 
+// TestRender_CourseGauges checks the Phase 3 gauges draw when their data is
+// present: top-left (splits), top-center (progress bar), middle-left (course
+// map). They must draw nothing (no panic) without the data -- covered by
+// TestRender_DrawsGauges, which passes no Course.
+func TestRender_CourseGauges(t *testing.T) {
+	base := time.Now().UTC()
+	// A 3 km track with GPS, distance and time -> splits + route + distance.
+	var samples []telemetry.Sample
+	for i := 0; i <= 30; i++ {
+		samples = append(samples, telemetry.Sample{
+			Time:        base.Add(time.Duration(i*10) * time.Second),
+			HasDistance: true, Distance: float64(i) * 100, // 100 m/step -> 3 km
+			HasGPS: true, Lat: -27.96 + float64(i)*0.001, Lon: 153.42 + float64(i)*0.0005,
+		})
+	}
+	track := &telemetry.Track{Samples: samples}
+	course := &Course{
+		TotalDistance: 3000,
+		Splits:        telemetry.BuildSplits(track),
+		Route: func() []GeoPoint {
+			var r []GeoPoint
+			for _, s := range samples {
+				r = append(r, GeoPoint{Lat: s.Lat, Lon: s.Lon, Time: s.Time})
+			}
+			return r
+		}(),
+	}
+
+	r := NewRenderer(DefaultLayout())
+	const w, h = 900, 500
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	r.Render(img, Frame{
+		Width: w, Height: h,
+		Time:      base.Add(1500 * time.Second), // ~1.5 km in (mid-course)
+		HasSample: true,
+		Sample:    telemetry.Sample{HasDistance: true, Distance: 1500, HasGPS: true, Lat: -27.945, Lon: 153.4275},
+		Course:    course,
+	})
+
+	ink := func(x0, y0, x1, y1 int) int {
+		n := 0
+		for y := y0; y < y1; y++ {
+			for x := x0; x < x1; x++ {
+				if img.Pix[y*img.Stride+x*4+3] != 0 {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	if ink(0, 0, w/3, h/3) == 0 {
+		t.Error("top-left splits drew nothing")
+	}
+	if ink(w/3, 0, w*2/3, h/4) == 0 {
+		t.Error("top-center progress bar drew nothing")
+	}
+	if ink(w*5/6, h/3, w, h*2/3) == 0 {
+		t.Error("middle-right course map drew nothing")
+	}
+}
+
+func TestFmtMSS(t *testing.T) {
+	cases := map[time.Duration]string{
+		0:                 "0:00",
+		67 * time.Second:  "1:07",
+		345 * time.Second: "5:45",
+		-time.Second:      "0:00",
+		600 * time.Second: "10:00",
+	}
+	for d, want := range cases {
+		if got := fmtMSS(d); got != want {
+			t.Errorf("fmtMSS(%v) = %q, want %q", d, got, want)
+		}
+	}
+}
+
+func TestCoveredIndex(t *testing.T) {
+	base := time.Now()
+	route := []GeoPoint{
+		{Time: base},
+		{Time: base.Add(1 * time.Second)},
+		{Time: base.Add(2 * time.Second)},
+		{Time: base.Add(3 * time.Second)},
+	}
+	if got := coveredIndex(route, base.Add(2500*time.Millisecond)); got != 2 {
+		t.Errorf("coveredIndex mid = %d, want 2", got)
+	}
+	if got := coveredIndex(route, base.Add(-time.Second)); got != -1 {
+		t.Errorf("coveredIndex before start = %d, want -1", got)
+	}
+	if got := coveredIndex(route, base.Add(time.Hour)); got != 3 {
+		t.Errorf("coveredIndex past end = %d, want 3", got)
+	}
+}
+
 // TestOptPlaceholders pins the "-- unit" dropout markers.
 func TestOptPlaceholders(t *testing.T) {
 	if got := optU8(false, 0, "bpm"); got != "-- bpm" {

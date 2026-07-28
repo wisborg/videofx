@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"math"
 	"os"
 	"time"
 
@@ -51,6 +52,43 @@ type TelemetryHUD struct {
 	ElevationGain, ElevationLoss float64
 	// Layout is the HUD arrangement; the zero value uses hud.DefaultLayout.
 	Layout *hud.Layout
+}
+
+// trackTotalDistance is the activity's final cumulative distance (m) -- the
+// last sample that carries one (distance is monotonic).
+func trackTotalDistance(track *telemetry.Track) float64 {
+	for i := len(track.Samples) - 1; i >= 0; i-- {
+		if track.Samples[i].HasDistance {
+			return track.Samples[i].Distance
+		}
+	}
+	return 0
+}
+
+// buildRoute collects the GPS track for the course-map gauge, downsampled to
+// at most maxRoutePoints (a multi-hour activity has thousands of fixes, far
+// more than a small on-screen map needs), preserving time order.
+func buildRoute(track *telemetry.Track) []hud.GeoPoint {
+	var pts []hud.GeoPoint
+	for _, s := range track.Samples {
+		if s.HasGPS {
+			pts = append(pts, hud.GeoPoint{Lat: s.Lat, Lon: s.Lon, Time: s.Time})
+		}
+	}
+	const maxRoutePoints = 500
+	if len(pts) <= maxRoutePoints {
+		return pts
+	}
+	out := make([]hud.GeoPoint, maxRoutePoints)
+	stride := float64(len(pts)-1) / float64(maxRoutePoints-1)
+	for i := range out {
+		idx := int(math.Round(float64(i) * stride))
+		if idx >= len(pts) {
+			idx = len(pts) - 1
+		}
+		out[i] = pts[idx]
+	}
+	return out
 }
 
 func (t *TelemetryHUD) Name() string                     { return "telemetry-hud" }
@@ -124,7 +162,12 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		elevOpts.TargetLoss = track.TotalDescent
 	}
 	elevModel := telemetry.BuildElevationModel(track, elevOpts)
-	course := &hud.Course{TotalDistance: elevModel.TotalDistance(), Elevation: elevModel}
+	course := &hud.Course{
+		TotalDistance: trackTotalDistance(track),
+		Elevation:     elevModel,
+		Splits:        telemetry.BuildSplits(track),
+		Route:         buildRoute(track),
+	}
 
 	layout := hud.DefaultLayout()
 	if t.Layout != nil {
@@ -144,8 +187,16 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		return fmt.Errorf("telemetry-hud: %w", err)
 	}
 
-	// One RGBA buffer, reused and re-cleared each frame (a fresh 4K RGBA per
-	// frame would allocate ~33MB every frame).
+	// Render the HUD's static layer (route outline, elevation profile, ticks,
+	// axis labels) ONCE; those polyline strokes and filled bands at 4K are the
+	// bulk of the render cost and don't change frame to frame. Each frame then
+	// copies this base and draws only the dynamic content (markers, live
+	// values) on top -- a large speedup over redrawing everything per frame.
+	staticBase := image.NewRGBA(image.Rect(0, 0, info.Width, info.Height))
+	renderer.RenderStatic(staticBase, hud.Frame{Width: info.Width, Height: info.Height, Course: course})
+
+	// One RGBA buffer, reused each frame (a fresh 4K RGBA per frame would
+	// allocate ~33MB every frame).
 	img := image.NewRGBA(image.Rect(0, 0, info.Width, info.Height))
 	for i := 0; i < frameCount; i++ {
 		if i%256 == 0 {
@@ -164,7 +215,8 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 			display = at.In(t.TimeZone)
 		}
 
-		renderer.Render(img, hud.Frame{
+		copy(img.Pix, staticBase.Pix) // composite over the cached static layer
+		renderer.RenderDynamic(img, hud.Frame{
 			Width: info.Width, Height: info.Height,
 			Index: i, Total: frameCount,
 			Time:      display,

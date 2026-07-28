@@ -81,84 +81,103 @@ type ElevationProfileGauge struct{}
 
 func (ElevationProfileGauge) Name() string { return "elevation-profile" }
 
-func (ElevationProfileGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
+// elevPlot is the elevation profile's box geometry, shared by DrawStatic and
+// Draw so the profile line and the position marker line up exactly.
+type elevPlot struct {
+	px, lblPx                float64
+	left, right, top, axisY  float64
+	minE, maxE, span, totalD float64
+}
+
+func (g elevPlot) xAt(d float64) float64 { return g.left + d/g.totalD*(g.right-g.left) }
+func (g elevPlot) yAt(e float64) float64 { return g.axisY - (e-g.minE)/g.span*(g.axisY-g.top) }
+
+func elevGeometry(r *Renderer, box Box, f Frame) (elevPlot, bool) {
 	if f.Course == nil || f.Course.Elevation == nil || f.Course.Elevation.Empty() {
-		return
+		return elevPlot{}, false
 	}
 	em := f.Course.Elevation
 	px := r.FontPx(f)
 	lblPx := px * 0.7
-
 	pw := float64(f.Width) * 0.42
 	ph := float64(f.Height) * 0.12
-	left := box.X - pw/2
-	right := box.X + pw/2
-	axisY := box.Y - lblPx*1.3 // leave room for the km labels below the plot
-	top := axisY - ph
-
 	minE, maxE := em.Range()
 	span := maxE - minE
 	if span < 1 {
 		span = 1 // a dead-flat course still gets a centered line, not a divide-by-zero
 	}
-	totalD := em.TotalDistance()
-	xAt := func(d float64) float64 { return left + d/totalD*pw }
-	yAt := func(e float64) float64 { return axisY - (e-minE)/span*ph }
+	axisY := box.Y - lblPx*1.3 // leave room for the km labels below the plot
+	return elevPlot{
+		px: px, lblPx: lblPx,
+		left: box.X - pw/2, right: box.X + pw/2, top: axisY - ph, axisY: axisY,
+		minE: minE, maxE: maxE, span: span, totalD: em.TotalDistance(),
+	}, true
+}
 
-	// Faint translucent band so the white line and labels read over bright
-	// footage.
+// DrawStatic draws the never-changing parts: the translucent band, the profile
+// line, and the axis labels. These are the expensive polyline stroke and fill,
+// so drawing them once (not per frame) is the bulk of the HUD's speedup.
+func (ElevationProfileGauge) DrawStatic(r *Renderer, dc *gg.Context, box Box, f Frame) {
+	g, ok := elevGeometry(r, box, f)
+	if !ok {
+		return
+	}
+	em := f.Course.Elevation
+
 	dc.SetRGBA(0, 0, 0, 0.22)
-	dc.DrawRectangle(left, top, pw, axisY-top)
+	dc.DrawRectangle(g.left, g.top, g.right-g.left, g.axisY-g.top)
 	dc.Fill()
 
-	// The profile polyline, sampled at ~2px spacing (not every FIT point --
-	// a multi-hour activity has thousands, far more than the plot is wide).
-	n := int(pw / 2)
+	// Sampled at ~2px spacing (not every FIT point -- a multi-hour activity
+	// has thousands, far more than the plot is wide).
+	n := int((g.right - g.left) / 2)
 	if n < 2 {
 		n = 2
 	}
-	dc.SetLineWidth(math.Max(1.5, px*0.045))
+	dc.SetLineWidth(math.Max(1.5, g.px*0.045))
 	dc.SetRGBA(1, 1, 1, 0.95)
 	for k := 0; k <= n; k++ {
-		d := float64(k) / float64(n) * totalD
+		d := float64(k) / float64(n) * g.totalD
 		e, _, _ := em.AtDistance(d)
-		x, y := xAt(d), yAt(e)
 		if k == 0 {
-			dc.MoveTo(x, y)
+			dc.MoveTo(g.xAt(d), g.yAt(e))
 		} else {
-			dc.LineTo(x, y)
+			dc.LineTo(g.xAt(d), g.yAt(e))
 		}
 	}
 	dc.Stroke()
 
-	// Current position marker: a vertical playhead line through the plot plus
-	// a white-ringed red dot, so where-you-are stands out against both the
-	// white profile line and the footage behind it.
-	if f.HasSample && f.Sample.HasDistance {
-		d := math.Max(0, math.Min(f.Sample.Distance, totalD))
-		e, _, _ := em.AtDistance(d)
-		mx, my := xAt(d), yAt(e)
+	r.Text(dc, fmt.Sprintf("%.0f m", g.maxE), g.left, g.top, 0, g.lblPx)
+	r.Text(dc, fmt.Sprintf("%.0f m", g.minE), g.left, g.axisY-g.lblPx*1.15, 0, g.lblPx)
+	r.Text(dc, "0 km", g.left, g.axisY+g.lblPx*0.15, 0, g.lblPx)
+	r.Text(dc, fmt.Sprintf("%.0f km", g.totalD/1000), g.right, g.axisY+g.lblPx*0.15, 1, g.lblPx)
+}
 
-		dc.SetRGBA(0.95, 0.25, 0.1, 0.75)
-		dc.SetLineWidth(math.Max(10, px*0.28))
-		dc.DrawLine(mx, top, mx, axisY)
-		dc.Stroke()
-
-		rad := math.Max(4, px*0.14)
-		ring := math.Max(1.5, px*0.04)
-		dc.SetRGBA(1, 1, 1, 0.95) // white halo ring
-		dc.DrawCircle(mx, my, rad+ring)
-		dc.Fill()
-		dc.SetRGBA(0.95, 0.25, 0.1, 1) // red core
-		dc.DrawCircle(mx, my, rad)
-		dc.Fill()
+// Draw draws the per-frame position marker: a vertical playhead line through
+// the plot plus a white-ringed red dot.
+func (ElevationProfileGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
+	g, ok := elevGeometry(r, box, f)
+	if !ok || !f.HasSample || !f.Sample.HasDistance {
+		return
 	}
+	em := f.Course.Elevation
+	d := math.Max(0, math.Min(f.Sample.Distance, g.totalD))
+	e, _, _ := em.AtDistance(d)
+	mx, my := g.xAt(d), g.yAt(e)
 
-	// Labels: elevation range at the left, distance range along the axis.
-	r.Text(dc, fmt.Sprintf("%.0f m", maxE), left, top, 0, lblPx)
-	r.Text(dc, fmt.Sprintf("%.0f m", minE), left, axisY-lblPx*1.15, 0, lblPx)
-	r.Text(dc, "0 km", left, axisY+lblPx*0.15, 0, lblPx)
-	r.Text(dc, fmt.Sprintf("%.0f km", totalD/1000), right, axisY+lblPx*0.15, 1, lblPx)
+	dc.SetRGBA(0.95, 0.25, 0.1, 0.75)
+	dc.SetLineWidth(math.Max(10, g.px*0.28))
+	dc.DrawLine(mx, g.top, mx, g.axisY)
+	dc.Stroke()
+
+	rad := math.Max(4, g.px*0.14)
+	ring := math.Max(1.5, g.px*0.04)
+	dc.SetRGBA(1, 1, 1, 0.95) // white halo ring
+	dc.DrawCircle(mx, my, rad+ring)
+	dc.Fill()
+	dc.SetRGBA(0.95, 0.25, 0.1, 1) // red core
+	dc.DrawCircle(mx, my, rad)
+	dc.Fill()
 }
 
 // GainLossGauge draws the cumulative elevation gain and loss so far
