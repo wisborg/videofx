@@ -69,13 +69,20 @@ type Telemetry struct {
 	// the sidecar stays aligned with the (now-corrected) video -- see Apply.
 	OffsetSeconds float64
 
-	// Subtitle muxes a mov_text subtitle track carrying the telemetry as
-	// per-second cues. Off by default: the location tag is always produced,
-	// but the burned-in-looking subtitle track is opt-in (many players show
-	// it unbidden, which is rarely what you want for a stabilized action
-	// clip). This only affects the muxed subtitle stream; everything else is
-	// unchanged whether it is set or not.
-	Subtitle bool
+	// SRTFormat selects an embedded telemetry subtitle track: "" or "none"
+	// muxes none (the default -- the location tag is produced regardless);
+	// "readable" a human-readable per-second readout; "dji" the DJI-drone
+	// SRT layout that Telemetry Overlay reads directly from the video (see
+	// telemetry.SRTFormat). Only the muxed subtitle stream is affected.
+	SRTFormat string
+
+	// ShowSubtitle keeps a muxed subtitle track visible/auto-displayed. Off
+	// by default: the track is embedded but hidden (its tkhd track-enabled
+	// flag cleared -- see hideSubtitleTrack) so players don't pop it on
+	// screen, while tools like Telemetry Overlay still read it. Meaningless
+	// when SRTFormat muxes nothing; for "dji" (machine data) you would never
+	// set it.
+	ShowSubtitle bool
 
 	// GPX writes a GPX sidecar next to the output (see gpxSidecarPath). Off
 	// by default and opt-in: the sidecar is a separate deliverable useful for
@@ -179,8 +186,9 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 		}
 	}
 
+	srtFormat, muxSubtitle := resolveSRTFormat(t.SRTFormat)
 	var srtPath string
-	if t.Subtitle {
+	if muxSubtitle {
 		tmpDir, err := os.MkdirTemp("", "videofx-telemetry-*")
 		if err != nil {
 			return fmt.Errorf("telemetry: creating temp dir: %w", err)
@@ -188,7 +196,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 		defer os.RemoveAll(tmpDir)
 
 		srtPath = filepath.Join(tmpDir, "telemetry.srt")
-		if err := writeSRTFile(srtPath, points, fields); err != nil {
+		if err := writeSRTFile(srtPath, points, fields, srtFormat); err != nil {
 			return fmt.Errorf("telemetry: %w", err)
 		}
 	}
@@ -206,7 +214,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 		SourcePath:   in.SourcePath,
 		SRTPath:      srtPath,
 		OutputPath:   in.OutputPath,
-		Subtitle:     t.Subtitle,
+		Subtitle:     muxSubtitle,
 		HasLocation:  hasLocation,
 		Lat:          loc.Lat,
 		Lon:          loc.Lon,
@@ -219,7 +227,33 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 		return fmt.Errorf("telemetry: muxing %s: %w", in.OutputPath, err)
 	}
 
+	// Hide the subtitle track (unless asked to show it): embedded telemetry
+	// -- the DJI layout above all -- is machine data for tools like Telemetry
+	// Overlay to read, not something a viewer should see pop up on screen.
+	// ffmpeg can't clear the track-enabled flag itself, so patch it here.
+	if muxSubtitle && !t.ShowSubtitle {
+		if err := hideSubtitleTrack(in.OutputPath); err != nil {
+			return fmt.Errorf("telemetry: hiding subtitle track in %s: %w", in.OutputPath, err)
+		}
+	}
+
 	return nil
+}
+
+// resolveSRTFormat maps the effect's SRTFormat string onto a
+// telemetry.SRTFormat and whether any subtitle should be muxed at all. "" and
+// "none" mean no subtitle; "dji" and "readable" select their layouts;
+// anything else is treated as no subtitle (the CLI validates the value up
+// front, so an unknown value only reaches here from a programmatic caller).
+func resolveSRTFormat(format string) (telemetry.SRTFormat, bool) {
+	switch format {
+	case "dji":
+		return telemetry.SRTFormatDJI, true
+	case "readable":
+		return telemetry.SRTFormatReadable, true
+	default:
+		return "", false
+	}
 }
 
 // gpxSidecarPath derives the GPX sidecar path from an effect's resolved
@@ -245,14 +279,15 @@ func writeGPXFile(path string, points []telemetry.ClipPoint, fields telemetry.Fi
 	return nil
 }
 
-// writeSRTFile creates path and renders points to it via telemetry.WriteSRT.
-func writeSRTFile(path string, points []telemetry.ClipPoint, fields telemetry.FieldOptions) error {
+// writeSRTFile creates path and renders points to it via telemetry.WriteSRT
+// in the given format.
+func writeSRTFile(path string, points []telemetry.ClipPoint, fields telemetry.FieldOptions, format telemetry.SRTFormat) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("creating SRT %s: %w", path, err)
 	}
 	defer f.Close()
-	if err := telemetry.WriteSRT(f, points, telemetry.SRTOptions{Fields: fields}); err != nil {
+	if err := telemetry.WriteSRT(f, points, telemetry.SRTOptions{Fields: fields, Format: format}); err != nil {
 		return fmt.Errorf("writing SRT %s: %w", path, err)
 	}
 	return nil

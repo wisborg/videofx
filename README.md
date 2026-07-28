@@ -14,7 +14,9 @@ several to apply them as a pipeline, see [Chaining effects](#chaining-effects)):
   Performance below).
 - **`telemetry`** — copies GPS and exercise telemetry from a Garmin FIT
   activity file onto a video clip: a location tag, plus an optional GPX
-  sidecar (`--gpx`) and/or muxed subtitle track (`--subtitle`), time-synced
+  sidecar (`--gpx`) and/or an embedded telemetry subtitle track (`--srt-format`,
+  including a `dji` layout that [Telemetry Overlay](#embedding-telemetry-for-telemetry-overlay)
+  reads directly), time-synced
   to the clip. The video/audio are stream-copied (no re-encode — lossless and
   fast). See Telemetry below.
 
@@ -95,7 +97,8 @@ Flags:
 - `--analysis-width` — gocv-stabilizer only: width in pixels at which motion is estimated (`0` = default `960`; height derived). Larger localizes features more finely but is slower. **Experimental**: on the test footage it did not measurably reduce residual shake — the residual there is real low-frequency motion the smoother keeps, not estimation noise — so whether a higher width yields visibly cleaner warps is an eyeball call. The chosen width is baked into a `--sidecar`'s cached analysis, so change `--analysis-width` and `--sidecar` together (or delete the sidecar) to re-analyze.
 - `--fit` — **telemetry only**, and **required** when `--effect telemetry` (Cobra can't express a conditional-required flag, so this is validated by hand at startup with a clear error if missing). Path to the Garmin FIT activity file to sync GPS/telemetry from.
 - `--offset` — telemetry only: clock-skew offset in seconds between the camera and the FIT-recording device, signed and fractional. Default `0`. See Telemetry below for the sync model. A **non-zero** offset also rewrites the output's `creation_time` to the corrected instant (and re-bases the GPX/subtitle timeline to match), so the clip finally carries its true wall-clock start.
-- `--subtitle` — telemetry only: **also** mux a `mov_text` subtitle track of the telemetry (one cue per second). **Off by default** — the location tag is always produced regardless; the subtitle track is opt-in because many players show it unbidden.
+- `--srt-format` — telemetry only: embed a `mov_text` telemetry subtitle track in this format — `none` (default), `readable` (a human-readable per-second readout), or `dji` (the DJI-drone SRT layout that [Telemetry Overlay](#embedding-telemetry-for-telemetry-overlay) reads directly from the video). The location tag is produced regardless. A muxed track is **hidden by default** (see `--show-subtitle`).
+- `--show-subtitle` — telemetry only: keep the embedded subtitle track visible/auto-displayed. **Off by default** — a muxed subtitle is embedded but hidden (its track-`enabled` flag cleared) so players don't pop it on screen while tools like Telemetry Overlay still read it. You'd never set this for `--srt-format dji` (machine data).
 - `--gpx` — telemetry only: **also** write a GPX sidecar next to the output (`clip - telemetry.gpx`). **Off by default** — most runs just want the muxed clip; the sidecar is a separate deliverable for map tools and re-syncing, so it's opt-in.
 - `--telemetry-stryd` — telemetry only: include Stryd running-dynamics developer fields (Form Power, Leg Spring Stiffness, ...) in the GPX sidecar and muxed SRT. Off by default.
 - `--strength` is accepted but **ignored** by `telemetry` — there is no "how strong" dial for attaching telemetry to a clip, so `ValidateStrength` accepts any value.
@@ -165,16 +168,18 @@ Notes:
 `--effect telemetry` copies GPS and exercise telemetry from a Garmin FIT
 activity file onto a video clip, producing:
 
-- The output video. Only when `--subtitle` is passed is a `mov_text`
-  subtitle track muxed in (one cue per second: GPS coordinates or an
-  explicit "GPS: no fix" marker, plus a pipe-separated readout of
-  distance/pace/heart rate/elevation/power/cadence/temperature — see
-  `internal/telemetry`'s `WriteSRT` for the exact format). Without it the
-  video/audio pass through untouched.
+- The output video. Only when `--srt-format` is `readable` or `dji` is a
+  `mov_text` subtitle track muxed in (one cue per second). `readable` shows
+  GPS coordinates (or an explicit "GPS: no fix" marker) plus a pipe-separated
+  readout of distance/pace/heart rate/elevation/power/cadence/temperature;
+  `dji` emits the DJI telemetry layout for Telemetry Overlay (see
+  [below](#embedding-telemetry-for-telemetry-overlay)). The track is hidden
+  unless `--show-subtitle` is passed. With `--srt-format none` (the default)
+  the video/audio pass through untouched.
 - A GPX 1.1 sidecar next to the output (`clip - telemetry.mp4` ->
   `clip - telemetry.gpx`), **only when `--gpx` is passed**, for tools that
   consume a track file directly (Garmin Connect, DashWare, GPS-overlay
-  software, ...) rather than reading the muxed subtitle.
+  software, ...) rather than reading an embedded track.
 - A global `location` metadata tag (and, for Apple players, the
   `com.apple.quicktime.location.ISO6709` variant), set from the clip's
   first GPS-having telemetry point. When that point also has an elevation
@@ -231,13 +236,45 @@ overlapping part only — it never silently truncates without saying so.
 Example:
 
 ```
-videofx run.mp4 --effect telemetry --fit "2026-07-05 063256 Run.fit" --offset 0 --subtitle --gpx
+videofx run.mp4 --effect telemetry --fit "2026-07-05 063256 Run.fit" --offset 0 --srt-format readable --show-subtitle --gpx
 ```
 
-produces `run - telemetry.mp4` (stream-copied video + audio + muxed SRT +
-location tag) and, because `--gpx` was passed, `run - telemetry.gpx` next to
-the original. Drop `--subtitle`/`--gpx` (the defaults) to get just the
-location-tagged clip.
+produces `run - telemetry.mp4` (stream-copied video + audio + a visible
+telemetry subtitle + location tag) and, because `--gpx` was passed,
+`run - telemetry.gpx` next to the original. Drop the `--srt-format`/`--show-subtitle`/`--gpx`
+options (the defaults) to get just the location-tagged clip.
+
+### Embedding telemetry for Telemetry Overlay
+
+[Telemetry Overlay](https://goprotelemetryextractor.com/) can read GPS telemetry
+**directly from the video file** (no separate `.fit`/`.gpx`) when it's embedded
+as a DJI-format subtitle track. `--srt-format dji` produces exactly that layout —
+one cue per second carrying the wall-clock time and GPS position in DJI's
+bracketed form:
+
+```
+videofx run.mp4 --effect telemetry --fit "run.fit" --srt-format dji
+```
+
+```
+<font size="28">FrameCnt: 1, DiffTime: 1000ms 2026-07-04 21:05:53.000 [latitude: -27.964186] [longitude: 153.426998] [rel_alt: 0.000 abs_alt: -0.600] </font>
+```
+
+Notes:
+
+- The track is **hidden by default** — its container `enabled` flag is cleared
+  (ffmpeg can't do this, so videofx patches the `tkhd` box in place), so a normal
+  player never shows the machine-readable text on screen, while Telemetry Overlay
+  (and ffmpeg) still read the samples. Pass `--show-subtitle` only if you want to
+  see it.
+- The DJI layout carries **GPS/position, altitude, and time only** — that's what
+  Telemetry Overlay reads from an embedded subtitle. For the full sensor suite
+  (heart rate, power, cadence, …), give Telemetry Overlay the `--gpx` sidecar or
+  the original `.fit` as an *external* source instead; no embedded video format
+  carries those for it to read directly.
+- Altitude goes in `abs_alt` (MSL, from the FIT's GPS elevation); `rel_alt` is
+  always `0.000` (there's no takeoff reference for ground activity). The datetime
+  is UTC, matching the GPX sidecar.
 
 ## Calibrating quality
 

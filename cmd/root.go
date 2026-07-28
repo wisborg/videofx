@@ -46,7 +46,8 @@ var (
 
 	fitPath        string
 	offsetSeconds  float64
-	subtitle       bool
+	srtFormat      string
+	showSubtitle   bool
 	gpx            bool
 	telemetryStryd bool
 )
@@ -119,8 +120,10 @@ func NewRootCmd() *cobra.Command {
 		"telemetry only: path to a Garmin FIT activity file to sync GPS/telemetry from (required with --effect telemetry)")
 	root.Flags().Float64Var(&offsetSeconds, "offset", 0,
 		"telemetry only: clock-skew offset in seconds between the camera and the FIT-recording device, signed and fractional -- fit_time = creation_time + offset + pts, so a positive offset means the camera's clock reads behind the watch's. A non-zero offset also rewrites the output's creation_time to the corrected instant (and re-bases the GPX/subtitle to match)")
-	root.Flags().BoolVar(&subtitle, "subtitle", false,
-		"telemetry only: also mux a mov_text subtitle track of the telemetry (off by default; the location tag is always produced regardless)")
+	root.Flags().StringVar(&srtFormat, "srt-format", "none",
+		"telemetry only: embed a telemetry subtitle track in this format -- \"none\" (default), \"readable\" (a human-readable per-second readout), or \"dji\" (the DJI-drone SRT layout that Telemetry Overlay reads directly from the video). The location tag is produced regardless. A muxed track is hidden by default (see --show-subtitle)")
+	root.Flags().BoolVar(&showSubtitle, "show-subtitle", false,
+		"telemetry only: keep the embedded subtitle track visible/auto-displayed. Off by default: a muxed subtitle is embedded but hidden (its track-enabled flag cleared) so players don't show it while tools like Telemetry Overlay still read it. You would never set this for --srt-format dji (machine data)")
 	root.Flags().BoolVar(&gpx, "gpx", false,
 		"telemetry only: also write a GPX sidecar next to the output (off by default)")
 	root.Flags().BoolVar(&telemetryStryd, "telemetry-stryd", false,
@@ -230,6 +233,18 @@ func warnCRFIgnoredByGoCV(w io.Writer, crfChanged bool, effs []effects.Effect) {
 	}
 }
 
+// validateSRTFormat rejects an unknown --srt-format up front (rather than
+// letting an unrecognized value silently mux no subtitle deep in the effect).
+// The accepted set mirrors resolveSRTFormat in the effect.
+func validateSRTFormat(format string) error {
+	switch format {
+	case "none", "readable", "dji":
+		return nil
+	default:
+		return fmt.Errorf("--srt-format %q is invalid; use none, readable, or dji", format)
+	}
+}
+
 // validateZoomTransition rejects a negative --zoom-transition. 0 (constant
 // zoom, the original behavior) and any positive number of seconds are valid;
 // a negative duration is meaningless. Split out from runRoot so it is
@@ -311,13 +326,14 @@ func configureEffect(effect effects.Effect) error {
 	return nil
 }
 
-// configureTelemetry applies --fit/--offset/--subtitle/--gpx/--telemetry-stryd
-// to effect if it is a *effects.Telemetry.
+// configureTelemetry applies --fit/--offset/--srt-format/--show-subtitle/--gpx/
+// --telemetry-stryd to effect if it is a *effects.Telemetry.
 func configureTelemetry(effect effects.Effect) {
 	if tel, ok := effect.(*effects.Telemetry); ok {
 		tel.FitPath = fitPath
 		tel.OffsetSeconds = offsetSeconds
-		tel.Subtitle = subtitle
+		tel.SRTFormat = srtFormat
+		tel.ShowSubtitle = showSubtitle
 		tel.GPX = gpx
 		tel.IncludeStryd = telemetryStryd
 	}
@@ -369,6 +385,9 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := validateZoomTransition(zoomTransition); err != nil {
+		return err
+	}
+	if err := validateSRTFormat(srtFormat); err != nil {
 		return err
 	}
 

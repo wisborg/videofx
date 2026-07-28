@@ -296,18 +296,19 @@ func names(effs []effects.Effect) []string {
 
 // TestConfigureTelemetry pins the CLI's type-assertion plumbing: the
 // package-level flag variables (as Cobra would set them from --fit/
-// --offset/--subtitle/--telemetry-stryd) must land on a
+// --offset/--srt-format/--show-subtitle/--telemetry-stryd) must land on a
 // *effects.Telemetry's exported fields untouched, and must never touch
 // (or panic on) an effect of a different concrete type.
 func TestConfigureTelemetry(t *testing.T) {
-	origFit, origOffset, origSub, origGPX, origStryd := fitPath, offsetSeconds, subtitle, gpx, telemetryStryd
+	origFit, origOffset, origSRT, origShow, origGPX, origStryd := fitPath, offsetSeconds, srtFormat, showSubtitle, gpx, telemetryStryd
 	t.Cleanup(func() {
-		fitPath, offsetSeconds, subtitle, gpx, telemetryStryd = origFit, origOffset, origSub, origGPX, origStryd
+		fitPath, offsetSeconds, srtFormat, showSubtitle, gpx, telemetryStryd = origFit, origOffset, origSRT, origShow, origGPX, origStryd
 	})
 
 	fitPath = "test_videos/run.fit"
 	offsetSeconds = -2.5
-	subtitle = true
+	srtFormat = "dji"
+	showSubtitle = true
 	gpx = true
 	telemetryStryd = true
 
@@ -320,8 +321,11 @@ func TestConfigureTelemetry(t *testing.T) {
 	if tel.OffsetSeconds != offsetSeconds {
 		t.Errorf("OffsetSeconds = %v, want %v", tel.OffsetSeconds, offsetSeconds)
 	}
-	if tel.Subtitle != subtitle {
-		t.Errorf("Subtitle = %v, want %v", tel.Subtitle, subtitle)
+	if tel.SRTFormat != srtFormat {
+		t.Errorf("SRTFormat = %q, want %q", tel.SRTFormat, srtFormat)
+	}
+	if tel.ShowSubtitle != showSubtitle {
+		t.Errorf("ShowSubtitle = %v, want %v", tel.ShowSubtitle, showSubtitle)
 	}
 	if tel.GPX != gpx {
 		t.Errorf("GPX = %v, want %v", tel.GPX, gpx)
@@ -336,13 +340,26 @@ func TestConfigureTelemetry(t *testing.T) {
 	configureTelemetry(ws)
 }
 
+// TestValidateSRTFormat pins the accepted --srt-format set.
+func TestValidateSRTFormat(t *testing.T) {
+	for _, f := range []string{"none", "readable", "dji"} {
+		if err := validateSRTFormat(f); err != nil {
+			t.Errorf("validateSRTFormat(%q) = %v, want nil", f, err)
+		}
+	}
+	for _, f := range []string{"", "srt", "gpx", "DJI", "readable "} {
+		if err := validateSRTFormat(f); err == nil {
+			t.Errorf("validateSRTFormat(%q) should have failed", f)
+		}
+	}
+}
+
 // TestNewRootCmd_TelemetryFlagsRegistered guards against a typo'd flag
-// name silently making --fit/--offset/--subtitle/--telemetry-stryd
-// unrecognized (Cobra would otherwise just report "unknown flag" at
-// runtime, not a build failure).
+// name silently making the telemetry flags unrecognized (Cobra would
+// otherwise just report "unknown flag" at runtime, not a build failure).
 func TestNewRootCmd_TelemetryFlagsRegistered(t *testing.T) {
 	root := NewRootCmd()
-	for _, name := range []string{"fit", "offset", "subtitle", "gpx", "telemetry-stryd"} {
+	for _, name := range []string{"fit", "offset", "srt-format", "show-subtitle", "gpx", "telemetry-stryd"} {
 		if root.Flags().Lookup(name) == nil {
 			t.Errorf("flag --%s not registered", name)
 		}

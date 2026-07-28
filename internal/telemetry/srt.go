@@ -9,8 +9,30 @@ import (
 	"time"
 )
 
+// SRTFormat selects WriteSRT's cue layout.
+type SRTFormat string
+
+const (
+	// SRTFormatReadable is the human-readable telemetry readout (the zero
+	// value / default): a GPS line plus a pipe-separated metrics line, meant
+	// to be watched.
+	SRTFormatReadable SRTFormat = "readable"
+	// SRTFormatDJI is the DJI-drone SRT telemetry layout that Telemetry
+	// Overlay (goprotelemetryextractor.com) reads directly from an embedded
+	// subtitle track: one line carrying FrameCnt/DiffTime, an absolute
+	// wall-clock datetime, and GPS position in DJI's bracketed key/value
+	// form. Machine data, not meant to be watched -- see formatDJICueBody.
+	SRTFormatDJI SRTFormat = "dji"
+)
+
 // SRTOptions controls WriteSRT's output.
 type SRTOptions struct {
+	// Format selects the cue layout; the zero value ("") means
+	// SRTFormatReadable. SRTFormatDJI emits the machine-readable DJI layout
+	// instead -- in that mode Fields is ignored (the DJI layout carries GPS
+	// position and time only, which is what Telemetry Overlay consumes).
+	Format SRTFormat
+
 	// Fields selects which readout data each cue's second line shows.
 	// The zero value turns everything off; use DefaultFieldOptions for
 	// the documented default set. FieldOptions.Pace is SRT-specific (GPX
@@ -58,13 +80,44 @@ func WriteSRT(w io.Writer, points []ClipPoint, opts SRTOptions) error {
 		if i+1 < len(points) {
 			end = points[i+1].PTS
 		}
+		var body string
+		switch opts.Format {
+		case SRTFormatDJI:
+			body = formatDJICueBody(p, i+1, end-p.PTS)
+		default:
+			body = formatSRTCueBody(p.Sample, opts.Fields)
+		}
 		_, err := fmt.Fprintf(w, "%d\n%s --> %s\n%s\n\n",
-			i+1, srtTimestamp(p.PTS), srtTimestamp(end), formatSRTCueBody(p.Sample, opts.Fields))
+			i+1, srtTimestamp(p.PTS), srtTimestamp(end), body)
 		if err != nil {
 			return fmt.Errorf("telemetry: writing SRT cue %d: %w", i+1, err)
 		}
 	}
 	return nil
+}
+
+// formatDJICueBody renders one cue in the DJI-drone SRT telemetry layout
+// Telemetry Overlay reads directly from an embedded subtitle track: a single
+// line wrapping FrameCnt/DiffTime, the absolute wall-clock datetime, and GPS
+// position in DJI's bracketed key/value form. Only the fields Telemetry
+// Overlay consumes are emitted. The datetime is p.WallTime in UTC (matching
+// the GPX sidecar's <time>), formatted DJI-style without a timezone marker.
+// A point with no GPS fix still gets a cue (so cue timing stays continuous)
+// but omits the lat/lon/alt brackets -- how a real DJI clip records a
+// dropout -- and the elevation bracket is omitted when the point has no
+// elevation, carrying abs_alt (MSL) from Sample.Elevation when it does.
+func formatDJICueBody(p ClipPoint, frameCnt int, diff time.Duration) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `<font size="28">FrameCnt: %d, DiffTime: %dms %s`,
+		frameCnt, diff.Milliseconds(), p.WallTime.UTC().Format("2006-01-02 15:04:05.000"))
+	if s := p.Sample; s.HasGPS {
+		fmt.Fprintf(&b, " [latitude: %.6f] [longitude: %.6f]", s.Lat, s.Lon)
+		if s.HasElevation {
+			fmt.Fprintf(&b, " [rel_alt: 0.000 abs_alt: %.3f]", s.Elevation)
+		}
+	}
+	b.WriteString(" </font>")
+	return b.String()
 }
 
 // srtTimestamp formats d (relative to the clip's start) in SRT's

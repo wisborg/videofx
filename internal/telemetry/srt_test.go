@@ -208,3 +208,45 @@ func TestFormatSRTCueBody_DistancePaceFormatting(t *testing.T) {
 		t.Errorf("cue body missing pace, got:\n%s", body)
 	}
 }
+
+// TestWriteSRT_DJI pins the DJI-drone layout Telemetry Overlay reads: each
+// cue carries the absolute WallTime (UTC, DJI's no-timezone datetime form)
+// and GPS as bracketed key/value pairs, with abs_alt from Elevation. A
+// no-fix point still produces a cue (timing stays continuous) but omits the
+// bracket group.
+func TestWriteSRT_DJI(t *testing.T) {
+	base := time.Date(2026, 7, 4, 21, 5, 53, 0, time.UTC)
+	points := []ClipPoint{
+		{PTS: 0, WallTime: base, Sample: Sample{HasGPS: true, Lat: -27.9642, Lon: 153.4270, HasElevation: true, Elevation: 5.6}},
+		{PTS: time.Second, WallTime: base.Add(time.Second), Sample: Sample{HasGPS: false}},
+	}
+	var buf bytes.Buffer
+	if err := WriteSRT(&buf, points, SRTOptions{Format: SRTFormatDJI}); err != nil {
+		t.Fatalf("WriteSRT(dji) error: %v", err)
+	}
+	out := buf.String()
+
+	// Cue 1: datetime + bracketed GPS with abs_alt.
+	for _, want := range []string{
+		"2026-07-04 21:05:53.000",
+		"[latitude: -27.964200]",
+		"[longitude: 153.427000]",
+		"[rel_alt: 0.000 abs_alt: 5.600]",
+		"FrameCnt: 1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("DJI output missing %q\n---\n%s", want, out)
+		}
+	}
+	// Cue 2 (no fix): present, with its datetime, but no coordinate bracket.
+	if !strings.Contains(out, "2026-07-04 21:05:54.000") {
+		t.Errorf("second cue's datetime missing:\n%s", out)
+	}
+	if strings.Count(out, "[latitude:") != 1 {
+		t.Errorf("no-fix cue must omit the latitude bracket (want exactly 1 total):\n%s", out)
+	}
+	// Relative cue timing is still standard SRT (unchanged by format).
+	if !strings.Contains(out, "00:00:00,000 --> 00:00:01,000") {
+		t.Errorf("DJI cue timing should be clip-relative SRT:\n%s", out)
+	}
+}
