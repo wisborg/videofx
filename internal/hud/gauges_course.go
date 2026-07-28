@@ -82,7 +82,7 @@ func progressGeometry(r *Renderer, box Box, f Frame) (progressPlot, bool) {
 		return progressPlot{}, false
 	}
 	px := r.FontPx(f)
-	barW := float64(f.Width) * 0.5
+	barW := float64(f.Width) * orient(f, 0.5, 0.85) // wider on a portrait frame
 	return progressPlot{
 		px: px, left: box.X - barW/2, right: box.X + barW/2,
 		barY: box.Y + px*1.5, barH: math.Max(3, px*0.11), totalD: f.Course.TotalDistance,
@@ -175,8 +175,8 @@ func courseMapGeometry(r *Renderer, box Box, f Frame) (courseMapGeo, bool) {
 		return courseMapGeo{}, false // a single point, nothing to draw
 	}
 
-	maxW := float64(f.Width) * 0.17
-	maxH := float64(f.Height) * 0.38
+	maxW := float64(f.Width) * orient(f, 0.17, 0.34)  // wider on a portrait frame
+	maxH := float64(f.Height) * orient(f, 0.38, 0.28) // shorter on a (tall) portrait frame
 	scale := math.Inf(1)
 	if spanX > 0 {
 		scale = math.Min(scale, maxW/spanX)

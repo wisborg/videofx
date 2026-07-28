@@ -17,8 +17,15 @@ import (
 // frame size or count from the byte stream the way it could from a
 // self-describing container — Probe is how it learns that up front.
 type Info struct {
-	// Width, Height are the source video's pixel dimensions.
+	// Width, Height are the source video's CODED pixel dimensions (as stored
+	// in the stream). For a clip with a display rotation these are not the
+	// on-screen dimensions -- use DisplayWidth/DisplayHeight for those.
 	Width, Height int
+	// Rotation is the display rotation in degrees (0, 90, 180, or 270) from
+	// the stream's display matrix / rotate tag. ffmpeg auto-rotates such a
+	// clip to its display orientation when it enters a filtergraph, so a
+	// caller compositing onto it must work in display dimensions.
+	Rotation int
 	// FPS is the video stream's nominal frame rate (ffprobe's
 	// r_frame_rate, falling back to avg_frame_rate for the rare stream
 	// that reports r_frame_rate as 0/0).
@@ -67,6 +74,23 @@ type Info struct {
 	CreationTimeNaive bool
 }
 
+// DisplayWidth is the on-screen width after any display rotation is applied
+// (swapped with the height for a 90/270-degree rotation).
+func (i Info) DisplayWidth() int {
+	if i.Rotation == 90 || i.Rotation == 270 {
+		return i.Height
+	}
+	return i.Width
+}
+
+// DisplayHeight is the on-screen height after any display rotation is applied.
+func (i Info) DisplayHeight() int {
+	if i.Rotation == 90 || i.Rotation == 270 {
+		return i.Width
+	}
+	return i.Height
+}
+
 // ffprobeOutput mirrors the subset of `ffprobe -show_format -show_streams
 // -print_format json` output this package needs. ffprobe emits numeric
 // fields it isn't fully sure about (duration, nb_frames, bit_rate, ...)
@@ -78,13 +102,27 @@ type ffprobeOutput struct {
 }
 
 type ffprobeStream struct {
-	CodecType    string `json:"codec_type"`
-	Width        int    `json:"width"`
-	Height       int    `json:"height"`
-	RFrameRate   string `json:"r_frame_rate"`
-	AvgFrameRate string `json:"avg_frame_rate"`
-	NBFrames     string `json:"nb_frames"`
-	Duration     string `json:"duration"`
+	CodecType    string            `json:"codec_type"`
+	Width        int               `json:"width"`
+	Height       int               `json:"height"`
+	RFrameRate   string            `json:"r_frame_rate"`
+	AvgFrameRate string            `json:"avg_frame_rate"`
+	NBFrames     string            `json:"nb_frames"`
+	Duration     string            `json:"duration"`
+	Tags         ffprobeStreamTags `json:"tags"`
+	SideDataList []ffprobeSideData `json:"side_data_list"`
+}
+
+// ffprobeStreamTags carries the older-style rotate tag (some containers put
+// the display rotation here rather than in a display-matrix side-data entry).
+type ffprobeStreamTags struct {
+	Rotate string `json:"rotate"`
+}
+
+// ffprobeSideData carries the display-matrix rotation (the modern place a
+// container records display rotation).
+type ffprobeSideData struct {
+	Rotation int `json:"rotation"`
 }
 
 type ffprobeFormat struct {
@@ -187,9 +225,25 @@ func parseProbeJSON(data []byte) (Info, error) {
 
 	creationTime, hasCreationTime, creationTimeNaive := parseCreationTime(parsed.Format.Tags.CreationTime)
 
+	// Display rotation: prefer the display-matrix side-data entry, falling
+	// back to the older rotate tag. Normalized to [0, 360).
+	rotation := 0
+	for _, sd := range videoStream.SideDataList {
+		if sd.Rotation != 0 {
+			rotation = sd.Rotation
+		}
+	}
+	if rotation == 0 && videoStream.Tags.Rotate != "" {
+		if r, err := strconv.Atoi(videoStream.Tags.Rotate); err == nil {
+			rotation = r
+		}
+	}
+	rotation = ((rotation % 360) + 360) % 360
+
 	return Info{
 		Width:             videoStream.Width,
 		Height:            videoStream.Height,
+		Rotation:          rotation,
 		FPS:               fps,
 		NBFrames:          nbFrames,
 		Duration:          duration,

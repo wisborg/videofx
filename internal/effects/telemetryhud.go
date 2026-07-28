@@ -50,7 +50,13 @@ type TelemetryHUD struct {
 	// the target when present, else a mild default sigma.
 	ElevationSmoothing           float64
 	ElevationGain, ElevationLoss float64
-	// Layout is the HUD arrangement; the zero value uses hud.DefaultLayout.
+	// LayoutMode selects the gauge arrangement by name: "auto" (the default)
+	// picks the vertical layout for portrait clips and the default otherwise,
+	// or "default"/"vertical" to force one. Wired from --hud-layout; ignored
+	// when Layout is set.
+	LayoutMode string
+	// Layout, when non-nil, overrides LayoutMode with an explicit arrangement
+	// (for programmatic callers/tests).
 	Layout *hud.Layout
 }
 
@@ -148,6 +154,13 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		return fmt.Errorf("telemetry-hud: could not determine %s's frame count", in.SourcePath)
 	}
 
+	// Work in DISPLAY dimensions: a rotated clip (e.g. a phone-shot vertical
+	// video stored as landscape with a 90-degree display matrix) is
+	// auto-rotated by ffmpeg to its display orientation before it reaches the
+	// overlay filter, so the HUD must be rendered at those dimensions to line
+	// up. For an unrotated clip these equal the coded Width/Height.
+	dw, dh := info.DisplayWidth(), info.DisplayHeight()
+
 	// Build the whole-course elevation model once (see telemetry.Elevation
 	// Options). With no explicit smoothing or targets, default the targets to
 	// the FIT device's own total ascent/descent -- a far better anchor for
@@ -169,7 +182,7 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		Route:         buildRoute(track),
 	}
 
-	layout := hud.DefaultLayout()
+	layout := hud.SelectLayout(t.LayoutMode, dw, dh)
 	if t.Layout != nil {
 		layout = *t.Layout
 	}
@@ -178,8 +191,8 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	enc, err := vidio.OpenOverlay(ctx, vidio.OverlayConfig{
 		SourcePath: in.SourcePath,
 		OutputPath: in.OutputPath,
-		Width:      info.Width,
-		Height:     info.Height,
+		Width:      dw,
+		Height:     dh,
 		FPS:        info.FPS,
 		Quality:    t.Quality,
 	})
@@ -192,12 +205,12 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	// bulk of the render cost and don't change frame to frame. Each frame then
 	// copies this base and draws only the dynamic content (markers, live
 	// values) on top -- a large speedup over redrawing everything per frame.
-	staticBase := image.NewRGBA(image.Rect(0, 0, info.Width, info.Height))
-	renderer.RenderStatic(staticBase, hud.Frame{Width: info.Width, Height: info.Height, Course: course})
+	staticBase := image.NewRGBA(image.Rect(0, 0, dw, dh))
+	renderer.RenderStatic(staticBase, hud.Frame{Width: dw, Height: dh, Course: course})
 
 	// One RGBA buffer, reused each frame (a fresh 4K RGBA per frame would
 	// allocate ~33MB every frame).
-	img := image.NewRGBA(image.Rect(0, 0, info.Width, info.Height))
+	img := image.NewRGBA(image.Rect(0, 0, dw, dh))
 	for i := 0; i < frameCount; i++ {
 		if i%256 == 0 {
 			if err := ctx.Err(); err != nil {
@@ -217,7 +230,7 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 
 		copy(img.Pix, staticBase.Pix) // composite over the cached static layer
 		renderer.RenderDynamic(img, hud.Frame{
-			Width: info.Width, Height: info.Height,
+			Width: dw, Height: dh,
 			Index: i, Total: frameCount,
 			Time:      display,
 			Sample:    sample,

@@ -141,6 +141,43 @@ func DefaultLayout() Layout {
 	}
 }
 
+// VerticalLayout is the arrangement for vertical (portrait) videos, where the
+// default layout's seven gauges crowd the narrow frame. It keeps only the
+// three that read well stacked down a tall frame: the distance progress bar
+// (top), the course map (middle-right, matching the landscape layout), and the
+// elevation profile (bottom). The width-sensitive gauges widen themselves for
+// portrait frames (see isPortrait), and the font is a touch larger relative to
+// the narrow width.
+func VerticalLayout() Layout {
+	return Layout{
+		Margin:    0.02,
+		FontScale: 0.045,
+		Placements: []Placement{
+			{Gauge: ProgressBarGauge{}, Anchor: TopCenter, Enabled: true},
+			{Gauge: CourseMapGauge{}, Anchor: MiddleRight, Enabled: true},
+			{Gauge: ElevationProfileGauge{}, Anchor: BottomCenter, Enabled: true},
+		},
+	}
+}
+
+// SelectLayout returns the HUD layout for mode and the frame's dimensions:
+// "vertical" and "default" force those layouts; "auto" (the default) picks the
+// vertical layout for portrait frames (height > width) and the default layout
+// otherwise. An unknown mode is treated as "auto".
+func SelectLayout(mode string, width, height int) Layout {
+	switch mode {
+	case "vertical":
+		return VerticalLayout()
+	case "default":
+		return DefaultLayout()
+	default: // "auto" (and anything unexpected)
+		if height > width {
+			return VerticalLayout()
+		}
+		return DefaultLayout()
+	}
+}
+
 // Renderer holds a HUD Layout and a font-face cache, and draws frames.
 type Renderer struct {
 	layout Layout
@@ -181,9 +218,25 @@ func (r *Renderer) face(px float64) font.Face {
 	return f
 }
 
-// FontPx is the base text size (px) for frame f under this layout.
+// FontPx is the base text size (px) for frame f under this layout, scaled to
+// the frame's SMALLER dimension so text is sized against the narrow edge in
+// both orientations (for a landscape frame the smaller dimension is the
+// height, so this is unchanged from height-based sizing).
 func (r *Renderer) FontPx(f Frame) float64 {
-	return float64(f.Height) * r.layout.FontScale
+	return float64(min(f.Width, f.Height)) * r.layout.FontScale
+}
+
+// isPortrait reports whether f is taller than it is wide (a vertical video).
+func isPortrait(f Frame) bool { return f.Height > f.Width }
+
+// orient returns portrait when f is a vertical frame, else landscape -- used
+// by the width-sensitive gauges to take up more of the narrow width on a
+// portrait video.
+func orient(f Frame, landscape, portrait float64) float64 {
+	if isPortrait(f) {
+		return portrait
+	}
+	return landscape
 }
 
 // Text draws s in white; see TextColored for the positioning contract.

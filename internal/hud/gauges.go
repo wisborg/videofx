@@ -99,7 +99,7 @@ func elevGeometry(r *Renderer, box Box, f Frame) (elevPlot, bool) {
 	em := f.Course.Elevation
 	px := r.FontPx(f)
 	lblPx := px * 0.7
-	pw := float64(f.Width) * 0.42
+	pw := float64(f.Width) * orient(f, 0.42, 0.85) // wider on a portrait frame
 	ph := float64(f.Height) * 0.12
 	minE, maxE := em.Range()
 	span := maxE - minE

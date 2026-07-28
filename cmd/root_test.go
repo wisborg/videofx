@@ -149,6 +149,27 @@ func TestValidateTrim(t *testing.T) {
 	}
 }
 
+func TestValidateHUDLayout(t *testing.T) {
+	cases := []struct {
+		mode    string
+		wantErr bool
+	}{
+		{"auto", false},
+		{"default", false},
+		{"vertical", false},
+		{"", true},
+		{"portrait", true},
+		{"Vertical", true}, // case-sensitive
+	}
+	for _, c := range cases {
+		t.Run(c.mode, func(t *testing.T) {
+			if err := validateHUDLayout(c.mode); (err != nil) != c.wantErr {
+				t.Errorf("validateHUDLayout(%q) = %v, wantErr %v", c.mode, err, c.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateSuffix(t *testing.T) {
 	cases := []struct {
 		name    string

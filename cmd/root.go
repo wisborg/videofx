@@ -56,6 +56,7 @@ var (
 	gpx            bool
 	telemetryStryd bool
 	hudTimeZone    string
+	hudLayout      string
 	elevSmoothing  float64
 	elevGain       float64
 	elevLoss       float64
@@ -145,6 +146,8 @@ func NewRootCmd() *cobra.Command {
 		"telemetry only: also write a GPX sidecar next to the output (off by default)")
 	root.Flags().StringVar(&hudTimeZone, "hud-timezone", "",
 		"telemetry-hud only: timezone the on-screen clock displays in -- an IANA name (e.g. \"Australia/Brisbane\") or a fixed offset (e.g. \"+10:00\"). Default: UTC. Only affects the clock gauge; telemetry sync is always UTC")
+	root.Flags().StringVar(&hudLayout, "hud-layout", "auto",
+		"telemetry-hud only: gauge arrangement -- \"auto\" (default: picks a vertical layout for portrait clips, the full layout otherwise), \"default\" (the full landscape set), or \"vertical\" (distance/map/elevation only, for portrait videos)")
 	root.Flags().Float64Var(&elevSmoothing, "elevation-smoothing", 0,
 		"telemetry-hud only: Gaussian smoothing width (in FIT samples, ~seconds) applied to the noisy GPS/barometric elevation before the profile/gain-loss/incline gauges use it. 0 (default) = auto: tuned from --elevation-gain/--elevation-loss, or the FIT device's own totals, or a mild default")
 	root.Flags().Float64Var(&elevGain, "elevation-gain", 0,
@@ -286,6 +289,17 @@ func warnCRFIgnoredByGoCV(w io.Writer, crfChanged bool, effs []effects.Effect) {
 	}
 }
 
+// validateHUDLayout rejects an unknown --hud-layout up front (the accepted set
+// mirrors hud.SelectLayout).
+func validateHUDLayout(mode string) error {
+	switch mode {
+	case "auto", "default", "vertical":
+		return nil
+	default:
+		return fmt.Errorf("--hud-layout %q is invalid; use auto, default, or vertical", mode)
+	}
+}
+
 // validateTrim rejects a nonsensical --start/--end range up front: negative
 // times, or an --end at or before --start. An --end past the actual clip
 // length isn't an error here (it's clamped per file to each clip's duration in
@@ -408,6 +422,7 @@ func configureEffect(effect effects.Effect) error {
 		h.ElevationSmoothing = elevSmoothing
 		h.ElevationGain = elevGain
 		h.ElevationLoss = elevLoss
+		h.LayoutMode = hudLayout
 	}
 	configureTelemetry(effect)
 	return nil
@@ -526,6 +541,9 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := validateTrim(trimStart, trimEnd); err != nil {
+		return err
+	}
+	if err := validateHUDLayout(hudLayout); err != nil {
 		return err
 	}
 

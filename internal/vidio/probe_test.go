@@ -166,6 +166,94 @@ func TestParseProbeJSON_CreationTime_Garbage(t *testing.T) {
 	}
 }
 
+// TestParseProbeJSON_RotationSideData pins the modern display-matrix path: a
+// phone-shot vertical clip is stored landscape (3840x2160) with a 90-degree
+// rotation, so the coded dims stay landscape but the display dims are portrait.
+func TestParseProbeJSON_RotationSideData(t *testing.T) {
+	data := []byte(`{
+		"streams": [
+			{"codec_type": "video", "width": 3840, "height": 2160, "r_frame_rate": "30/1", "avg_frame_rate": "30/1",
+			 "side_data_list": [{"side_data_type": "Display Matrix", "rotation": 90}]}
+		],
+		"format": {"duration": "10.0"}
+	}`)
+	info, err := parseProbeJSON(data)
+	if err != nil {
+		t.Fatalf("parseProbeJSON returned error: %v", err)
+	}
+	if info.Rotation != 90 {
+		t.Errorf("Rotation = %d, want 90", info.Rotation)
+	}
+	// Coded dims stay as stored; display dims swap for a 90-degree rotation.
+	if info.Width != 3840 || info.Height != 2160 {
+		t.Errorf("coded dims = %dx%d, want 3840x2160", info.Width, info.Height)
+	}
+	if info.DisplayWidth() != 2160 || info.DisplayHeight() != 3840 {
+		t.Errorf("display dims = %dx%d, want 2160x3840 (portrait)", info.DisplayWidth(), info.DisplayHeight())
+	}
+}
+
+// TestParseProbeJSON_RotationNegativeNormalized pins two things: ffprobe often
+// reports the display-matrix rotation as a negative angle (-90), and the older
+// containers carry it in a "rotate" tag rather than side_data. Both must
+// normalize into [0, 360).
+func TestParseProbeJSON_RotationNegativeNormalized(t *testing.T) {
+	// Negative side_data rotation, normalized to 270.
+	sideData := []byte(`{
+		"streams": [
+			{"codec_type": "video", "width": 1920, "height": 1080, "r_frame_rate": "30/1", "avg_frame_rate": "30/1",
+			 "side_data_list": [{"rotation": -90}]}
+		],
+		"format": {"duration": "5.0"}
+	}`)
+	info, err := parseProbeJSON(sideData)
+	if err != nil {
+		t.Fatalf("parseProbeJSON returned error: %v", err)
+	}
+	if info.Rotation != 270 {
+		t.Errorf("Rotation = %d, want 270 (-90 normalized)", info.Rotation)
+	}
+	if info.DisplayWidth() != 1080 || info.DisplayHeight() != 1920 {
+		t.Errorf("display dims = %dx%d, want 1080x1920", info.DisplayWidth(), info.DisplayHeight())
+	}
+
+	// Older-style "rotate" tag, no side_data.
+	rotateTag := []byte(`{
+		"streams": [
+			{"codec_type": "video", "width": 1920, "height": 1080, "r_frame_rate": "30/1", "avg_frame_rate": "30/1",
+			 "tags": {"rotate": "90"}}
+		],
+		"format": {"duration": "5.0"}
+	}`)
+	info, err = parseProbeJSON(rotateTag)
+	if err != nil {
+		t.Fatalf("parseProbeJSON returned error: %v", err)
+	}
+	if info.Rotation != 90 {
+		t.Errorf("Rotation = %d, want 90 (from rotate tag)", info.Rotation)
+	}
+}
+
+// TestParseProbeJSON_NoRotation pins the common case: an unrotated landscape
+// clip reports Rotation 0 and display dims that equal the coded dims.
+func TestParseProbeJSON_NoRotation(t *testing.T) {
+	data := []byte(`{
+		"streams": [{"codec_type": "video", "width": 3840, "height": 2160, "r_frame_rate": "30/1", "avg_frame_rate": "30/1"}],
+		"format": {"duration": "5.0"}
+	}`)
+	info, err := parseProbeJSON(data)
+	if err != nil {
+		t.Fatalf("parseProbeJSON returned error: %v", err)
+	}
+	if info.Rotation != 0 {
+		t.Errorf("Rotation = %d, want 0", info.Rotation)
+	}
+	if info.DisplayWidth() != info.Width || info.DisplayHeight() != info.Height {
+		t.Errorf("display dims %dx%d should equal coded dims %dx%d when unrotated",
+			info.DisplayWidth(), info.DisplayHeight(), info.Width, info.Height)
+	}
+}
+
 func TestParseProbeJSON_NAFieldsTreatedAsUnknown(t *testing.T) {
 	data := []byte(`{
 		"streams": [

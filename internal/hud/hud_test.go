@@ -309,6 +309,122 @@ func TestCoveredIndex(t *testing.T) {
 	}
 }
 
+// gaugeNames returns the set of gauge names in a layout's placements.
+func gaugeNames(l Layout) map[string]bool {
+	names := map[string]bool{}
+	for _, p := range l.Placements {
+		names[p.Gauge.Name()] = true
+	}
+	return names
+}
+
+// TestSelectLayout pins the layout selection: explicit modes force their
+// layout regardless of dimensions, and "auto" (plus any unknown mode) picks by
+// aspect -- vertical for a portrait frame, default for a landscape one.
+func TestSelectLayout(t *testing.T) {
+	const landscapeW, landscapeH = 3840, 2160
+	const portraitW, portraitH = 2160, 3840
+
+	// "vertical" forces the 3-gauge vertical layout even on a landscape frame.
+	if got := len(SelectLayout("vertical", landscapeW, landscapeH).Placements); got != 3 {
+		t.Errorf("vertical mode on landscape: %d gauges, want 3", got)
+	}
+	// "default" forces the full layout even on a portrait frame.
+	if got := len(SelectLayout("default", portraitW, portraitH).Placements); got != len(DefaultLayout().Placements) {
+		t.Errorf("default mode on portrait: %d gauges, want %d", got, len(DefaultLayout().Placements))
+	}
+	// "auto" picks by aspect.
+	if got := len(SelectLayout("auto", portraitW, portraitH).Placements); got != 3 {
+		t.Errorf("auto on portrait: %d gauges, want the vertical layout's 3", got)
+	}
+	if got := len(SelectLayout("auto", landscapeW, landscapeH).Placements); got != len(DefaultLayout().Placements) {
+		t.Errorf("auto on landscape: %d gauges, want the default layout", got)
+	}
+	// An unknown mode behaves like "auto".
+	if got := len(SelectLayout("bogus", portraitW, portraitH).Placements); got != 3 {
+		t.Errorf("unknown mode on portrait: %d gauges, want vertical's 3 (auto fallback)", got)
+	}
+}
+
+// TestVerticalLayout pins the vertical layout's contents: exactly the distance
+// progress bar (top), course map (middle-left), and elevation profile (bottom).
+func TestVerticalLayout(t *testing.T) {
+	names := gaugeNames(VerticalLayout())
+	for _, want := range []string{"progress", "course-map", "elevation-profile"} {
+		if !names[want] {
+			t.Errorf("vertical layout is missing the %q gauge", want)
+		}
+	}
+	// The crowding gauges from the default layout must be absent.
+	for _, unwanted := range []string{"metrics", "time-date", "splits", "gain-loss"} {
+		if names[unwanted] {
+			t.Errorf("vertical layout should not include the %q gauge", unwanted)
+		}
+	}
+}
+
+// TestRender_VerticalLayout renders the vertical layout onto a portrait frame
+// and checks all three gauges drew in their regions: the progress bar across
+// the top, the course map on the middle-left, and the elevation profile across
+// the bottom.
+func TestRender_VerticalLayout(t *testing.T) {
+	base := time.Now().UTC()
+	var samples []telemetry.Sample
+	for i := 0; i <= 30; i++ {
+		samples = append(samples, telemetry.Sample{
+			Time:        base.Add(time.Duration(i*10) * time.Second),
+			HasDistance: true, Distance: float64(i) * 100, // 3 km
+			HasGPS: true, Lat: -27.96 + float64(i)*0.001, Lon: 153.42 + float64(i)*0.0005,
+			HasElevation: true, Elevation: float64(i),
+		})
+	}
+	track := &telemetry.Track{Samples: samples}
+	model := telemetry.BuildElevationModel(track, telemetry.ElevationOptions{Sigma: 1})
+	route := make([]GeoPoint, len(samples))
+	for i, s := range samples {
+		route[i] = GeoPoint{Lat: s.Lat, Lon: s.Lon, Time: s.Time}
+	}
+	course := &Course{
+		TotalDistance: 3000,
+		Elevation:     model,
+		Splits:        telemetry.BuildSplits(track),
+		Route:         route,
+	}
+
+	// A portrait frame.
+	const w, h = 540, 960
+	r := NewRenderer(SelectLayout("auto", w, h))
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	r.Render(img, Frame{
+		Width: w, Height: h,
+		Time:      base.Add(1500 * time.Second),
+		HasSample: true,
+		Sample:    telemetry.Sample{HasDistance: true, Distance: 1500, HasGPS: true, Lat: -27.945, Lon: 153.4275},
+		Course:    course,
+	})
+
+	ink := func(x0, y0, x1, y1 int) int {
+		n := 0
+		for y := y0; y < y1; y++ {
+			for x := x0; x < x1; x++ {
+				if img.Pix[y*img.Stride+x*4+3] != 0 {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	if ink(0, 0, w, h/5) == 0 {
+		t.Error("top progress bar drew nothing")
+	}
+	if ink(w/2, h/3, w, h*2/3) == 0 {
+		t.Error("middle-right course map drew nothing")
+	}
+	if ink(0, h*4/5, w, h) == 0 {
+		t.Error("bottom elevation profile drew nothing")
+	}
+}
+
 // TestOptPlaceholders pins the "-- unit" dropout markers.
 func TestOptPlaceholders(t *testing.T) {
 	if got := optU8(false, 0, "bpm"); got != "-- bpm" {

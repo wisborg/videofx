@@ -106,6 +106,7 @@ Flags:
 - `--hud-timezone` — telemetry-hud only: the timezone the on-screen clock displays in — an IANA name (e.g. `Australia/Brisbane`) or a fixed offset (e.g. `+10:00`). Default: **UTC**. Only the clock gauge is affected; telemetry sync is always UTC.
 - `--elevation-gain` / `--elevation-loss` — telemetry-hud only: the known total elevation gain / loss for the activity in **meters** (e.g. an official course figure). The elevation smoothing is auto-tuned so the computed totals match — GPS/barometric elevation overcounts, so a known figure is the most reliable target. Default `0` = use the FIT device's own totals.
 - `--elevation-smoothing` — telemetry-hud only: an explicit Gaussian smoothing width (in FIT samples, ≈ seconds) for the elevation series, instead of the gain/loss auto-tuning. Default `0` = auto.
+- `--hud-layout` — telemetry-hud only: which gauge arrangement to use — `auto` (default), `default`, or `vertical`. `auto` picks the **vertical** layout for portrait (taller-than-wide) clips and the full **default** layout otherwise, keyed on the clip's *display* dimensions (a phone/action-cam clip stored landscape with a 90°/270° rotation flag is treated as the portrait it plays back as). The vertical layout keeps only the three gauges that read well on a narrow frame — the distance progress bar (top), the course map (middle-right, as in the landscape layout), and the elevation-vs-distance profile (bottom) — each widened to use more of the narrow width; the default layout's seven gauges crowd a portrait frame. Force one with `default`/`vertical`.
 - `--srt-format` — telemetry only: embed a `mov_text` telemetry subtitle track in this format — `none` (default), `readable` (a human-readable per-second readout), or `dji` (the DJI-drone SRT layout that [Telemetry Overlay](#embedding-telemetry-for-telemetry-overlay) reads directly from the video). The location tag is produced regardless. A muxed track is **hidden by default** (see `--show-subtitle`).
 - `--srt-sidecar` — telemetry only: write the `--srt-format` SRT as a **separate `.srt` file** next to the output (like `--gpx`) **instead of embedding it** — e.g. `clip - telemetry.srt` beside `clip - telemetry.mp4`. Nothing is muxed into the video, so nothing can display during playback, while Telemetry Overlay reads the separate file (matching DJI's own `NAME.MP4` + `NAME.SRT` pairing). **The reliable way to keep telemetry off screen** (see below). Off by default (the SRT is embedded); requires `--srt-format readable` or `dji`.
 - `--show-subtitle` — telemetry only: keep the **embedded** subtitle track visible/auto-displayed. **Off by default** — an embedded subtitle is flagged hidden (its track-`enabled` flag cleared), but **macOS players (QuickTime, Quick Look) auto-display subtitles regardless of that flag**, so this doesn't reliably hide it; use `--srt-sidecar` instead. Ignored with `--srt-sidecar`.
@@ -322,8 +323,8 @@ its embedded subtitle/location dropped by that encode.
 - Upper-right clock: time + date (in `--hud-timezone`).
 - Upper-left **kilometre splits**: recent laps with the fastest highlighted, and the
   in-progress lap's live timer.
-- Top-center **distance progress bar**: current distance, filled to the current
-  position, with per-km ticks over the remainder.
+- Top-center **distance progress bar**: a full-width line, red from the start to the
+  current position and white for the remainder, with the current distance above it.
 - Middle-left **course map**: the whole GPS route with the covered portion
   highlighted and the current position marked in red.
 - Bottom-center **elevation profile** vs. distance, current position marked in red,
@@ -337,8 +338,14 @@ ascent/descent**. Override with `--elevation-gain`/`--elevation-loss` (meters �
 an official course figure) to tune to those instead, or `--elevation-smoothing` for an
 explicit Gaussian width.
 
-The HUD is built so each gauge can later be toggled or moved (every gauge has an
-anchor + offset + enabled flag in a layout); v1 ships a single fixed arrangement.
+The seven gauges above are the **default** (landscape) layout. Portrait clips get a
+trimmed **vertical** layout — distance progress bar (top), course map (middle-right),
+elevation profile (bottom) — since the full set crowds a narrow frame; `--hud-layout`
+selects between them (default `auto` picks by the clip's display aspect). See
+`--hud-layout` for details.
+
+The HUD is built so each gauge can be toggled or moved (every gauge has an anchor +
+offset + enabled flag in a layout), and layouts are selectable per orientation.
 
 ## Calibrating quality
 
