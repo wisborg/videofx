@@ -26,6 +26,8 @@ var (
 	outputDir   string
 	suffix      string
 	concurrency int
+	trimStart   float64
+	trimEnd     float64
 
 	preset        string
 	crf           int
@@ -82,6 +84,10 @@ func NewRootCmd() *cobra.Command {
 		"override the filename suffix added before the extension (default: the effect's own, e.g. gocv-stabilizer uses \"gocv-stabilized\" to produce \"clip - gocv-stabilized.mp4\"). Joined to the name with \" - \"; must not contain a path separator")
 	root.Flags().IntVar(&concurrency, "concurrency", 1,
 		"number of videos to process in parallel")
+	root.Flags().Float64Var(&trimStart, "start", 0,
+		"only process from this time (seconds) into each input; default 0 = from the beginning. The clip is trimmed to [--start, --end) up front (a lossless copy; the start snaps to the nearest keyframe), and creation_time is shifted so telemetry still syncs")
+	root.Flags().Float64Var(&trimEnd, "end", 0,
+		"only process up to this time (seconds) of each input; default 0 = to the end. See --start")
 
 	def := effects.DefaultPerfOptions()
 	root.Flags().StringVar(&preset, "preset", def.Preset,
@@ -275,6 +281,23 @@ func warnCRFIgnoredByGoCV(w io.Writer, crfChanged bool, effs []effects.Effect) {
 			return
 		}
 	}
+}
+
+// validateTrim rejects a nonsensical --start/--end range up front: negative
+// times, or an --end at or before --start. An --end past the actual clip
+// length isn't an error here (it's clamped per file to each clip's duration in
+// vidio.TrimClip, since durations aren't known until each file is probed).
+func validateTrim(start, end float64) error {
+	if start < 0 {
+		return fmt.Errorf("--start %v is invalid; it must be >= 0", start)
+	}
+	if end < 0 {
+		return fmt.Errorf("--end %v is invalid; it must be >= 0 (0 means to the end)", end)
+	}
+	if end > 0 && end <= start {
+		return fmt.Errorf("--end %v must be greater than --start %v", end, start)
+	}
+	return nil
 }
 
 // validateSRTOptions rejects an unknown --srt-format up front (rather than
@@ -498,6 +521,9 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	if err := validateSRTOptions(srtFormat, srtSidecar); err != nil {
 		return err
 	}
+	if err := validateTrim(trimStart, trimEnd); err != nil {
+		return err
+	}
 
 	// Verify dependencies, validate strength, and apply per-effect flags for
 	// every effect in the pipeline -- see the helpers' doc comments for why
@@ -527,11 +553,13 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	}
 
 	cfg := video.ProcessorConfig{
-		Effects:     effs,
-		Strength:    strength,
-		OutputDir:   outputDir,
-		Suffix:      suffix,
-		Concurrency: concurrency,
+		Effects:      effs,
+		Strength:     strength,
+		OutputDir:    outputDir,
+		Suffix:       suffix,
+		Concurrency:  concurrency,
+		StartSeconds: trimStart,
+		EndSeconds:   trimEnd,
 	}
 
 	// Stream progress as the batch runs rather than printing everything at

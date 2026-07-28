@@ -125,6 +125,30 @@ func TestValidateZoomTransition(t *testing.T) {
 	}
 }
 
+func TestValidateTrim(t *testing.T) {
+	cases := []struct {
+		name       string
+		start, end float64
+		wantErr    bool
+	}{
+		{"defaults (whole video)", 0, 0, false},
+		{"start only", 5, 0, false},
+		{"start and end", 5, 10, false},
+		{"end only", 0, 10, false},
+		{"negative start", -1, 0, true},
+		{"negative end", 0, -1, true},
+		{"end == start", 5, 5, true},
+		{"end < start", 8, 3, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := validateTrim(c.start, c.end); (err != nil) != c.wantErr {
+				t.Errorf("validateTrim(%v, %v) = %v, wantErr %v", c.start, c.end, err, c.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateSuffix(t *testing.T) {
 	cases := []struct {
 		name    string

@@ -47,6 +47,14 @@ type ProcessorConfig struct {
 	Suffix      string
 	Concurrency int // <=0 means sequential (concurrency of 1)
 
+	// StartSeconds, EndSeconds optionally restrict processing to a span of
+	// each input: the clip is trimmed to [StartSeconds, EndSeconds) once, up
+	// front, and the effects run on that trimmed clip (see processOne /
+	// vidio.TrimClip). StartSeconds <= 0 means from the beginning; EndSeconds
+	// <= 0 means to the end. Both zero (the default) processes the whole clip
+	// with no trim step at all.
+	StartSeconds, EndSeconds float64
+
 	// OnStart, if non-nil, is called just before each job begins processing;
 	// OnResult, if non-nil, as soon as each job finishes. They exist so a
 	// caller (the CLI) can stream progress instead of waiting for the whole
@@ -216,6 +224,30 @@ func processOne(ctx context.Context, job Job, cfg ProcessorConfig) Result {
 	}
 	res.OutputPath = finalPath
 
+	ext := filepath.Ext(job.SourcePath)
+
+	// When a --start/--end span is set, trim the source to that span once, up
+	// front, and feed the trimmed clip to the effect pipeline. The trim is a
+	// lossless stream copy into a temp file (removed when the job finishes);
+	// the original is never modified, and the output filename is still derived
+	// from the original (naming.Resolve above), not the temp.
+	source := job.SourcePath
+	if cfg.StartSeconds > 0 || cfg.EndSeconds > 0 {
+		trimDir, err := os.MkdirTemp("", "videofx-trim-*")
+		if err != nil {
+			res.Err = fmt.Errorf("creating temp dir for trim: %w", err)
+			return res
+		}
+		defer os.RemoveAll(trimDir)
+
+		trimmed := filepath.Join(trimDir, "trimmed"+ext)
+		if err := vidio.TrimClip(ctx, job.SourcePath, trimmed, cfg.StartSeconds, cfg.EndSeconds); err != nil {
+			res.Err = err
+			return res
+		}
+		source = trimmed
+	}
+
 	// Run the effects as a pipeline. Effect 0 reads the original file; each
 	// subsequent effect reads the previous effect's output. Only the LAST
 	// effect writes to finalPath -- every earlier effect writes to a per-job
@@ -236,8 +268,7 @@ func processOne(ctx context.Context, job Job, cfg ProcessorConfig) Result {
 		defer os.RemoveAll(tmpDir)
 	}
 
-	ext := filepath.Ext(job.SourcePath)
-	current := job.SourcePath      // input to the next effect
+	current := source              // input to the next effect (trimmed clip, or the original)
 	currentIsIntermediate := false // is `current` a temp file we own?
 
 	for i, eff := range cfg.Effects {
