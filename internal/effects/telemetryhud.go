@@ -42,6 +42,13 @@ type TelemetryHUD struct {
 	// means UTC. The underlying instants (and FIT sync) are always UTC --
 	// this only affects what the on-screen clock reads.
 	TimeZone *time.Location
+	// ElevationSmoothing, ElevationGain, ElevationLoss configure the
+	// elevation gauges' smoothing (see telemetry.ElevationOptions): an
+	// explicit Gaussian sigma (samples), or gain/loss targets (meters) that
+	// auto-tune it. All 0 (the default) uses the FIT's own device totals as
+	// the target when present, else a mild default sigma.
+	ElevationSmoothing           float64
+	ElevationGain, ElevationLoss float64
 	// Layout is the HUD arrangement; the zero value uses hud.DefaultLayout.
 	Layout *hud.Layout
 }
@@ -103,6 +110,22 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		return fmt.Errorf("telemetry-hud: could not determine %s's frame count", in.SourcePath)
 	}
 
+	// Build the whole-course elevation model once (see telemetry.Elevation
+	// Options). With no explicit smoothing or targets, default the targets to
+	// the FIT device's own total ascent/descent -- a far better anchor for
+	// noisy GPS elevation than a raw sum.
+	elevOpts := telemetry.ElevationOptions{
+		Sigma:      t.ElevationSmoothing,
+		TargetGain: t.ElevationGain,
+		TargetLoss: t.ElevationLoss,
+	}
+	if t.ElevationSmoothing <= 0 && t.ElevationGain <= 0 && t.ElevationLoss <= 0 && track.HasElevationTotals {
+		elevOpts.TargetGain = track.TotalAscent
+		elevOpts.TargetLoss = track.TotalDescent
+	}
+	elevModel := telemetry.BuildElevationModel(track, elevOpts)
+	course := &hud.Course{TotalDistance: elevModel.TotalDistance(), Elevation: elevModel}
+
 	layout := hud.DefaultLayout()
 	if t.Layout != nil {
 		layout = *t.Layout
@@ -147,6 +170,7 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 			Time:      display,
 			Sample:    sample,
 			HasSample: ok,
+			Course:    course,
 		})
 		if err := enc.WriteFrame(img); err != nil {
 			_ = enc.Close()

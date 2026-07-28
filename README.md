@@ -102,6 +102,8 @@ Flags:
 - `--fit` — **telemetry / telemetry-hud only**, and **required** when either is in `--effect` (Cobra can't express a conditional-required flag, so this is validated by hand at startup with a clear error if missing). Path to the Garmin FIT activity file to sync GPS/telemetry from.
 - `--offset` — telemetry / telemetry-hud: clock-skew offset in seconds between the camera and the FIT-recording device, signed and fractional. Default `0`. See Telemetry below for the sync model. A **non-zero** offset also rewrites the `telemetry` output's `creation_time` to the corrected instant (and re-bases the GPX/subtitle timeline to match), so the clip finally carries its true wall-clock start. It shifts the HUD's telemetry sync identically.
 - `--hud-timezone` — telemetry-hud only: the timezone the on-screen clock displays in — an IANA name (e.g. `Australia/Brisbane`) or a fixed offset (e.g. `+10:00`). Default: **UTC**. Only the clock gauge is affected; telemetry sync is always UTC.
+- `--elevation-gain` / `--elevation-loss` — telemetry-hud only: the known total elevation gain / loss for the activity in **meters** (e.g. an official course figure). The elevation smoothing is auto-tuned so the computed totals match — GPS/barometric elevation overcounts, so a known figure is the most reliable target. Default `0` = use the FIT device's own totals.
+- `--elevation-smoothing` — telemetry-hud only: an explicit Gaussian smoothing width (in FIT samples, ≈ seconds) for the elevation series, instead of the gain/loss auto-tuning. Default `0` = auto.
 - `--srt-format` — telemetry only: embed a `mov_text` telemetry subtitle track in this format — `none` (default), `readable` (a human-readable per-second readout), or `dji` (the DJI-drone SRT layout that [Telemetry Overlay](#embedding-telemetry-for-telemetry-overlay) reads directly from the video). The location tag is produced regardless. A muxed track is **hidden by default** (see `--show-subtitle`).
 - `--srt-sidecar` — telemetry only: write the `--srt-format` SRT as a **separate `.srt` file** next to the output (like `--gpx`) **instead of embedding it** — e.g. `clip - telemetry.srt` beside `clip - telemetry.mp4`. Nothing is muxed into the video, so nothing can display during playback, while Telemetry Overlay reads the separate file (matching DJI's own `NAME.MP4` + `NAME.SRT` pairing). **The reliable way to keep telemetry off screen** (see below). Off by default (the SRT is embedded); requires `--srt-format readable` or `dji`.
 - `--show-subtitle` — telemetry only: keep the **embedded** subtitle track visible/auto-displayed. **Off by default** — an embedded subtitle is flagged hidden (its track-`enabled` flag cleared), but **macOS players (QuickTime, Quick Look) auto-display subtitles regardless of that flag**, so this doesn't reliably hide it; use `--srt-sidecar` instead. Ignored with `--srt-sidecar`.
@@ -314,11 +316,19 @@ its embedded subtitle/location dropped by that encode.
 
 **Gauges** are landing incrementally:
 
-- **Now:** the lower-left metric readout (heart rate, cadence, power, pace, speed)
-  and the upper-right clock (time + date, in `--hud-timezone`).
-- **Next:** elevation profile + total gain/loss (with configurable smoothing, or
-  gain/loss targets that auto-tune it — GPS elevation is noisy), plus the incline
-  readout; then the course map, km splits, and distance progress bar.
+- Lower-left metric readout: heart rate, cadence, power, **incline**, pace, speed.
+- Upper-right clock: time + date (in `--hud-timezone`).
+- Bottom-center **elevation profile** vs. distance, with the current position marked
+  in red and min/max-elevation + start/end-distance labels.
+- Lower-right **total elevation gain / loss** so far.
+- **Next:** course map (covered vs. remaining), km splits, distance progress bar.
+
+**Elevation smoothing.** GPS/barometric elevation is noisy, and a raw per-sample sum
+wildly overcounts gain/loss (and jitters the incline). The elevation gauges smooth it
+first; by default the smoothing is **auto-tuned to the FIT device's own total
+ascent/descent**. Override with `--elevation-gain`/`--elevation-loss` (meters — e.g.
+an official course figure) to tune to those instead, or `--elevation-smoothing` for an
+explicit Gaussian width.
 
 The HUD is built so each gauge can later be toggled or moved (every gauge has an
 anchor + offset + enabled flag in a layout); v1 ships a single fixed arrangement.

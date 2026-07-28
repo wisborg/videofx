@@ -127,6 +127,93 @@ func TestRender_DrawsGauges(t *testing.T) {
 	}
 }
 
+// TestRender_ElevationGauges checks that with a course elevation model, the
+// bottom-center (profile) and bottom-right (gain/loss) gauges draw, and the
+// incline appears in the lower-left metrics. Without a model those gauges must
+// draw nothing and never panic (covered by TestRender_DrawsGauges, which
+// passes no Course).
+func TestRender_ElevationGauges(t *testing.T) {
+	// A short climbing course.
+	dist := make([]float64, 50)
+	elev := make([]float64, 50)
+	for i := range dist {
+		dist[i] = float64(i) * 20
+		elev[i] = float64(i) // steady climb
+	}
+	model := telemetry.BuildElevationModel(
+		&telemetry.Track{Samples: elevSamples(dist, elev)},
+		telemetry.ElevationOptions{Sigma: 1},
+	)
+	if model.Empty() {
+		t.Fatal("test model unexpectedly empty")
+	}
+
+	r := NewRenderer(DefaultLayout())
+	const w, h = 800, 450
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	r.Render(img, Frame{
+		Width: w, Height: h,
+		Time:      time.Now(),
+		HasSample: true,
+		Sample:    telemetry.Sample{HasDistance: true, Distance: 500},
+		Course:    &Course{TotalDistance: model.TotalDistance(), Elevation: model},
+	})
+
+	ink := func(x0, y0, x1, y1 int) int {
+		n := 0
+		for y := y0; y < y1; y++ {
+			for x := x0; x < x1; x++ {
+				if img.Pix[y*img.Stride+x*4+3] != 0 {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	if ink(w/3, h*3/4, w*2/3, h) == 0 {
+		t.Error("bottom-center elevation profile drew nothing")
+	}
+	if ink(w*2/3, h*3/4, w, h) == 0 {
+		t.Error("bottom-right gain/loss drew nothing")
+	}
+}
+
+// TestInclineLine pins the incline readout formatting and its placeholder.
+func TestInclineLine(t *testing.T) {
+	if got := inclineLine(Frame{}); got != "-- %" {
+		t.Errorf("no course -> %q, want %q", got, "-- %")
+	}
+	dist := []float64{0, 100, 200}
+	elev := []float64{0, 6, 12} // +6%
+	model := telemetry.BuildElevationModel(
+		&telemetry.Track{Samples: elevSamples(dist, elev)},
+		telemetry.ElevationOptions{Sigma: 0.0001},
+	)
+	f := Frame{
+		HasSample: true,
+		Sample:    telemetry.Sample{HasDistance: true, Distance: 100},
+		Course:    &Course{Elevation: model},
+	}
+	if got := inclineLine(f); got != "+6.0%" {
+		t.Errorf("incline = %q, want %q", got, "+6.0%")
+	}
+}
+
+// elevSamples builds telemetry samples with distance+elevation for a test
+// elevation model.
+func elevSamples(dist, elev []float64) []telemetry.Sample {
+	s := make([]telemetry.Sample, len(dist))
+	base := time.Now()
+	for i := range dist {
+		s[i] = telemetry.Sample{
+			Time:        base.Add(time.Duration(i) * time.Second),
+			HasDistance: true, Distance: dist[i],
+			HasElevation: true, Elevation: elev[i],
+		}
+	}
+	return s
+}
+
 // TestOptPlaceholders pins the "-- unit" dropout markers.
 func TestOptPlaceholders(t *testing.T) {
 	if got := optU8(false, 0, "bpm"); got != "-- bpm" {

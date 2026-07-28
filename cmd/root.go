@@ -53,6 +53,9 @@ var (
 	gpx            bool
 	telemetryStryd bool
 	hudTimeZone    string
+	elevSmoothing  float64
+	elevGain       float64
+	elevLoss       float64
 )
 
 // NewRootCmd builds the videofx root command.
@@ -133,6 +136,12 @@ func NewRootCmd() *cobra.Command {
 		"telemetry only: also write a GPX sidecar next to the output (off by default)")
 	root.Flags().StringVar(&hudTimeZone, "hud-timezone", "",
 		"telemetry-hud only: timezone the on-screen clock displays in -- an IANA name (e.g. \"Australia/Brisbane\") or a fixed offset (e.g. \"+10:00\"). Default: UTC. Only affects the clock gauge; telemetry sync is always UTC")
+	root.Flags().Float64Var(&elevSmoothing, "elevation-smoothing", 0,
+		"telemetry-hud only: Gaussian smoothing width (in FIT samples, ~seconds) applied to the noisy GPS/barometric elevation before the profile/gain-loss/incline gauges use it. 0 (default) = auto: tuned from --elevation-gain/--elevation-loss, or the FIT device's own totals, or a mild default")
+	root.Flags().Float64Var(&elevGain, "elevation-gain", 0,
+		"telemetry-hud only: known total elevation GAIN (meters) for the activity -- the smoothing is auto-tuned so the computed total matches (GPS elevation overcounts, so a known figure is the most reliable target). 0 = use the FIT's own total. Paired with --elevation-loss")
+	root.Flags().Float64Var(&elevLoss, "elevation-loss", 0,
+		"telemetry-hud only: known total elevation LOSS (meters) for the activity; see --elevation-gain. 0 = use the FIT's own total")
 	root.Flags().BoolVar(&telemetryStryd, "telemetry-stryd", false,
 		"telemetry only: include Stryd running-dynamics developer fields in the GPX sidecar and muxed SRT")
 
@@ -370,6 +379,9 @@ func configureEffect(effect effects.Effect) error {
 		h.OffsetSeconds = offsetSeconds
 		h.Quality = quality
 		h.TimeZone = loc
+		h.ElevationSmoothing = elevSmoothing
+		h.ElevationGain = elevGain
+		h.ElevationLoss = elevLoss
 	}
 	configureTelemetry(effect)
 	return nil

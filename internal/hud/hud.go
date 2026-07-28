@@ -61,10 +61,13 @@ type Frame struct {
 }
 
 // Course is whole-activity context shared by every frame (computed once).
-// Populated incrementally as the graphical gauges land; Phase 1's text
-// gauges don't read it.
 type Course struct {
 	TotalDistance float64 // meters
+	// Elevation is the smoothed whole-activity elevation model the elevation
+	// gauges (profile, gain/loss, incline) read; nil / Empty() when the FIT
+	// carried no usable elevation, in which case those gauges show
+	// placeholders or draw nothing.
+	Elevation *telemetry.ElevationModel
 }
 
 // Gauge is one HUD element that can draw itself.
@@ -115,6 +118,8 @@ func DefaultLayout() Layout {
 		Placements: []Placement{
 			{Gauge: MetricsGauge{}, Anchor: BottomLeft, Enabled: true},
 			{Gauge: TimeDateGauge{}, Anchor: TopRight, Enabled: true},
+			{Gauge: ElevationProfileGauge{}, Anchor: BottomCenter, Enabled: true},
+			{Gauge: GainLossGauge{}, Anchor: BottomRight, Enabled: true},
 		},
 	}
 }

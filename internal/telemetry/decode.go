@@ -66,14 +66,32 @@ func Decode(path string) (*Track, error) {
 	sort.Slice(samples, func(i, j int) bool { return samples[i].Time.Before(samples[j].Time) })
 
 	sport := ""
-	if len(act.Sessions) > 0 && act.Sessions[0].Sport != typedef.SportInvalid {
-		sport = act.Sessions[0].Sport.String()
+	var totalAscent, totalDescent float64
+	var hasElevationTotals bool
+	if len(act.Sessions) > 0 {
+		ses := act.Sessions[0]
+		if ses.Sport != typedef.SportInvalid {
+			sport = ses.Sport.String()
+		}
+		// TotalAscent/TotalDescent are uint16 meters; the FIT invalid
+		// sentinel is the type's all-ones value. Require both to be valid --
+		// a session with one but not the other is malformed, and using a
+		// half-present pair as a smoothing target would be worse than
+		// falling back to the default.
+		if ses.TotalAscent != basetype.Uint16Invalid && ses.TotalDescent != basetype.Uint16Invalid {
+			totalAscent = float64(ses.TotalAscent)
+			totalDescent = float64(ses.TotalDescent)
+			hasElevationTotals = true
+		}
 	}
 
 	return &Track{
-		SourcePath: path,
-		Sport:      sport,
-		Samples:    samples,
+		SourcePath:         path,
+		Sport:              sport,
+		Samples:            samples,
+		TotalAscent:        totalAscent,
+		TotalDescent:       totalDescent,
+		HasElevationTotals: hasElevationTotals,
 	}, nil
 }
 

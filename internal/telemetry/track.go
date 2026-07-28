@@ -101,6 +101,16 @@ type Track struct {
 
 	// Samples is sorted ascending by Time; see Decode.
 	Samples []Sample
+
+	// TotalAscent/TotalDescent are the device-reported total elevation gain
+	// and loss for the whole activity, in meters, from the FIT Session
+	// message. HasElevationTotals is false when no Session carried them (an
+	// older/partial file); the elevation model uses these as its default
+	// smoothing targets when present, since a device's own figure is a far
+	// more reliable target for noisy GPS/barometric elevation than any raw
+	// per-sample sum. See BuildElevationModel.
+	TotalAscent, TotalDescent float64
+	HasElevationTotals        bool
 }
 
 // Len returns the number of Samples in the Track.

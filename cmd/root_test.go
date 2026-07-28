@@ -488,6 +488,44 @@ func TestConfigureEffect_GoCVQuality(t *testing.T) {
 	}
 }
 
+// TestConfigureEffect_TelemetryHUD pins that the telemetry-hud flags land on
+// a *effects.TelemetryHUD (fit/offset/quality shared, plus the HUD-only
+// timezone and elevation options).
+func TestConfigureEffect_TelemetryHUD(t *testing.T) {
+	orig := []interface{}{fitPath, offsetSeconds, quality, hudTimeZone, elevSmoothing, elevGain, elevLoss}
+	t.Cleanup(func() {
+		fitPath = orig[0].(string)
+		offsetSeconds = orig[1].(float64)
+		quality = orig[2].(int)
+		hudTimeZone = orig[3].(string)
+		elevSmoothing = orig[4].(float64)
+		elevGain = orig[5].(float64)
+		elevLoss = orig[6].(float64)
+	})
+
+	fitPath = "run.fit"
+	offsetSeconds = -2.5
+	quality = 60
+	hudTimeZone = "+10:00"
+	elevSmoothing = 12
+	elevGain = 80
+	elevLoss = 95
+
+	h := &effects.TelemetryHUD{}
+	if err := configureEffect(h); err != nil {
+		t.Fatalf("configureEffect: %v", err)
+	}
+	if h.FitPath != "run.fit" || h.OffsetSeconds != -2.5 || h.Quality != 60 {
+		t.Errorf("shared fields wrong: %+v", h)
+	}
+	if h.TimeZone == nil {
+		t.Error("TimeZone not set from --hud-timezone")
+	}
+	if h.ElevationSmoothing != 12 || h.ElevationGain != 80 || h.ElevationLoss != 95 {
+		t.Errorf("elevation fields wrong: smoothing=%v gain=%v loss=%v", h.ElevationSmoothing, h.ElevationGain, h.ElevationLoss)
+	}
+}
+
 // TestNewRootCmd_ZoomTransitionFlagRegistered guards the --zoom-transition
 // flag's existence (a typo would otherwise surface only as a runtime error)
 // and pins its default: adaptive stabilization uses the time-varying zoom
