@@ -529,3 +529,54 @@ func TestTelemetry_Apply_EndToEndSynthetic_GPXIsWellFormed(t *testing.T) {
 		t.Errorf("GPX sidecar is not well-formed XML: %v", err)
 	}
 }
+
+func TestSrtSidecarPath(t *testing.T) {
+	cases := map[string]string{
+		"clip - telemetry.mp4":         "clip - telemetry.srt",
+		"/tmp/out/run - telemetry.mp4": "/tmp/out/run - telemetry.srt",
+		"no_extension":                 "no_extension.srt",
+	}
+	for in, want := range cases {
+		if got := srtSidecarPath(in); got != want {
+			t.Errorf("srtSidecarPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestTelemetry_Apply_SRTSidecar pins --srt-sidecar behaviour: the DJI SRT is
+// written as a separate .srt next to the output and NOT embedded (the mux
+// carries no subtitle track), so nothing can display during playback while
+// Telemetry Overlay reads the sidecar.
+func TestTelemetry_Apply_SRTSidecar(t *testing.T) {
+	requireFFmpeg(t)
+	fitPath := realFITPath(t)
+
+	dir := t.TempDir()
+	src := generateSyntheticSource(t, dir, "src.mp4", "2026-07-04T21:05:53Z")
+	outputPath := filepath.Join(dir, "clip_telemetry.mp4")
+
+	fr := &fakeRunner{}
+	tel := &Telemetry{Runner: fr, FitPath: fitPath, SRTFormat: "dji", SRTSidecar: true}
+	if err := tel.Apply(context.Background(), Input{SourcePath: src, OutputPath: outputPath}); err != nil {
+		t.Fatalf("Apply error: %v", err)
+	}
+
+	// Exactly one mux, and it must NOT embed a subtitle track.
+	if len(fr.calls) != 1 {
+		t.Fatalf("expected one ffmpeg mux, got %d", len(fr.calls))
+	}
+	for i, a := range fr.calls[0].args {
+		if a == "-c:s" {
+			t.Errorf("sidecar mode must not embed a subtitle (-c:s at arg %d): %v", i, fr.calls[0].args)
+		}
+	}
+
+	// The sidecar .srt exists next to the output, in DJI format.
+	data, err := os.ReadFile(srtSidecarPath(outputPath))
+	if err != nil {
+		t.Fatalf("SRT sidecar not written at %s: %v", srtSidecarPath(outputPath), err)
+	}
+	if !strings.Contains(string(data), "[latitude:") {
+		t.Errorf("SRT sidecar is not DJI-format:\n%s", data)
+	}
+}

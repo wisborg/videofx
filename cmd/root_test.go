@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -285,6 +286,47 @@ func TestResolveEffects(t *testing.T) {
 	})
 }
 
+// TestImpliedEffects pins that telemetry-hud implies a trailing telemetry
+// pass, added last and only when telemetry isn't already present.
+func TestImpliedEffects(t *testing.T) {
+	get := func(n string) effects.Effect {
+		e, err := effects.Get(n)
+		if err != nil {
+			t.Fatalf("Get(%q): %v", n, err)
+		}
+		return e
+	}
+
+	t.Run("hud alone gains a trailing telemetry", func(t *testing.T) {
+		got := names(impliedEffects([]effects.Effect{get("telemetry-hud")}))
+		want := []string{"telemetry-hud", "telemetry"}
+		if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("appended after a stabilizer too", func(t *testing.T) {
+		got := names(impliedEffects([]effects.Effect{get("gocv-stabilizer"), get("telemetry-hud")}))
+		want := []string{"gocv-stabilizer", "telemetry-hud", "telemetry"}
+		if len(got) != 3 || got[2] != "telemetry" {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("explicit telemetry is not duplicated", func(t *testing.T) {
+		in := []effects.Effect{get("telemetry-hud"), get("telemetry")}
+		if got := names(impliedEffects(in)); len(got) != 2 {
+			t.Errorf("got %v, want the 2 listed effects unchanged", got)
+		}
+	})
+
+	t.Run("no hud, no implication", func(t *testing.T) {
+		if got := names(impliedEffects([]effects.Effect{get("gocv-stabilizer")})); len(got) != 1 {
+			t.Errorf("got %v, want just gocv-stabilizer", got)
+		}
+	})
+}
+
 // names is a small test helper: the Name() of each effect.
 func names(effs []effects.Effect) []string {
 	out := make([]string, len(effs))
@@ -300,15 +342,16 @@ func names(effs []effects.Effect) []string {
 // *effects.Telemetry's exported fields untouched, and must never touch
 // (or panic on) an effect of a different concrete type.
 func TestConfigureTelemetry(t *testing.T) {
-	origFit, origOffset, origSRT, origShow, origGPX, origStryd := fitPath, offsetSeconds, srtFormat, showSubtitle, gpx, telemetryStryd
+	origFit, origOffset, origSRT, origShow, origSidecar, origGPX, origStryd := fitPath, offsetSeconds, srtFormat, showSubtitle, srtSidecar, gpx, telemetryStryd
 	t.Cleanup(func() {
-		fitPath, offsetSeconds, srtFormat, showSubtitle, gpx, telemetryStryd = origFit, origOffset, origSRT, origShow, origGPX, origStryd
+		fitPath, offsetSeconds, srtFormat, showSubtitle, srtSidecar, gpx, telemetryStryd = origFit, origOffset, origSRT, origShow, origSidecar, origGPX, origStryd
 	})
 
 	fitPath = "test_videos/run.fit"
 	offsetSeconds = -2.5
 	srtFormat = "dji"
 	showSubtitle = true
+	srtSidecar = true
 	gpx = true
 	telemetryStryd = true
 
@@ -327,6 +370,9 @@ func TestConfigureTelemetry(t *testing.T) {
 	if tel.ShowSubtitle != showSubtitle {
 		t.Errorf("ShowSubtitle = %v, want %v", tel.ShowSubtitle, showSubtitle)
 	}
+	if tel.SRTSidecar != srtSidecar {
+		t.Errorf("SRTSidecar = %v, want %v", tel.SRTSidecar, srtSidecar)
+	}
 	if tel.GPX != gpx {
 		t.Errorf("GPX = %v, want %v", tel.GPX, gpx)
 	}
@@ -340,17 +386,62 @@ func TestConfigureTelemetry(t *testing.T) {
 	configureTelemetry(ws)
 }
 
-// TestValidateSRTFormat pins the accepted --srt-format set.
-func TestValidateSRTFormat(t *testing.T) {
-	for _, f := range []string{"none", "readable", "dji"} {
-		if err := validateSRTFormat(f); err != nil {
-			t.Errorf("validateSRTFormat(%q) = %v, want nil", f, err)
+// TestParseHUDTimeZone covers --hud-timezone: empty means UTC (nil), a fixed
+// offset becomes a FixedZone with the right offset, an IANA name loads, and
+// junk errors.
+func TestParseHUDTimeZone(t *testing.T) {
+	loc, err := parseHUDTimeZone("")
+	if err != nil || loc != nil {
+		t.Errorf("empty = (%v, %v), want (nil, nil)", loc, err)
+	}
+
+	loc, err = parseHUDTimeZone("+10:00")
+	if err != nil {
+		t.Fatalf("+10:00 error: %v", err)
+	}
+	if _, off := time.Now().In(loc).Zone(); off != 10*3600 {
+		t.Errorf("+10:00 offset = %d, want %d", off, 10*3600)
+	}
+
+	loc, err = parseHUDTimeZone("-0530")
+	if err != nil {
+		t.Fatalf("-0530 error: %v", err)
+	}
+	if _, off := time.Now().In(loc).Zone(); off != -(5*3600 + 30*60) {
+		t.Errorf("-0530 offset = %d, want %d", off, -(5*3600 + 30*60))
+	}
+
+	if _, err := parseHUDTimeZone("Australia/Brisbane"); err != nil {
+		t.Errorf("IANA name should load: %v", err)
+	}
+	for _, bad := range []string{"noon", "+99:99", "10:00", "+1:2:3"} {
+		if _, err := parseHUDTimeZone(bad); err == nil {
+			t.Errorf("parseHUDTimeZone(%q) should have failed", bad)
 		}
 	}
-	for _, f := range []string{"", "srt", "gpx", "DJI", "readable "} {
-		if err := validateSRTFormat(f); err == nil {
-			t.Errorf("validateSRTFormat(%q) should have failed", f)
+}
+
+// TestValidateSRTOptions pins the accepted --srt-format set and the
+// --srt-sidecar-with-nothing-to-write contradiction.
+func TestValidateSRTOptions(t *testing.T) {
+	// Valid formats, no sidecar.
+	for _, f := range []string{"none", "readable", "dji"} {
+		if err := validateSRTOptions(f, false); err != nil {
+			t.Errorf("validateSRTOptions(%q, false) = %v, want nil", f, err)
 		}
+	}
+	// Unknown formats rejected.
+	for _, f := range []string{"", "srt", "gpx", "DJI", "readable "} {
+		if err := validateSRTOptions(f, false); err == nil {
+			t.Errorf("validateSRTOptions(%q, false) should have failed", f)
+		}
+	}
+	// Sidecar is fine with a real format, an error with none.
+	if err := validateSRTOptions("dji", true); err != nil {
+		t.Errorf("validateSRTOptions(dji, true) = %v, want nil", err)
+	}
+	if err := validateSRTOptions("none", true); err == nil {
+		t.Error("validateSRTOptions(none, true) should fail: nothing to write")
 	}
 }
 
@@ -359,7 +450,7 @@ func TestValidateSRTFormat(t *testing.T) {
 // otherwise just report "unknown flag" at runtime, not a build failure).
 func TestNewRootCmd_TelemetryFlagsRegistered(t *testing.T) {
 	root := NewRootCmd()
-	for _, name := range []string{"fit", "offset", "srt-format", "show-subtitle", "gpx", "telemetry-stryd"} {
+	for _, name := range []string{"fit", "offset", "srt-format", "show-subtitle", "srt-sidecar", "gpx", "telemetry-stryd"} {
 		if root.Flags().Lookup(name) == nil {
 			t.Errorf("flag --%s not registered", name)
 		}

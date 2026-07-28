@@ -19,6 +19,10 @@ several to apply them as a pipeline, see [Chaining effects](#chaining-effects)):
   reads directly), time-synced
   to the clip. The video/audio are stream-copied (no re-encode — lossless and
   fast). See Telemetry below.
+- **`telemetry-hud`** — burns a telemetry **heads-up display** (gauges) onto the
+  video from a Garmin FIT file: the instantaneous metric readout and clock in
+  v1, with more gauges landing incrementally. Unlike `telemetry` this re-encodes
+  the video (the overlay is burned in). See [Telemetry HUD](#telemetry-hud) below.
 
 ## Requirements
 
@@ -92,13 +96,15 @@ Flags:
 - `--max-zoom` — gocv-stabilizer only: `--edge-mode=adaptive`'s zoom cap fraction (`0` = uncapped, the default). When it binds, the offending frames' stabilization is weakened rather than exposing a black border — measured **worse** for crop-vs-shake-reduction than simply lowering `--sigma` for the same crop budget (see Performance below), so prefer that first.
 - `--zoom-transition` — gocv-stabilizer + `--edge-mode adaptive` only: ease the adaptive crop between calm and shaky sections over this many **seconds**, so steady stretches keep their own minimal crop and the zoom eases in only where shake demands it — **the key setting for footage that needs stabilizing only in places** (see [Partial / mixed-shake footage](#partial--mixed-shake-footage)). **Default `0.5`** (measured to keep the most calm framing while the easing still tested smooth by eye). Raise toward `1.0` for a gentler, slower zoom at a little more calm-side crop; set `0` to disable it and crop the whole clip to its single worst frame (the original constant-zoom behavior).
 - `--sigma` — gocv-stabilizer only: override the strength-derived Gaussian smoothing sigma directly, in analysis frames (`0` = derive from `--strength`; the `--strength` default of `0.5` derives sigma `17`, this project's measured default).
-- `--quality` — gocv-stabilizer only: constant-quality level for the HEVC (`hevc_videotoolbox`) encode, `1`–`100` on VideoToolbox's own scale where **higher is better quality / larger file**. **Default `55`**, measured to keep the re-encode visually transparent to the source on typical 4K action footage (VMAF ~98, landing near the source's own bitrate) — run [`videofx calibrate`](#calibrating-quality) to find the right value for a different camera. Pass `0` to leave the encoder's built-in default rate control in place (no `-q:v` emitted — the original, much lower-bitrate behavior). This is `gocv-stabilizer`'s counterpart to warp-stabilizer's `--crf`, but the scales are **unrelated and opposite** (CRF is x264/x265, `0`–`51`, lower-is-better), so `--crf` is ignored here and `--quality` is ignored by `warp-stabilizer`. Constant-quality HEVC via VideoToolbox is Apple-Silicon-only.
+- `--quality` — gocv-stabilizer **and telemetry-hud** (both re-encode with `hevc_videotoolbox`): constant-quality level for the HEVC encode, `1`–`100` on VideoToolbox's own scale where **higher is better quality / larger file**. **Default `55`**, measured to keep the re-encode visually transparent to the source on typical 4K action footage (VMAF ~98, landing near the source's own bitrate) — run [`videofx calibrate`](#calibrating-quality) to find the right value for a different camera. Pass `0` to leave the encoder's built-in default rate control in place (no `-q:v` emitted — the original, much lower-bitrate behavior). This is `gocv-stabilizer`'s counterpart to warp-stabilizer's `--crf`, but the scales are **unrelated and opposite** (CRF is x264/x265, `0`–`51`, lower-is-better), so `--crf` is ignored here and `--quality` is ignored by `warp-stabilizer`. Constant-quality HEVC via VideoToolbox is Apple-Silicon-only.
 - `--sidecar` — gocv-stabilizer only: path to cache the (expensive, multi-minute on a long 4K60 clip) motion-analysis pass so it can be reused across renders — if the file exists it's read instead of re-analyzing; otherwise a fresh analysis is written there. Useful for iterating on `--edge-mode`/`--sigma`/`--max-zoom` without re-analyzing every time. **Not safe to share across a concurrent multi-file batch** (`--concurrency` > 1 with more than one input) — use it only when processing a single input file.
 - `--analysis-width` — gocv-stabilizer only: width in pixels at which motion is estimated (`0` = default `960`; height derived). Larger localizes features more finely but is slower. **Experimental**: on the test footage it did not measurably reduce residual shake — the residual there is real low-frequency motion the smoother keeps, not estimation noise — so whether a higher width yields visibly cleaner warps is an eyeball call. The chosen width is baked into a `--sidecar`'s cached analysis, so change `--analysis-width` and `--sidecar` together (or delete the sidecar) to re-analyze.
-- `--fit` — **telemetry only**, and **required** when `--effect telemetry` (Cobra can't express a conditional-required flag, so this is validated by hand at startup with a clear error if missing). Path to the Garmin FIT activity file to sync GPS/telemetry from.
-- `--offset` — telemetry only: clock-skew offset in seconds between the camera and the FIT-recording device, signed and fractional. Default `0`. See Telemetry below for the sync model. A **non-zero** offset also rewrites the output's `creation_time` to the corrected instant (and re-bases the GPX/subtitle timeline to match), so the clip finally carries its true wall-clock start.
+- `--fit` — **telemetry / telemetry-hud only**, and **required** when either is in `--effect` (Cobra can't express a conditional-required flag, so this is validated by hand at startup with a clear error if missing). Path to the Garmin FIT activity file to sync GPS/telemetry from.
+- `--offset` — telemetry / telemetry-hud: clock-skew offset in seconds between the camera and the FIT-recording device, signed and fractional. Default `0`. See Telemetry below for the sync model. A **non-zero** offset also rewrites the `telemetry` output's `creation_time` to the corrected instant (and re-bases the GPX/subtitle timeline to match), so the clip finally carries its true wall-clock start. It shifts the HUD's telemetry sync identically.
+- `--hud-timezone` — telemetry-hud only: the timezone the on-screen clock displays in — an IANA name (e.g. `Australia/Brisbane`) or a fixed offset (e.g. `+10:00`). Default: **UTC**. Only the clock gauge is affected; telemetry sync is always UTC.
 - `--srt-format` — telemetry only: embed a `mov_text` telemetry subtitle track in this format — `none` (default), `readable` (a human-readable per-second readout), or `dji` (the DJI-drone SRT layout that [Telemetry Overlay](#embedding-telemetry-for-telemetry-overlay) reads directly from the video). The location tag is produced regardless. A muxed track is **hidden by default** (see `--show-subtitle`).
-- `--show-subtitle` — telemetry only: keep the embedded subtitle track visible/auto-displayed. **Off by default** — a muxed subtitle is embedded but hidden (its track-`enabled` flag cleared) so players don't pop it on screen while tools like Telemetry Overlay still read it. You'd never set this for `--srt-format dji` (machine data).
+- `--srt-sidecar` — telemetry only: write the `--srt-format` SRT as a **separate `.srt` file** next to the output (like `--gpx`) **instead of embedding it** — e.g. `clip - telemetry.srt` beside `clip - telemetry.mp4`. Nothing is muxed into the video, so nothing can display during playback, while Telemetry Overlay reads the separate file (matching DJI's own `NAME.MP4` + `NAME.SRT` pairing). **The reliable way to keep telemetry off screen** (see below). Off by default (the SRT is embedded); requires `--srt-format readable` or `dji`.
+- `--show-subtitle` — telemetry only: keep the **embedded** subtitle track visible/auto-displayed. **Off by default** — an embedded subtitle is flagged hidden (its track-`enabled` flag cleared), but **macOS players (QuickTime, Quick Look) auto-display subtitles regardless of that flag**, so this doesn't reliably hide it; use `--srt-sidecar` instead. Ignored with `--srt-sidecar`.
 - `--gpx` — telemetry only: **also** write a GPX sidecar next to the output (`clip - telemetry.gpx`). **Off by default** — most runs just want the muxed clip; the sidecar is a separate deliverable for map tools and re-syncing, so it's opt-in.
 - `--telemetry-stryd` — telemetry only: include Stryd running-dynamics developer fields (Form Power, Leg Spring Stiffness, ...) in the GPX sidecar and muxed SRT. Off by default.
 - `--strength` is accepted but **ignored** by `telemetry` — there is no "how strong" dial for attaching telemetry to a clip, so `ValidateStrength` accepts any value.
@@ -247,34 +253,75 @@ options (the defaults) to get just the location-tagged clip.
 ### Embedding telemetry for Telemetry Overlay
 
 [Telemetry Overlay](https://goprotelemetryextractor.com/) can read GPS telemetry
-**directly from the video file** (no separate `.fit`/`.gpx`) when it's embedded
-as a DJI-format subtitle track. `--srt-format dji` produces exactly that layout —
-one cue per second carrying the wall-clock time and GPS position in DJI's
-bracketed form:
-
-```
-videofx run.mp4 --effect telemetry --fit "run.fit" --srt-format dji
-```
+from the video's **DJI-format SRT** — either embedded in the file or as a
+separate `.srt` beside it. `--srt-format dji` produces that layout (one cue per
+second carrying the wall-clock time and GPS position in DJI's bracketed form):
 
 ```
 <font size="28">FrameCnt: 1, DiffTime: 1000ms 2026-07-04 21:05:53.000 [latitude: -27.964186] [longitude: 153.426998] [rel_alt: 0.000 abs_alt: -0.600] </font>
 ```
 
+**Recommended — write it as a sidecar** so it never shows during playback:
+
+```
+videofx run.mp4 --effect telemetry --fit "run.fit" --srt-format dji --srt-sidecar
+```
+
+produces a clean `run - telemetry.mp4` plus `run - telemetry.srt`; point Telemetry
+Overlay at the video (or the `.srt`) and it pairs them, exactly like a DJI clip's
+`NAME.MP4` + `NAME.SRT`.
+
 Notes:
 
-- The track is **hidden by default** — its container `enabled` flag is cleared
-  (ffmpeg can't do this, so videofx patches the `tkhd` box in place), so a normal
-  player never shows the machine-readable text on screen, while Telemetry Overlay
-  (and ffmpeg) still read the samples. Pass `--show-subtitle` only if you want to
-  see it.
+- **Embedding vs sidecar.** Without `--srt-sidecar` the SRT is embedded as a
+  `mov_text` track, and videofx flags it hidden (clears the `tkhd` track-`enabled`
+  bit, which ffmpeg itself can't do). But **macOS players — QuickTime, Quick Look —
+  auto-display subtitle tracks regardless of that flag**, so an embedded telemetry
+  track *will* show on screen there. Embedding is kept for tools that want it in
+  the container and for debugging; for a clean viewing experience use
+  `--srt-sidecar`.
 - The DJI layout carries **GPS/position, altitude, and time only** — that's what
-  Telemetry Overlay reads from an embedded subtitle. For the full sensor suite
-  (heart rate, power, cadence, …), give Telemetry Overlay the `--gpx` sidecar or
-  the original `.fit` as an *external* source instead; no embedded video format
-  carries those for it to read directly.
+  Telemetry Overlay reads from a DJI SRT. For the full sensor suite (heart rate,
+  power, cadence, …), give Telemetry Overlay the `--gpx` sidecar or the original
+  `.fit` as an *external* source instead; no embedded video format carries those
+  for it to read directly.
 - Altitude goes in `abs_alt` (MSL, from the FIT's GPS elevation); `rel_alt` is
   always `0.000` (there's no takeoff reference for ground activity). The datetime
   is UTC, matching the GPX sidecar.
+
+## Telemetry HUD
+
+`--effect telemetry-hud` burns a telemetry heads-up display onto the video from a
+Garmin FIT file — the CLI/batch counterpart to a GUI overlay tool:
+
+```
+videofx run.mp4 --effect telemetry-hud --fit "run.fit" --hud-timezone "+10:00"
+```
+
+It syncs the FIT to the video exactly like `telemetry` (`creation_time + --offset`),
+then for each frame interpolates the telemetry to that instant, draws the gauges, and
+composites them over the source. **This re-encodes the video** (the overlay is burned
+in), using `hevc_videotoolbox` at `--quality` — so unlike `telemetry` it is a full
+decode/composite/encode pass, not a lossless copy. It composes in the pipeline, e.g.
+stabilize then overlay: `--effect gocv-stabilizer,telemetry-hud`.
+
+**`telemetry-hud` implies `telemetry`.** A trailing `telemetry` pass is added
+automatically (unless you already listed one), so the HUD output also carries the
+lossless GPS location tag and preserved `creation_time` — and any `--srt-format`/`--gpx`
+you set apply to it. So `--effect telemetry-hud` produces `clip - hud - telemetry.mp4`.
+It's appended last on purpose: a telemetry pass before the overlay re-encode would have
+its embedded subtitle/location dropped by that encode.
+
+**Gauges** are landing incrementally:
+
+- **Now:** the lower-left metric readout (heart rate, cadence, power, pace, speed)
+  and the upper-right clock (time + date, in `--hud-timezone`).
+- **Next:** elevation profile + total gain/loss (with configurable smoothing, or
+  gain/loss targets that auto-tune it — GPS elevation is noisy), plus the incline
+  readout; then the course map, km splits, and distance progress bar.
+
+The HUD is built so each gauge can later be toggled or moved (every gauge has an
+anchor + offset + enabled flag in a layout); v1 ships a single fixed arrangement.
 
 ## Calibrating quality
 

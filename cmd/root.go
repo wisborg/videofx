@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,8 +49,10 @@ var (
 	offsetSeconds  float64
 	srtFormat      string
 	showSubtitle   bool
+	srtSidecar     bool
 	gpx            bool
 	telemetryStryd bool
+	hudTimeZone    string
 )
 
 // NewRootCmd builds the videofx root command.
@@ -114,7 +117,7 @@ func NewRootCmd() *cobra.Command {
 	root.Flags().IntVar(&analysisWidth, "analysis-width", 0,
 		"gocv-stabilizer only: width in pixels at which motion is estimated (0 = default 960; height derived). Larger localizes features more finely but is slower; EXPERIMENTAL -- on the test footage it did not measurably reduce residual shake (whether it yields visibly cleaner warps is an eyeball call). NOTE: baked into a --sidecar's cached analysis, so change --analysis-width and --sidecar together (or delete the sidecar) to re-analyze")
 	root.Flags().IntVar(&quality, "quality", 55,
-		"gocv-stabilizer only: constant-quality level for the HEVC (hevc_videotoolbox) encode, 1-100 on VideoToolbox's own scale where HIGHER is better quality/larger file. Default 55, measured to keep the re-encode visually transparent to typical 4K action footage (VMAF ~98); run 'videofx calibrate <video>' to find the right value for a different source. Pass 0 for the encoder's built-in default rate control (the original, lower-bitrate behavior). This is the gocv-stabilizer counterpart to warp-stabilizer's --crf; the two scales are unrelated (CRF is x264/x265, lower-is-better), so --crf is ignored by gocv-stabilizer and --quality is ignored by warp-stabilizer")
+		"gocv-stabilizer and telemetry-hud: constant-quality level for the HEVC (hevc_videotoolbox) encode, 1-100 on VideoToolbox's own scale where HIGHER is better quality/larger file. Default 55, measured to keep the re-encode visually transparent to typical 4K action footage (VMAF ~98); run 'videofx calibrate <video>' to find the right value for a different source. Pass 0 for the encoder's built-in default rate control (the original, lower-bitrate behavior). This is the gocv-stabilizer counterpart to warp-stabilizer's --crf; the two scales are unrelated (CRF is x264/x265, lower-is-better), so --crf is ignored by gocv-stabilizer and --quality is ignored by warp-stabilizer")
 
 	root.Flags().StringVar(&fitPath, "fit", "",
 		"telemetry only: path to a Garmin FIT activity file to sync GPS/telemetry from (required with --effect telemetry)")
@@ -123,9 +126,13 @@ func NewRootCmd() *cobra.Command {
 	root.Flags().StringVar(&srtFormat, "srt-format", "none",
 		"telemetry only: embed a telemetry subtitle track in this format -- \"none\" (default), \"readable\" (a human-readable per-second readout), or \"dji\" (the DJI-drone SRT layout that Telemetry Overlay reads directly from the video). The location tag is produced regardless. A muxed track is hidden by default (see --show-subtitle)")
 	root.Flags().BoolVar(&showSubtitle, "show-subtitle", false,
-		"telemetry only: keep the embedded subtitle track visible/auto-displayed. Off by default: a muxed subtitle is embedded but hidden (its track-enabled flag cleared) so players don't show it while tools like Telemetry Overlay still read it. You would never set this for --srt-format dji (machine data)")
+		"telemetry only: keep the embedded subtitle track visible/auto-displayed. Off by default: a muxed subtitle is embedded but hidden (its track-enabled flag cleared) so players don't show it while tools like Telemetry Overlay still read it -- though macOS players (QuickTime, Quick Look) auto-display subtitles regardless, so use --srt-sidecar to keep telemetry off screen reliably. Ignored with --srt-sidecar")
+	root.Flags().BoolVar(&srtSidecar, "srt-sidecar", false,
+		"telemetry only: write the --srt-format SRT as a separate \".srt\" file next to the output (like --gpx) INSTEAD of embedding it, so nothing displays during playback while Telemetry Overlay reads the separate file (its DJI MP4+SRT file pairing). Off by default (the SRT is embedded); requires --srt-format readable or dji")
 	root.Flags().BoolVar(&gpx, "gpx", false,
 		"telemetry only: also write a GPX sidecar next to the output (off by default)")
+	root.Flags().StringVar(&hudTimeZone, "hud-timezone", "",
+		"telemetry-hud only: timezone the on-screen clock displays in -- an IANA name (e.g. \"Australia/Brisbane\") or a fixed offset (e.g. \"+10:00\"). Default: UTC. Only affects the clock gauge; telemetry sync is always UTC")
 	root.Flags().BoolVar(&telemetryStryd, "telemetry-stryd", false,
 		"telemetry only: include Stryd running-dynamics developer fields in the GPX sidecar and muxed SRT")
 
@@ -170,14 +177,42 @@ func resolveEffects(names []string) ([]effects.Effect, error) {
 	return effs, nil
 }
 
+// impliedEffects adds effects that a selected effect implies. Selecting
+// telemetry-hud implies telemetry: the HUD re-encodes the clip, and appending
+// telemetry AFTER it stream-copies the burned-in result while adding the GPS
+// location tag (and any --srt-format/--gpx the user asked for) and preserving
+// creation_time -- so the HUD video also carries the lossless telemetry
+// metadata. It is appended LAST, not prepended, because a telemetry pass
+// before the overlay re-encode would have its subtitle/Apple-location tag
+// dropped by that encode. A telemetry the user listed explicitly is left as
+// placed (not duplicated), so an explicit "telemetry,telemetry-hud" ordering
+// is respected (and warned about by warnTelemetryNotLast).
+func impliedEffects(effs []effects.Effect) []effects.Effect {
+	var hasHUD, hasTelemetry bool
+	for _, e := range effs {
+		switch e.Name() {
+		case "telemetry-hud":
+			hasHUD = true
+		case "telemetry":
+			hasTelemetry = true
+		}
+	}
+	if hasHUD && !hasTelemetry {
+		if tel, err := effects.Get("telemetry"); err == nil { // always registered
+			effs = append(effs, tel)
+		}
+	}
+	return effs
+}
+
 // requireFitPath enforces --fit's conditional requirement: mandatory when
 // telemetry is one of the selected effects, irrelevant (and left
 // unvalidated) otherwise. Split out from runRoot so it's testable without
 // exercising the rest of the command (dependency checks, file
 // validation, ...).
 func requireFitPath(effectNames []string, fitPath string) error {
-	if slices.Contains(effectNames, "telemetry") && fitPath == "" {
-		return fmt.Errorf("--fit is required when --effect includes telemetry (path to a Garmin FIT activity file)")
+	if (slices.Contains(effectNames, "telemetry") || slices.Contains(effectNames, "telemetry-hud")) && fitPath == "" {
+		return fmt.Errorf("--fit is required when --effect includes telemetry or telemetry-hud (path to a Garmin FIT activity file)")
 	}
 	return nil
 }
@@ -233,16 +268,20 @@ func warnCRFIgnoredByGoCV(w io.Writer, crfChanged bool, effs []effects.Effect) {
 	}
 }
 
-// validateSRTFormat rejects an unknown --srt-format up front (rather than
-// letting an unrecognized value silently mux no subtitle deep in the effect).
-// The accepted set mirrors resolveSRTFormat in the effect.
-func validateSRTFormat(format string) error {
+// validateSRTOptions rejects an unknown --srt-format up front (rather than
+// letting an unrecognized value silently mux no subtitle deep in the effect;
+// the accepted set mirrors resolveSRTFormat), and rejects the contradiction
+// of --srt-sidecar with nothing to write.
+func validateSRTOptions(format string, sidecar bool) error {
 	switch format {
 	case "none", "readable", "dji":
-		return nil
 	default:
 		return fmt.Errorf("--srt-format %q is invalid; use none, readable, or dji", format)
 	}
+	if sidecar && format == "none" {
+		return fmt.Errorf("--srt-sidecar requires --srt-format readable or dji (there is no SRT to write with none)")
+	}
+	return nil
 }
 
 // validateZoomTransition rejects a negative --zoom-transition. 0 (constant
@@ -322,18 +361,74 @@ func configureEffect(effect effects.Effect) error {
 		gs.Quality = quality
 		gs.ZoomTransition = zoomTransition
 	}
+	if h, ok := effect.(*effects.TelemetryHUD); ok {
+		loc, err := parseHUDTimeZone(hudTimeZone)
+		if err != nil {
+			return err
+		}
+		h.FitPath = fitPath
+		h.OffsetSeconds = offsetSeconds
+		h.Quality = quality
+		h.TimeZone = loc
+	}
 	configureTelemetry(effect)
 	return nil
 }
 
-// configureTelemetry applies --fit/--offset/--srt-format/--show-subtitle/--gpx/
-// --telemetry-stryd to effect if it is a *effects.Telemetry.
+// parseHUDTimeZone resolves --hud-timezone: an empty string means UTC (nil
+// location), an IANA name (e.g. "Australia/Brisbane") is loaded via the tz
+// database, and a fixed offset "[+-]HH:MM" (or "[+-]HHMM"/"[+-]HH") becomes a
+// FixedZone. Returns an error naming the accepted forms for anything else.
+func parseHUDTimeZone(s string) (*time.Location, error) {
+	if s == "" {
+		return nil, nil
+	}
+	if loc, err := time.LoadLocation(s); err == nil {
+		return loc, nil
+	}
+	if secs, ok := parseUTCOffset(s); ok {
+		return time.FixedZone("UTC"+s, secs), nil
+	}
+	return nil, fmt.Errorf("--hud-timezone %q is invalid; use an IANA name (e.g. \"Australia/Brisbane\") or a fixed offset (e.g. \"+10:00\")", s)
+}
+
+// parseUTCOffset parses "[+-]HH", "[+-]HHMM", or "[+-]HH:MM" to seconds east
+// of UTC.
+func parseUTCOffset(s string) (int, bool) {
+	if len(s) < 3 || (s[0] != '+' && s[0] != '-') {
+		return 0, false
+	}
+	sign := 1
+	if s[0] == '-' {
+		sign = -1
+	}
+	body := strings.ReplaceAll(s[1:], ":", "")
+	if len(body) != 2 && len(body) != 4 {
+		return 0, false
+	}
+	hh, err := strconv.Atoi(body[:2])
+	if err != nil || hh > 23 {
+		return 0, false
+	}
+	mm := 0
+	if len(body) == 4 {
+		if mm, err = strconv.Atoi(body[2:]); err != nil || mm > 59 {
+			return 0, false
+		}
+	}
+	return sign * (hh*3600 + mm*60), true
+}
+
+// configureTelemetry applies --fit/--offset/--srt-format/--show-subtitle/
+// --srt-sidecar/--gpx/--telemetry-stryd to effect if it is a
+// *effects.Telemetry.
 func configureTelemetry(effect effects.Effect) {
 	if tel, ok := effect.(*effects.Telemetry); ok {
 		tel.FitPath = fitPath
 		tel.OffsetSeconds = offsetSeconds
 		tel.SRTFormat = srtFormat
 		tel.ShowSubtitle = showSubtitle
+		tel.SRTSidecar = srtSidecar
 		tel.GPX = gpx
 		tel.IncludeStryd = telemetryStryd
 	}
@@ -367,6 +462,7 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	effs = impliedEffects(effs)
 	effectCanonicalNames := make([]string, len(effs))
 	for i, e := range effs {
 		effectCanonicalNames[i] = e.Name()
@@ -387,7 +483,7 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	if err := validateZoomTransition(zoomTransition); err != nil {
 		return err
 	}
-	if err := validateSRTFormat(srtFormat); err != nil {
+	if err := validateSRTOptions(srtFormat, srtSidecar); err != nil {
 		return err
 	}
 

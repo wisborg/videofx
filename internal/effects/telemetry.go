@@ -76,13 +76,26 @@ type Telemetry struct {
 	// telemetry.SRTFormat). Only the muxed subtitle stream is affected.
 	SRTFormat string
 
-	// ShowSubtitle keeps a muxed subtitle track visible/auto-displayed. Off
-	// by default: the track is embedded but hidden (its tkhd track-enabled
-	// flag cleared -- see hideSubtitleTrack) so players don't pop it on
-	// screen, while tools like Telemetry Overlay still read it. Meaningless
-	// when SRTFormat muxes nothing; for "dji" (machine data) you would never
-	// set it.
+	// ShowSubtitle keeps an EMBEDDED subtitle track visible/auto-displayed.
+	// Off by default: the track is embedded but hidden (its tkhd
+	// track-enabled flag cleared -- see hideSubtitleTrack) so players don't
+	// pop it on screen, while tools like Telemetry Overlay still read it.
+	// Meaningless when SRTFormat muxes nothing or SRTSidecar is set; for
+	// "dji" (machine data) you would never set it.
+	//
+	// NOTE: hiding an embedded subtitle is not fully reliable -- macOS
+	// players (QuickTime, Quick Look) auto-display subtitle tracks regardless
+	// of the disabled/non-default flags. SRTSidecar is the robust way to keep
+	// telemetry out of a viewer's way; this embed path is kept for tools that
+	// want it in the container, and for debugging.
 	ShowSubtitle bool
+
+	// SRTSidecar writes the SRT as a separate ".srt" file next to the output
+	// (see srtSidecarPath) INSTEAD of embedding it -- so no subtitle track is
+	// muxed and nothing can display during playback, while Telemetry Overlay
+	// reads the separate file (its DJI MP4+SRT file-pair workflow). Off by
+	// default (the SRT is embedded); ignored when SRTFormat muxes nothing.
+	SRTSidecar bool
 
 	// GPX writes a GPX sidecar next to the output (see gpxSidecarPath). Off
 	// by default and opt-in: the sidecar is a separate deliverable useful for
@@ -186,9 +199,21 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 		}
 	}
 
-	srtFormat, muxSubtitle := resolveSRTFormat(t.SRTFormat)
+	srtFormat, wantSRT := resolveSRTFormat(t.SRTFormat)
+	embedSubtitle := wantSRT && !t.SRTSidecar
+
+	// Sidecar SRT: written next to the output and NOT embedded, so it never
+	// displays during playback (an embedded subtitle track can't be reliably
+	// hidden -- see hideSubtitleTrack) while Telemetry Overlay reads the
+	// separate .srt, matching DJI's own MP4+SRT file-pair workflow.
+	if wantSRT && t.SRTSidecar {
+		if err := writeSRTFile(srtSidecarPath(in.OutputPath), points, fields, srtFormat); err != nil {
+			return fmt.Errorf("telemetry: %w", err)
+		}
+	}
+
 	var srtPath string
-	if muxSubtitle {
+	if embedSubtitle {
 		tmpDir, err := os.MkdirTemp("", "videofx-telemetry-*")
 		if err != nil {
 			return fmt.Errorf("telemetry: creating temp dir: %w", err)
@@ -214,7 +239,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 		SourcePath:   in.SourcePath,
 		SRTPath:      srtPath,
 		OutputPath:   in.OutputPath,
-		Subtitle:     muxSubtitle,
+		Subtitle:     embedSubtitle,
 		HasLocation:  hasLocation,
 		Lat:          loc.Lat,
 		Lon:          loc.Lon,
@@ -231,7 +256,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 	// -- the DJI layout above all -- is machine data for tools like Telemetry
 	// Overlay to read, not something a viewer should see pop up on screen.
 	// ffmpeg can't clear the track-enabled flag itself, so patch it here.
-	if muxSubtitle && !t.ShowSubtitle {
+	if embedSubtitle && !t.ShowSubtitle {
 		if err := hideSubtitleTrack(in.OutputPath); err != nil {
 			return fmt.Errorf("telemetry: hiding subtitle track in %s: %w", in.OutputPath, err)
 		}
@@ -264,6 +289,16 @@ func resolveSRTFormat(format string) (telemetry.SRTFormat, bool) {
 func gpxSidecarPath(outputPath string) string {
 	ext := filepath.Ext(outputPath)
 	return strings.TrimSuffix(outputPath, ext) + ".gpx"
+}
+
+// srtSidecarPath derives the SRT sidecar path from the output path the same
+// way gpxSidecarPath does: the output's extension replaced with ".srt" (e.g.
+// "clip - telemetry.mp4" -> "clip - telemetry.srt"). Sharing the output's
+// stem is what lets Telemetry Overlay pair the .srt with the video the way it
+// pairs a DJI clip's "NAME.MP4" with "NAME.SRT".
+func srtSidecarPath(outputPath string) string {
+	ext := filepath.Ext(outputPath)
+	return strings.TrimSuffix(outputPath, ext) + ".srt"
 }
 
 // writeGPXFile creates path and renders points to it via telemetry.WriteGPX.
