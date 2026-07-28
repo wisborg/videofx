@@ -28,6 +28,7 @@ var (
 	concurrency int
 	trimStart   float64
 	trimEnd     float64
+	debugMode   bool
 
 	preset        string
 	crf           int
@@ -88,6 +89,8 @@ func NewRootCmd() *cobra.Command {
 		"only process from this time (seconds) into each input; default 0 = from the beginning. The clip is trimmed to [--start, --end) up front (a lossless copy; the start snaps to the nearest keyframe), and creation_time is shifted so telemetry still syncs")
 	root.Flags().Float64Var(&trimEnd, "end", 0,
 		"only process up to this time (seconds) of each input; default 0 = to the end. See --start")
+	root.Flags().BoolVar(&debugMode, "debug", false,
+		"print extra diagnostic output -- currently the telemetry effect's underlying ffmpeg logs (banner, stream info), which are suppressed by default")
 
 	def := effects.DefaultPerfOptions()
 	root.Flags().StringVar(&preset, "preset", def.Preset,
@@ -466,6 +469,7 @@ func configureTelemetry(effect effects.Effect) {
 		tel.SRTSidecar = srtSidecar
 		tel.GPX = gpx
 		tel.IncludeStryd = telemetryStryd
+		tel.Debug = debugMode
 	}
 }
 

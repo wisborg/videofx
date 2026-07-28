@@ -580,3 +580,32 @@ func TestTelemetry_Apply_SRTSidecar(t *testing.T) {
 		t.Errorf("SRT sidecar is not DJI-format:\n%s", data)
 	}
 }
+
+// TestTelemetry_Apply_QuietByDefault pins that the mux runs at ffmpeg's
+// "error" log level by default (so a successful run is silent), and that
+// --debug (Debug=true) removes that prefix to restore ffmpeg's full output.
+func TestTelemetry_Apply_QuietByDefault(t *testing.T) {
+	requireFFmpeg(t)
+	fitPath := realFITPath(t)
+	dir := t.TempDir()
+	src := generateSyntheticSource(t, dir, "src.mp4", "2026-07-04T21:05:53Z")
+
+	fr := &fakeRunner{}
+	tel := &Telemetry{Runner: fr, FitPath: fitPath}
+	if err := tel.Apply(context.Background(), Input{SourcePath: src, OutputPath: filepath.Join(dir, "o.mp4")}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	a := fr.calls[0].args
+	if len(a) < 3 || a[0] != "-hide_banner" || a[1] != "-loglevel" || a[2] != "error" {
+		t.Errorf("default run must prefix quiet flags, got head: %v", a[:min(4, len(a))])
+	}
+
+	fr2 := &fakeRunner{}
+	tel2 := &Telemetry{Runner: fr2, FitPath: fitPath, Debug: true}
+	if err := tel2.Apply(context.Background(), Input{SourcePath: src, OutputPath: filepath.Join(dir, "o2.mp4")}); err != nil {
+		t.Fatalf("Apply(debug): %v", err)
+	}
+	if a := fr2.calls[0].args; a[0] == "-hide_banner" {
+		t.Errorf("--debug run must not prefix quiet flags, got head: %v", a[:min(4, len(a))])
+	}
+}

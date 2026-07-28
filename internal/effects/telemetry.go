@@ -109,6 +109,12 @@ type Telemetry struct {
 	// by default, matching telemetry.FieldOptions.Stryd's own documented
 	// default and rationale.
 	IncludeStryd bool
+
+	// Debug shows the underlying ffmpeg mux's full output (banner, input/
+	// output stream info). Off by default -- the mux is run at ffmpeg's
+	// "error" log level so a successful run is silent and only real errors
+	// reach the terminal. Wired from --debug.
+	Debug bool
 }
 
 func (t *Telemetry) Name() string         { return "telemetry" }
@@ -248,7 +254,16 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 		CreationTime: correctedCreationStr,
 	})
 
-	if err := t.Runner.Run(ctx, "ffmpeg", args...); err != nil {
+	// Keep ffmpeg quiet on success unless --debug: "error" level prints only
+	// real errors, so a normal run doesn't dump the banner/stream-info that
+	// otherwise clutters the output (this mux uses a plain ExecRunner whose
+	// stderr goes straight to the terminal, unlike the vidio pipe path which
+	// captures it). --debug restores ffmpeg's full output.
+	runArgs := args
+	if !t.Debug {
+		runArgs = append([]string{"-hide_banner", "-loglevel", "error"}, args...)
+	}
+	if err := t.Runner.Run(ctx, "ffmpeg", runArgs...); err != nil {
 		return fmt.Errorf("telemetry: muxing %s: %w", in.OutputPath, err)
 	}
 
