@@ -30,6 +30,7 @@ var (
 	trimStart   float64
 	trimEnd     float64
 	debugMode   bool
+	rotateDeg   int
 
 	preset        string
 	crf           int
@@ -94,6 +95,8 @@ func NewRootCmd() *cobra.Command {
 		"only process up to this time (seconds) of each input; default 0 = to the end. See --start")
 	root.Flags().BoolVar(&debugMode, "debug", false,
 		"print extra diagnostic output -- currently the telemetry effect's underlying ffmpeg logs (banner, stream info), which are suppressed by default")
+	root.Flags().IntVar(&rotateDeg, "rotate", 0,
+		"rotate effect only (--effect rotate): rotate the video this many degrees CLOCKWISE for display -- 90, 180, or 270. Lossless: it sets the display-rotation flag via stream copy (no re-encode) and composes with any rotation the source already has. Required (and must be 90/180/270) when --effect includes rotate")
 
 	def := effects.DefaultPerfOptions()
 	root.Flags().StringVar(&preset, "preset", def.Preset,
@@ -238,6 +241,23 @@ func impliedEffects(effs []effects.Effect) []effects.Effect {
 func requireFitPath(effectNames []string, fitPath string) error {
 	if (slices.Contains(effectNames, "telemetry") || slices.Contains(effectNames, "telemetry-hud")) && fitPath == "" {
 		return fmt.Errorf("--fit is required when --effect includes telemetry or telemetry-hud (path to a Garmin FIT activity file)")
+	}
+	return nil
+}
+
+// requireRotateDegrees enforces --rotate's conditional requirement: the rotate
+// effect needs an angle, and only 90/180/270 are meaningful for a lossless
+// display-rotation flip. Checked by hand for the same reason as requireFitPath
+// (Cobra can't express a conditionally-required, value-constrained flag). A
+// non-zero --rotate with no rotate effect selected is also rejected, so a
+// mistyped invocation fails loudly rather than silently doing nothing.
+func requireRotateDegrees(effectNames []string, degrees int) error {
+	selected := slices.Contains(effectNames, "rotate")
+	if selected && degrees != 90 && degrees != 180 && degrees != 270 {
+		return fmt.Errorf("--rotate is required when --effect includes rotate, and must be 90, 180, or 270 (got %d)", degrees)
+	}
+	if !selected && degrees != 0 {
+		return fmt.Errorf("--rotate %d has no effect without --effect rotate", degrees)
 	}
 	return nil
 }
@@ -451,6 +471,10 @@ func configureEffect(effect effects.Effect) error {
 		h.LayoutMode = hudLayout
 		h.PowerSource = parsePowerSource(powerSource)
 	}
+	if rot, ok := effect.(*effects.Rotate); ok {
+		rot.Degrees = rotateDeg
+		rot.Debug = debugMode
+	}
 	configureTelemetry(effect)
 	return nil
 }
@@ -553,6 +577,9 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	// selected" (MarkFlagRequired is unconditional), so this is checked by
 	// hand, right after the effects resolve and before any I/O.
 	if err := requireFitPath(effectCanonicalNames, fitPath); err != nil {
+		return err
+	}
+	if err := requireRotateDegrees(effectCanonicalNames, rotateDeg); err != nil {
 		return err
 	}
 	if err := validateSuffix(suffix); err != nil {

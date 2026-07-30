@@ -303,6 +303,34 @@ func TestRequireFitPath(t *testing.T) {
 	}
 }
 
+func TestRequireRotateDegrees(t *testing.T) {
+	cases := []struct {
+		name        string
+		effectNames []string
+		degrees     int
+		wantErr     bool
+	}{
+		{"rotate 90", []string{"rotate"}, 90, false},
+		{"rotate 180", []string{"rotate"}, 180, false},
+		{"rotate 270", []string{"rotate"}, 270, false},
+		{"rotate without angle", []string{"rotate"}, 0, true},
+		{"rotate with bad angle", []string{"rotate"}, 45, true},
+		{"rotate with 360", []string{"rotate"}, 360, true},
+		{"chain including rotate, valid", []string{"gocv-stabilizer", "rotate"}, 90, false},
+		{"chain including rotate, no angle", []string{"gocv-stabilizer", "rotate"}, 0, true},
+		{"no rotate effect, no angle", []string{"gocv-stabilizer"}, 0, false},
+		{"angle set without rotate effect", []string{"gocv-stabilizer"}, 90, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := requireRotateDegrees(c.effectNames, c.degrees)
+			if (err != nil) != c.wantErr {
+				t.Errorf("requireRotateDegrees(%v, %d) = %v, wantErr %v", c.effectNames, c.degrees, err, c.wantErr)
+			}
+		})
+	}
+}
+
 // TestResolveEffects covers the --effect parsing: ordered resolution,
 // whitespace trimming, and the empty/duplicate/unknown rejections.
 func TestResolveEffects(t *testing.T) {

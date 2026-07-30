@@ -2,7 +2,7 @@
 
 A CLI that applies effects to video files without ever modifying the originals.
 
-Three effects are available, selected via `--effect` (and combinable — pass
+Several effects are available, selected via `--effect` (and combinable — pass
 several to apply them as a pipeline, see [Chaining effects](#chaining-effects)):
 
 - **`gocv-stabilizer`** — this project's own GoCV/OpenCV-based implementation
@@ -23,6 +23,10 @@ several to apply them as a pipeline, see [Chaining effects](#chaining-effects)):
   video from a Garmin FIT file: metric readout, clock, km splits, distance progress,
   course map, and elevation profile/gain-loss. Unlike `telemetry` this re-encodes
   the video (the overlay is burned in). See [Telemetry HUD](#telemetry-hud) below.
+- **`rotate`** — rotates the video's display orientation by 90, 180, or 270 degrees
+  (`--rotate`). **Lossless**: it stream-copies the video and only rewrites the
+  container's display-rotation flag (no re-encode), composing with any rotation the
+  source already carries. See [Rotate](#rotate) below.
 
 ## Requirements
 
@@ -79,13 +83,14 @@ videofx calibrate <source-video> [flags]          # suggest a --quality value; s
 
 Flags:
 
-- `--effect` (required) — effect(s) to apply: `gocv-stabilizer`, `warp-stabilizer`, or `telemetry`. Comma-separate (or repeat the flag) to **chain** several, applied left-to-right — see [Chaining effects](#chaining-effects). Each effect's flags still apply to whichever effect in the chain they belong to.
+- `--effect` (required) — effect(s) to apply: `gocv-stabilizer`, `warp-stabilizer`, `telemetry`, `telemetry-hud`, or `rotate`. Comma-separate (or repeat the flag) to **chain** several, applied left-to-right — see [Chaining effects](#chaining-effects). Each effect's flags still apply to whichever effect in the chain they belong to.
 - `--strength` — effect strength, `0.0` (subtle) to `1.0` (strong). Default `0.5`.
 - `--output-dir` — write results here instead of alongside each input.
 - `--suffix` — override the filename suffix appended before the extension. By default each effect supplies its own (`gocv-stabilizer` → `gocv-stabilized`, `warp-stabilizer` → `stabilized`, `telemetry` → `telemetry`), so `clip.mp4` becomes e.g. `clip - gocv-stabilized.mp4`; `--suffix stable` makes it `clip - stable.mp4` instead. The ` - ` separator and the collision counter (`clip - stable - 1.mp4`, …) are added automatically, so give just the word. Applies to every input in the batch, and to any sidecar an effect derives from the output name (e.g. `telemetry`'s `.gpx`). Must not contain a path separator (the output is always a sibling of the input, never redirected elsewhere — use `--output-dir` to change the directory).
 - `--concurrency` — number of videos to process in parallel. Default `1`. When it is greater than `1` and more than one file is given, the batch is dispatched **largest-first** (see [Batch ordering](#batch-ordering) below) so the overall run finishes as quickly as possible.
 - `--debug` — print extra diagnostic output. By default the `telemetry` effect's underlying ffmpeg mux runs at ffmpeg's `error` log level, so a successful run is silent (no banner/stream-info dump) and only real errors surface; `--debug` restores ffmpeg's full output. (The stabilizers and the HUD encode already capture ffmpeg's output internally, so they're unaffected.)
 - `--start` / `--end` — process only the `[--start, --end)` span (seconds) of each input; defaults `0`/`0` = the whole video (`--end 0` means "to the end"). The clip is trimmed to that span once, up front, as a **lossless stream copy**, and the effects run on it. `creation_time` is shifted by `--start` so telemetry still syncs. Because a stream copy can't begin mid-GOP, the **start snaps to the nearest keyframe** (the cut may land up to one GOP early); the end is exact. Applies per file in a batch (each clamped to its own duration).
+- `--rotate` — **rotate effect only**, and **required** when `--effect` includes `rotate` (must be `90`, `180`, or `270`). Rotates the video's display orientation this many degrees **clockwise**, losslessly (stream copy + display-rotation flag, no re-encode), composing with any rotation the source already has. Passing `--rotate` without `--effect rotate` is an error. See [Rotate](#rotate) below.
 - `--preset` — encoder speed/quality preset (`ultrafast`…`veryslow`). **warp-stabilizer only** — see Performance below; `gocv-stabilizer`'s encoder is currently hardcoded (see Design) and ignores this. Default `veryfast`.
 - `--crf` — encoder constant rate factor: lower = higher quality/bigger file, higher = faster/smaller. **warp-stabilizer only** (libx264), same reason as `--preset`. Default `23`. For `gocv-stabilizer`'s quality use `--quality` instead — the scales are unrelated (see below); passing `--crf` with `gocv-stabilizer` prints a warning and is otherwise ignored.
 - `--threads` — encoder/decoder thread count. **warp-stabilizer only**, same reason. `0` (default) lets ffmpeg pick, which is normally all cores.
@@ -349,6 +354,34 @@ selects between them (default `auto` picks by the clip's display aspect). See
 
 The HUD is built so each gauge can be toggled or moved (every gauge has an anchor +
 offset + enabled flag in a layout), and layouts are selectable per orientation.
+
+## Rotate
+
+`--effect rotate --rotate <90|180|270>` rotates the video's display orientation
+**clockwise** by the given angle:
+
+```
+videofx clip.mp4 --effect rotate --rotate 90
+```
+
+It is **lossless and instant**: the pixels are never touched and there is no
+re-encode. The video (and every other stream — audio, any embedded telemetry) is
+stream-copied, and only the container's **display-rotation flag** is rewritten
+(via ffmpeg's `-display_rotation`), with `creation_time` and other metadata
+preserved. The requested angle **composes** with whatever rotation the source
+already carries — so rotating an already-portrait phone clip (which stores a 90°
+display flag) by a further 90° lands it back at landscape.
+
+The trade-off of the lossless approach is that it relies on the **player honoring
+rotation metadata**. ffmpeg, QuickTime, Quick Look, and most modern players and
+NLEs auto-rotate correctly; some tools and older/web players ignore the flag and
+show the un-rotated frame. (Baking the rotation into the pixels would guarantee it
+displays everywhere, but at the cost of a full re-encode — which this effect
+deliberately avoids.)
+
+Because it re-encodes nothing, `rotate` composes cleanly in a chain, e.g.
+`--effect gocv-stabilizer,rotate` (stabilize, then flag the rotation) or
+`--effect rotate,telemetry-hud`.
 
 ## Calibrating quality
 
