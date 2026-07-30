@@ -78,7 +78,29 @@ type Options struct {
 	// MotionSeries.ScaleFactor() is derived from the actual recorded
 	// analysis dimensions.
 	AnalysisWidth int `json:"analysisWidth"`
+
+	// WarpModel selects the motion model estimated per frame pair.
+	// WarpModelSimilarity (the empty-string default) fits a 4-DOF similarity
+	// and is the whole existing pipeline. WarpModelHomography ALSO fits a full
+	// 8-DOF homography and records the perspective residual it carries beyond
+	// the similarity (Transition.Perspective), which the render pass can then
+	// correct on top of the similarity stabilization -- see homography.go. It
+	// is EXPERIMENTAL and opt-in; the empty default leaves every existing
+	// analysis/sidecar byte-identical.
+	WarpModel WarpModel `json:"warpModel,omitempty"`
 }
+
+// WarpModel names the per-frame motion model (see Options.WarpModel).
+type WarpModel string
+
+const (
+	// WarpModelSimilarity is the default 4-DOF similarity (translation +
+	// rotation + uniform scale). The empty string maps to it.
+	WarpModelSimilarity WarpModel = ""
+	// WarpModelHomography additionally fits an 8-DOF homography per frame pair
+	// and records its perspective residual. EXPERIMENTAL.
+	WarpModelHomography WarpModel = "homography"
+)
 
 // DefaultOptions returns the starting-point tuning from the Phase 2 spec:
 // ~500 corners, quality 0.01, minimum spacing 15px. These are a starting

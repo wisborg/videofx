@@ -49,6 +49,7 @@ var (
 	analysisWidth  int
 	quality        int
 	zoomTransition float64
+	warpModel      string
 
 	fitPath        string
 	offsetSeconds  float64
@@ -134,6 +135,8 @@ func NewRootCmd() *cobra.Command {
 		"gocv-stabilizer only: path to cache/reuse the (expensive, multi-minute on a long 4K60 clip) motion-analysis pass across renders -- if the file exists it is read instead of re-analyzing, otherwise a fresh analysis is written there; useful for iterating on --edge-mode/--sigma/--max-zoom without re-analyzing every time, but NOT safe to share across a concurrent multi-file batch (process one input file at a time when using this)")
 	root.Flags().IntVar(&analysisWidth, "analysis-width", 0,
 		"gocv-stabilizer only: width in pixels at which motion is estimated (0 = default 960; height derived). Larger localizes features more finely but is slower; EXPERIMENTAL -- on the test footage it did not measurably reduce residual shake (whether it yields visibly cleaner warps is an eyeball call). NOTE: baked into a --sidecar's cached analysis, so change --analysis-width and --sidecar together (or delete the sidecar) to re-analyze")
+	root.Flags().StringVar(&warpModel, "warp-model", "similarity",
+		"gocv-stabilizer only: motion model. \"similarity\" (default) fits one 4-DOF transform per frame (pan/rotate/scale). \"homography\" is EXPERIMENTAL and currently NOT RECOMMENDED: it also fits an 8-DOF homography per frame to correct the perspective/shear a similarity can't -- but on the test footage the 8-DOF per-frame fit's variance injected MORE jitter than it removed (measured residual 12.15 vs similarity's 10.81), so it made things worse. Kept opt-in as scaffolding for a future variance-controlled (mesh/bundled) implementation. NOTE: baked into a --sidecar's analysis, so change --warp-model and --sidecar together (or delete the sidecar) to re-analyze")
 	root.Flags().IntVar(&quality, "quality", 55,
 		"gocv-stabilizer and telemetry-hud: constant-quality level for the HEVC (hevc_videotoolbox) encode, 1-100 on VideoToolbox's own scale where HIGHER is better quality/larger file. Default 55, measured to keep the re-encode visually transparent to typical 4K action footage (VMAF ~98); run 'videofx calibrate <video>' to find the right value for a different source. Pass 0 for the encoder's built-in default rate control (the original, lower-bitrate behavior). This is the gocv-stabilizer counterpart to warp-stabilizer's --crf; the two scales are unrelated (CRF is x264/x265, lower-is-better), so --crf is ignored by gocv-stabilizer and --quality is ignored by warp-stabilizer")
 
@@ -346,6 +349,17 @@ func parsePowerSource(mode string) telemetry.PowerSource {
 	return powerSourceModes[mode] // zero value is PowerAuto
 }
 
+// validateWarpModel rejects an unknown --warp-model up front (mirrors the set
+// stabilize.WarpModel accepts; "similarity" maps to the default empty model).
+func validateWarpModel(model string) error {
+	switch model {
+	case "similarity", "homography":
+		return nil
+	default:
+		return fmt.Errorf("--warp-model %q is invalid; use similarity or homography", model)
+	}
+}
+
 // validateTrim rejects a nonsensical --start/--end range up front: negative
 // times, or an --end at or before --start. An --end past the actual clip
 // length isn't an error here (it's clamped per file to each clip's duration in
@@ -455,6 +469,7 @@ func configureEffect(effect effects.Effect) error {
 		gs.AnalysisWidth = analysisWidth
 		gs.Quality = quality
 		gs.ZoomTransition = zoomTransition
+		gs.WarpModel = warpModel
 	}
 	if h, ok := effect.(*effects.TelemetryHUD); ok {
 		loc, err := parseHUDTimeZone(hudTimeZone)
@@ -601,6 +616,9 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := validatePowerSource(powerSource); err != nil {
+		return err
+	}
+	if err := validateWarpModel(warpModel); err != nil {
 		return err
 	}
 

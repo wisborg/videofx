@@ -42,6 +42,14 @@ type Transition struct {
 	Tracked int `json:"tracked"` // correspondences that survived the forward-backward check
 	Inliers int `json:"inliers"` // of Tracked, how many RANSAC accepted as inliers
 
+	// Perspective is the residual homography (E = S^-1 * H) this frame pair
+	// carries BEYOND the similarity above -- the perspective/shear a global
+	// similarity can't represent. It is populated only under
+	// Options.WarpModel == WarpModelHomography; nil otherwise (and omitted
+	// from the sidecar JSON), so the default similarity path is unaffected.
+	// Near the identity for rigid motion. Analysis-resolution coordinates.
+	Perspective *matrix3 `json:"perspective,omitempty"`
+
 	// OK is false when estimation failed or was judged too unreliable to
 	// trust (too few surviving points, too few RANSAC inliers, or
 	// RANSAC/optical-flow itself failing outright). When OK is false,
@@ -125,7 +133,7 @@ func EstimateTransition(prev, curr gocv.Mat, prevPts []gocv.Point2f, opts Option
 	tx := affine.GetDoubleAt(0, 2)
 	ty := affine.GetDoubleAt(1, 2)
 
-	return Transition{
+	tr := Transition{
 		DX:       tx,
 		DY:       ty,
 		Rotation: math.Atan2(b, a),
@@ -133,5 +141,45 @@ func EstimateTransition(prev, curr gocv.Mat, prevPts []gocv.Point2f, opts Option
 		Tracked:  len(fromPts),
 		Inliers:  inlierCount,
 		OK:       true,
-	}, toPts
+	}
+	if opts.WarpModel == WarpModelHomography {
+		tr.Perspective = estimatePerspectiveResidual(fromPts, toPts, a, b, tx, ty, opts)
+	}
+	return tr, toPts
+}
+
+// estimatePerspectiveResidual fits a full homography to the same
+// correspondences the similarity above used, and returns the residual
+// E = S^-1 * H it carries beyond that similarity (see Transition.Perspective).
+// Returns nil -- meaning "no perspective correction for this frame," treated as
+// the identity downstream -- whenever the homography can't be trusted (a
+// degenerate fit or an empty result), so a bad frame is a no-op rather than a
+// wild warp. Used only in WarpModelHomography mode.
+func estimatePerspectiveResidual(fromPts, toPts []gocv.Point2f, a, b, tx, ty float64, opts Options) *matrix3 {
+	src := gocv.NewMatWithSize(len(fromPts), 1, gocv.MatTypeCV64FC2)
+	defer src.Close()
+	dst := gocv.NewMatWithSize(len(toPts), 1, gocv.MatTypeCV64FC2)
+	defer dst.Close()
+	for i := range fromPts {
+		src.SetDoubleAt(i, 0, float64(fromPts[i].X))
+		src.SetDoubleAt(i, 1, float64(fromPts[i].Y))
+		dst.SetDoubleAt(i, 0, float64(toPts[i].X))
+		dst.SetDoubleAt(i, 1, float64(toPts[i].Y))
+	}
+	mask := gocv.NewMat()
+	defer mask.Close()
+	h := gocv.FindHomography(src, dst, gocv.HomographyMethodRANSAC,
+		opts.RansacReprojThreshold, &mask, int(opts.RansacMaxIters), opts.RansacConfidence)
+	defer h.Close()
+	if h.Empty() || h.Rows() != 3 || h.Cols() != 3 {
+		return nil
+	}
+	var hm matrix3
+	for i := 0; i < 3; i++ {
+		for j := 0; j < 3; j++ {
+			hm[i][j] = h.GetDoubleAt(i, j)
+		}
+	}
+	e := perspectiveResidual(a, b, tx, ty, hm.normalized())
+	return &e
 }

@@ -154,6 +154,24 @@ type GoCVStabilizer struct {
 	// this to 0.5. Wired from --zoom-transition; only meaningful with EdgeMode
 	// adaptive.
 	ZoomTransition float64
+
+	// WarpModel selects the motion model. "" / "similarity" is the default
+	// 4-DOF similarity pipeline. "homography" enables the EXPERIMENTAL 8-DOF
+	// path: it additionally fits a per-frame homography and corrects the
+	// perspective/shear a similarity can't represent (rolling-shutter skew,
+	// parallax on a wide lens), on top of the similarity stabilization. Wired
+	// from --warp-model. Costs an extra homography fit per frame in analysis
+	// and a WarpPerspective (vs WarpAffine) in render. See stabilize's
+	// homography.go. A sidecar analyzed under one model must not be reused
+	// under the other (the perspective residuals differ); loadOrAnalyze does
+	// not detect this, so change --sidecar together with --warp-model.
+	WarpModel string
+
+	// PerspectiveRegularize shrinks the homography perspective correction
+	// toward the identity, in (0,1]; only used when WarpModel is "homography".
+	// 0 (the zero value) is treated as the default (1.0 = full correction) in
+	// Apply. Lower it for a gentler perspective correction.
+	PerspectiveRegularize float64
 }
 
 func (g *GoCVStabilizer) Name() string         { return "gocv-stabilizer" }
@@ -195,6 +213,10 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 	if g.AnalysisWidth > 0 {
 		trackOpts.AnalysisWidth = g.AnalysisWidth
 	}
+	homography := g.WarpModel == string(stabilize.WarpModelHomography)
+	if homography {
+		trackOpts.WarpModel = stabilize.WarpModelHomography
+	}
 
 	series, err := g.loadOrAnalyze(ctx, in.SourcePath, trackOpts)
 	if err != nil {
@@ -219,6 +241,14 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 		MaxZoom:               g.MaxZoom,
 		Quality:               g.Quality,
 		ZoomTransitionSeconds: g.ZoomTransition,
+	}
+	if homography {
+		reg := g.PerspectiveRegularize
+		if reg <= 0 {
+			reg = 1.0 // full perspective correction by default
+		}
+		renderOpts.PerspectiveRegularize = reg
+		renderOpts.PerspectiveZoomMargin = 0.03 // small extra crop to cover perspective corner excursion
 	}
 
 	if _, err := stabilize.Render(ctx, in.SourcePath, series, result, renderOpts, in.OutputPath); err != nil {

@@ -191,6 +191,26 @@ func TestValidatePowerSource(t *testing.T) {
 	}
 }
 
+func TestValidateWarpModel(t *testing.T) {
+	cases := []struct {
+		model   string
+		wantErr bool
+	}{
+		{"similarity", false},
+		{"homography", false},
+		{"", true},
+		{"affine", true},
+		{"Homography", true}, // case-sensitive
+	}
+	for _, c := range cases {
+		t.Run(c.model, func(t *testing.T) {
+			if err := validateWarpModel(c.model); (err != nil) != c.wantErr {
+				t.Errorf("validateWarpModel(%q) = %v, wantErr %v", c.model, err, c.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateSuffix(t *testing.T) {
 	cases := []struct {
 		name    string

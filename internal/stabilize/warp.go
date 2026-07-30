@@ -60,6 +60,12 @@ func (m similarity2D) invert() similarity2D {
 	}
 }
 
+// toMatrix3 is m as a full 3x3 homography, for composition with a perspective
+// correction (see homography.go / Render's WarpModelHomography path).
+func (m similarity2D) toMatrix3() matrix3 {
+	return matrix3{{m.A, -m.B, m.Tx}, {m.B, m.A, m.Ty}, {0, 0, 1}}
+}
+
 // toMat builds the 2x3 CV64FC1 matrix gocv.WarpAffine(WithParams) expects
 // from m. The caller owns the returned Mat and must Close it.
 func (m similarity2D) toMat() gocv.Mat {

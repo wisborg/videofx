@@ -114,6 +114,23 @@ type RenderOptions struct {
 	// is better/larger; 0 (the zero value) leaves the encoder's own default
 	// rate control in place. See that field's doc comment for the scale.
 	Quality int
+
+	// PerspectiveRegularize enables the EXPERIMENTAL homography correction
+	// (see homography.go): when > 0 AND the series carries perspective
+	// residuals (analyzed with WarpModelHomography), each frame's similarity
+	// correction is composed with a regularized per-frame perspective
+	// correction and applied via WarpPerspective. The value in (0,1] shrinks
+	// that correction toward the identity (smaller = gentler). 0 (the default)
+	// leaves the render on the pure-similarity WarpAffine path -- byte
+	// identical to before. Ignored by EdgeModeFlowFill.
+	PerspectiveRegularize float64
+
+	// PerspectiveZoomMargin adds this extra fractional zoom (e.g. 0.03 = 3%)
+	// on top of the similarity crop when the perspective correction is active,
+	// to cover the small extra corner excursion perspective can introduce
+	// beyond what the similarity zoom accounts for. Ignored when
+	// PerspectiveRegularize is 0.
+	PerspectiveZoomMargin float64
 }
 
 // DefaultRenderOptions returns EdgeModeFixed at a 12% zoom -- the Phase 4
@@ -268,6 +285,19 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 		defer ff.Close()
 	}
 
+	// EXPERIMENTAL perspective (homography) correction, opt-in and only for the
+	// cropping edge modes. perspCorr[i] is the per-frame perspective correction
+	// in analysis coordinates; nil when disabled or when the series carries no
+	// residuals, in which case the loop stays on the pure-similarity WarpAffine
+	// path below.
+	var perspCorr []matrix3
+	if opts.PerspectiveRegularize > 0 && ff == nil && series.hasPerspective() {
+		perspCorr = buildPerspectiveCorrections(series, result.Options.Sigma, result.Options.RadiusMultiple, opts.PerspectiveRegularize)
+	}
+	// scaleBasis moves an analysis-coordinate perspective correction into
+	// source pixels (see matrix3.conjugateBy); built once.
+	scaleBasis := scalingMatrix3(scaleFactor)
+
 	// Two Mats, reused across every frame -- see internal/vidio/decoder.go's
 	// NextFrame doc comment: every gocv.Mat is a C++ allocation the Go GC
 	// cannot reclaim, and at full source resolution (~25MB/frame at 4K) a
@@ -306,16 +336,35 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 				z = zooms[frames]
 			}
 		}
+		if perspCorr != nil {
+			z *= 1 + opts.PerspectiveZoomMargin
+		}
 		transform := buildCorrectionTransform(corr, scaleFactor, w, h, z)
 
-		if ff != nil {
+		switch {
+		case ff != nil:
 			if err := ff.render(src, transform, &dst); err != nil {
 				_ = enc.Close()
 				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
 			}
-		} else if err := warpFrame(src, &dst, transform, w, h); err != nil {
-			_ = enc.Close()
-			return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
+		case perspCorr != nil:
+			// Compose the similarity correction (source coords) with this
+			// frame's perspective correction (analysis coords -> source coords
+			// via conjugation), applied first, and warp with the full 3x3.
+			p := identityMatrix3
+			if frames < len(perspCorr) {
+				p = perspCorr[frames]
+			}
+			total := transform.toMatrix3().mul(p.conjugateBy(scaleBasis))
+			if err := warpFramePerspective(src, &dst, total, w, h); err != nil {
+				_ = enc.Close()
+				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
+			}
+		default:
+			if err := warpFrame(src, &dst, transform, w, h); err != nil {
+				_ = enc.Close()
+				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
+			}
 		}
 
 		if err := enc.WriteFrame(dst); err != nil {
@@ -348,6 +397,17 @@ func warpFrame(src gocv.Mat, dst *gocv.Mat, transform similarity2D, w, h int) er
 	m := transform.toMat()
 	defer m.Close()
 	return gocv.WarpAffineWithParams(src, dst, m, image.Pt(w, h), gocv.InterpolationLinear, gocv.BorderConstant, color.RGBA{})
+}
+
+// warpFramePerspective is warpFrame's homography counterpart: it applies a full
+// 3x3 transform via WarpPerspective, used by the EXPERIMENTAL
+// WarpModelHomography render path (see Render's perspective branch). Same
+// BORDER_CONSTANT convention as warpFrame -- the zoom folded into the transform
+// (plus PerspectiveZoomMargin) is what keeps the black border off-canvas.
+func warpFramePerspective(src gocv.Mat, dst *gocv.Mat, transform matrix3, w, h int) error {
+	m := transform.toMat()
+	defer m.Close()
+	return gocv.WarpPerspectiveWithParams(src, dst, m, image.Pt(w, h), gocv.InterpolationLinear, gocv.BorderConstant, color.RGBA{})
 }
 
 // flowFillState holds the fixed set of Mats EdgeModeFlowFill reuses

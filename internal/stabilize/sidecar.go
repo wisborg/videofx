@@ -66,6 +66,19 @@ func (s *MotionSeries) ScaleFactor() float64 {
 	return float64(s.SourceWidth) / float64(s.AnalysisWidth)
 }
 
+// hasPerspective reports whether any transition carries a perspective residual
+// (i.e. the series was analyzed with WarpModelHomography). When false, the
+// homography correction path is a no-op and Render behaves exactly as the
+// similarity pipeline.
+func (s *MotionSeries) hasPerspective() bool {
+	for i := range s.Transitions {
+		if s.Transitions[i].Perspective != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // WriteSidecar writes series to path as indented JSON. This is the
 // supported way to persist a MotionSeries; see package doc and
 // MotionSeries's doc comment for why the sidecar exists.
