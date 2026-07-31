@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"math"
+	"sort"
 
 	"gocv.io/x/gocv"
 
@@ -131,7 +133,34 @@ type RenderOptions struct {
 	// beyond what the similarity zoom accounts for. Ignored when
 	// PerspectiveRegularize is 0.
 	PerspectiveZoomMargin float64
+
+	// Mesh enables the EXPERIMENTAL MeshFlow-style spatially-varying correction
+	// (see mesh.go): when true AND the series carries mesh fields (analyzed
+	// with WarpModelMesh), each frame gets a per-vertex residual correction
+	// applied via Remap, before the similarity+zoom pass. Ignored by
+	// EdgeModeFlowFill. Default false -> the pure-similarity path, byte
+	// identical to before.
+	Mesh bool
+
+	// MeshZoomMargin is a small extra fractional zoom added ON TOP of the crop
+	// that Render sizes to the mesh's actual edge displacement (see
+	// meshCropMargin) -- a safety cushion, not the primary crop. Ignored when
+	// Mesh is false.
+	MeshZoomMargin float64
+
+	// MeshStrength is the mesh correction gain in [0,1] (see
+	// buildMeshCorrections): 1 applies the full correction, lower values scale
+	// it down for proportionally less picture distortion at a little less
+	// stabilization, 0 disables it (falls back to pure similarity). Wired from
+	// --mesh-strength. Ignored when Mesh is false.
+	MeshStrength float64
 }
+
+// meshDenoiseSigma is the temporal smoothing (in analysis frames) applied to
+// each vertex's per-frame residual estimate before integration, to drop
+// estimation noise that would otherwise warp the picture. A modest fixed value:
+// enough to calm the estimate, short enough not to erase real local motion.
+const meshDenoiseSigma = 4.0
 
 // DefaultRenderOptions returns EdgeModeFixed at a 12% zoom -- the Phase 4
 // spec's original starting point. It is NOT the recommended default for
@@ -298,6 +327,25 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 	// source pixels (see matrix3.conjugateBy); built once.
 	scaleBasis := scalingMatrix3(scaleFactor)
 
+	// EXPERIMENTAL mesh (MeshFlow) correction, opt-in and only for the cropping
+	// edge modes. meshCorr[i] is the per-frame per-vertex residual correction
+	// (analysis coords); mesh holds the reusable warp Mats. nil/no-op when
+	// disabled or when the series carries no fields.
+	var meshCorr []MeshField
+	var mesh *meshWarpState
+	var meshMargin float64
+	if opts.Mesh && ff == nil && perspCorr == nil && series.hasMesh() {
+		meshCorr = buildMeshCorrections(series, result.Options.Sigma, result.Options.RadiusMultiple, opts.MeshStrength, meshDenoiseSigma)
+		if len(meshCorr) > 0 {
+			mesh = newMeshWarpState(meshCorr[0].Cols, meshCorr[0].Rows, w, h, size.MatType(), scaleFactor)
+			defer mesh.Close()
+			// Measure the true exposed-border crop (rotation included), with the
+			// cheap analytic estimate as a floor, plus a small safety cushion.
+			measured := meshCoverageCrop(meshCorr, corrections, zoomFactor, zooms, scaleFactor, w, h)
+			meshMargin = math.Max(measured, meshCropMargin(meshCorr, scaleFactor, w, h)) + opts.MeshZoomMargin
+		}
+	}
+
 	// Two Mats, reused across every frame -- see internal/vidio/decoder.go's
 	// NextFrame doc comment: every gocv.Mat is a C++ allocation the Go GC
 	// cannot reclaim, and at full source resolution (~25MB/frame at 4K) a
@@ -339,6 +387,9 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 		if perspCorr != nil {
 			z *= 1 + opts.PerspectiveZoomMargin
 		}
+		if mesh != nil {
+			z *= 1 + meshMargin
+		}
 		transform := buildCorrectionTransform(corr, scaleFactor, w, h, z)
 
 		switch {
@@ -357,6 +408,17 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 			}
 			total := transform.toMatrix3().mul(p.conjugateBy(scaleBasis))
 			if err := warpFramePerspective(src, &dst, total, w, h); err != nil {
+				_ = enc.Close()
+				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
+			}
+		case mesh != nil:
+			// Two passes: the local mesh residual (Remap) first, then the
+			// global similarity + zoom (WarpAffine) over the result.
+			mc := MeshField{Cols: mesh.cols, Rows: mesh.rows, VX: make([]float64, mesh.cols*mesh.rows), VY: make([]float64, mesh.cols*mesh.rows)}
+			if frames < len(meshCorr) {
+				mc = meshCorr[frames]
+			}
+			if err := mesh.render(src, mc, transform, &dst); err != nil {
 				_ = enc.Close()
 				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
 			}
@@ -408,6 +470,278 @@ func warpFramePerspective(src gocv.Mat, dst *gocv.Mat, transform matrix3, w, h i
 	m := transform.toMat()
 	defer m.Close()
 	return gocv.WarpPerspectiveWithParams(src, dst, m, image.Pt(w, h), gocv.InterpolationLinear, gocv.BorderConstant, color.RGBA{})
+}
+
+// meshCropMargin returns the extra symmetric zoom fraction needed to CROP AWAY
+// the border band the mesh correction exposes, rather than fill it. Only
+// vertices on the frame EDGE can pull content away from an edge, so it takes
+// the largest edge-vertex displacement over the whole clip (analysis px ->
+// source px) and converts it to a zoom: a centre zoom crops symmetrically, so
+// covering an exposure of d on the worst side needs ~2d/dimension. This makes
+// the crop track the mesh's actual magnitude (which scales with --mesh-strength
+// and the grid), instead of a fixed guess that under-crops a strong mesh (the
+// reflected-edge artifact) or over-crops a weak one.
+func meshCropMargin(corr []MeshField, scaleFactor float64, w, h int) float64 {
+	if len(corr) == 0 {
+		return 0
+	}
+	cols, rows := corr[0].Cols, corr[0].Rows
+	if cols < 2 || rows < 2 {
+		return 0
+	}
+	// Worst inward band each side exposes, as a fraction of that dimension.
+	// A vertex on an edge whose correction points AWAY from that edge pulls
+	// content inward and leaves a band there; the band width is that outward
+	// component. (Signed, per side -- magnitude alone over-counts a vertex
+	// pushing the harmless way.) The output is a symmetric centre zoom, so it
+	// must crop the worst of the two opposing sides on each axis; a safety
+	// factor covers the extra reach the bilinear mesh + the similarity
+	// rotation add between vertices.
+	var top, bot, left, right float64
+	for _, f := range corr {
+		if f.Cols != cols || f.Rows != rows {
+			continue
+		}
+		for c := 0; c < cols; c++ {
+			top = math.Max(top, f.VY[c])                // top row, VY>0 samples above
+			bot = math.Max(bot, -f.VY[(rows-1)*cols+c]) // bottom row, VY<0 samples below
+		}
+		for r := 0; r < rows; r++ {
+			left = math.Max(left, f.VX[r*cols])             // left col, VX>0 samples left
+			right = math.Max(right, -f.VX[r*cols+(cols-1)]) // right col, VX<0 samples right
+		}
+	}
+	fw, fh := float64(w), float64(h)
+	if fw <= 0 || fh <= 0 {
+		return 0
+	}
+	const safety = 2.0
+	marginX := safety * math.Max(left, right) * scaleFactor / fw
+	marginY := safety * math.Max(top, bot) * scaleFactor / fh
+	// A centre zoom crops both sides, so doubling turns a one-side band into
+	// the zoom fraction that removes it.
+	return 2 * math.Max(marginX, marginY)
+}
+
+// meshCoverageCrop measures the extra centre-zoom needed to CROP AWAY the
+// mesh's exposed (filled) border across the whole clip. Analytic vertex-band
+// estimates undershoot because the similarity warp's rotation swings the band
+// inward unpredictably, so this instead warps a white coverage mask through the
+// exact two-pass geometry (mesh Remap then similarity WarpAffine, both
+// BORDER_CONSTANT(0) so exposed pixels read 0) at low resolution -- no video
+// decode -- accumulates the region clean in EVERY frame, and returns the
+// symmetric crop that removes the worst intrusion from any edge. Content-free
+// and low-res, so it's a cheap pre-pass over the geometry, not a second render.
+func meshCoverageCrop(meshCorr []MeshField, corrections []Correction, zoomFactor float64, zooms []float64, scaleFactor float64, w, h int) float64 {
+	if len(meshCorr) == 0 {
+		return 0
+	}
+	cols, rows := meshCorr[0].Cols, meshCorr[0].Rows
+	if cols < 2 || rows < 2 {
+		return 0
+	}
+	longEdge := math.Max(float64(w), float64(h))
+	sc := 540.0 / longEdge // downscale so the long edge is ~540 px (fine enough to catch thin slivers)
+	if sc > 1 {
+		sc = 1
+	}
+	sw, sh := int(float64(w)*sc), int(float64(h)*sc)
+	if sw < 8 || sh < 8 {
+		return 0
+	}
+
+	white := gocv.NewMatWithSizeFromScalar(gocv.NewScalar(255, 0, 0, 0), sh, sw, gocv.MatTypeCV8UC1)
+	gmX := gocv.NewMatWithSize(rows, cols, gocv.MatTypeCV32F)
+	gmY := gocv.NewMatWithSize(rows, cols, gocv.MatTypeCV32F)
+	fmX := gocv.NewMatWithSize(sh, sw, gocv.MatTypeCV32F)
+	fmY := gocv.NewMatWithSize(sh, sw, gocv.MatTypeCV32F)
+	tmpMask := gocv.NewMatWithSize(sh, sw, gocv.MatTypeCV8UC1)
+	outMask := gocv.NewMatWithSize(sh, sw, gocv.MatTypeCV8UC1)
+	defer func() {
+		white.Close()
+		gmX.Close()
+		gmY.Close()
+		fmX.Close()
+		fmY.Close()
+		tmpMask.Close()
+		outMask.Close()
+	}()
+
+	// kMax is the largest, over all frames, "centre-crop fraction" k that a
+	// single frame's exposed band forces: a symmetric zoom keeping the central
+	// rectangle inset by k on each side. A pixel at (x,y) survives a crop of k
+	// only if BOTH its distance to the nearest vertical edge (as a fraction of
+	// width) AND to the nearest horizontal edge exceed k; so the crop needed to
+	// remove a black pixel is min(dxFrac, dyFrac), and the frame's requirement
+	// is the max of that over its black pixels. This correctly separates the
+	// sides (a top band is cleared by the vertical crop, not the horizontal
+	// one) -- unlike a per-column/row scan, which a full-width band defeats.
+	sz := image.Pt(sw, sh)
+	kMax := 0.0
+	kPer := make([]float64, 0, len(meshCorr))
+	swf, shf := float64(sw), float64(sh)
+	for f := range meshCorr {
+		corr := meshCorr[f]
+		if corr.Cols != cols || corr.Rows != rows {
+			continue
+		}
+		for r := 0; r < rows; r++ {
+			outY := float64(r) / float64(rows-1) * float64(sh-1)
+			for c := 0; c < cols; c++ {
+				outX := float64(c) / float64(cols-1) * float64(sw-1)
+				v := r*cols + c
+				gmX.SetFloatAt(r, c, float32(outX-corr.VX[v]*scaleFactor*sc))
+				gmY.SetFloatAt(r, c, float32(outY-corr.VY[v]*scaleFactor*sc))
+			}
+		}
+		if gocv.Resize(gmX, &fmX, sz, 0, 0, gocv.InterpolationLinear) != nil ||
+			gocv.Resize(gmY, &fmY, sz, 0, 0, gocv.InterpolationLinear) != nil {
+			return 0
+		}
+		if gocv.Remap(white, &tmpMask, &fmX, &fmY, gocv.InterpolationLinear, gocv.BorderConstant, color.RGBA{}) != nil {
+			return 0
+		}
+		z := zoomFactor
+		if zooms != nil {
+			z = 1.0
+			if f < len(zooms) {
+				z = zooms[f]
+			}
+		}
+		corr2 := identityCorrection
+		if f < len(corrections) {
+			corr2 = corrections[f]
+		}
+		t := buildCorrectionTransform(corr2, scaleFactor, w, h, z)
+		t.Tx *= sc // same transform in the low-res frame: only the translation rescales
+		t.Ty *= sc
+		m := t.toMat()
+		err := gocv.WarpAffineWithParams(tmpMask, &outMask, m, sz, gocv.InterpolationNearestNeighbor, gocv.BorderConstant, color.RGBA{})
+		m.Close()
+		if err != nil {
+			return 0
+		}
+		data, err := outMask.DataPtrUint8()
+		if err != nil {
+			return 0
+		}
+		kf := 0.0
+		for y := 0; y < sh; y++ {
+			dy := y
+			if sh-1-y < dy {
+				dy = sh - 1 - y
+			}
+			dyFrac := float64(dy) / shf
+			if dyFrac <= kf {
+				continue // this whole row can't raise this frame's kf
+			}
+			row := y * sw
+			for x := 0; x < sw; x++ {
+				if data[row+x] >= 128 {
+					continue
+				}
+				dx := x
+				if sw-1-x < dx {
+					dx = sw - 1 - x
+				}
+				k := float64(dx) / swf
+				if dyFrac < k {
+					k = dyFrac
+				}
+				if k > kf {
+					kf = k
+				}
+			}
+		}
+		kPer = append(kPer, kf)
+	}
+
+	// Use a high PERCENTILE, not the absolute max: cropping to the single worst
+	// frame magnifies the residual shake across the whole clip (a heavy zoom),
+	// which reads worse than the brief edge fill the rare worst frames show.
+	// The replicate fill covers those few frames past the percentile.
+	sort.Float64s(kPer)
+	if len(kPer) > 0 {
+		kMax = kPer[int(0.95*float64(len(kPer)-1))]
+	}
+	if kMax >= 0.49 {
+		kMax = 0.49
+	}
+	// k = (1 - 1/z)/2  ->  zoom margin z-1 = 2k/(1-2k).
+	return 2 * kMax / (1 - 2*kMax)
+}
+
+// meshWarpState holds the Mats the EXPERIMENTAL WarpModelMesh render path
+// reuses across frames (see Render's mesh branch / mesh.go). The per-frame
+// correction is a small grid of vertex displacements; the warp is built the
+// MeshFlow way -- fill a grid-resolution backward-displacement map, upsample it
+// bilinearly to full resolution (so the C++ Resize does the per-pixel
+// interpolation, not a Go loop over millions of pixels), and Remap once.
+type meshWarpState struct {
+	cols, rows  int
+	w, h        int
+	scaleFactor float64
+
+	gridMapX, gridMapY gocv.Mat // rows x cols, CV32FC1: backward map at vertices
+	fullMapX, fullMapY gocv.Mat // h x w, CV32FC1: upsampled per-pixel backward map
+	tmp                gocv.Mat // mesh-corrected frame, before the similarity pass
+}
+
+func newMeshWarpState(cols, rows, w, h int, matType gocv.MatType, scaleFactor float64) *meshWarpState {
+	return &meshWarpState{
+		cols: cols, rows: rows, w: w, h: h, scaleFactor: scaleFactor,
+		gridMapX: gocv.NewMatWithSize(rows, cols, gocv.MatTypeCV32F),
+		gridMapY: gocv.NewMatWithSize(rows, cols, gocv.MatTypeCV32F),
+		fullMapX: gocv.NewMatWithSize(h, w, gocv.MatTypeCV32F),
+		fullMapY: gocv.NewMatWithSize(h, w, gocv.MatTypeCV32F),
+		tmp:      gocv.NewMatWithSize(h, w, matType),
+	}
+}
+
+func (m *meshWarpState) Close() {
+	m.gridMapX.Close()
+	m.gridMapY.Close()
+	m.fullMapX.Close()
+	m.fullMapY.Close()
+	m.tmp.Close()
+}
+
+// render applies one frame's mesh residual correction (corr, analysis coords)
+// then the global similarity+zoom transform, writing the result to dst. A
+// degenerate grid falls back to the similarity warp alone.
+func (m *meshWarpState) render(src gocv.Mat, corr MeshField, transform similarity2D, dst *gocv.Mat) error {
+	if m.cols < 2 || m.rows < 2 || corr.Cols != m.cols || corr.Rows != m.rows {
+		return warpFrame(src, dst, transform, m.w, m.h)
+	}
+	// Backward map at each grid vertex: the output vertex position minus its
+	// correction (in source pixels) is where to sample the source. Small
+	// correction => near-identity map; the linearization (evaluate the
+	// correction at the output vertex) is fine for these sub-pixel-to-few-pixel
+	// residuals.
+	for r := 0; r < m.rows; r++ {
+		outY := float64(r) / float64(m.rows-1) * float64(m.h-1)
+		for c := 0; c < m.cols; c++ {
+			outX := float64(c) / float64(m.cols-1) * float64(m.w-1)
+			v := r*m.cols + c
+			m.gridMapX.SetFloatAt(r, c, float32(outX-corr.VX[v]*m.scaleFactor))
+			m.gridMapY.SetFloatAt(r, c, float32(outY-corr.VY[v]*m.scaleFactor))
+		}
+	}
+	sz := image.Pt(m.w, m.h)
+	if err := gocv.Resize(m.gridMapX, &m.fullMapX, sz, 0, 0, gocv.InterpolationLinear); err != nil {
+		return fmt.Errorf("upsampling mesh map x: %w", err)
+	}
+	if err := gocv.Resize(m.gridMapY, &m.fullMapY, sz, 0, 0, gocv.InterpolationLinear); err != nil {
+		return fmt.Errorf("upsampling mesh map y: %w", err)
+	}
+	// Remap with BORDER_REPLICATE: the band the mesh exposes is meant to be
+	// CROPPED away by the zoom sized in meshCropMargin, so the fill only matters
+	// if that crop ever comes up short -- and a clamped-edge smear is far less
+	// objectionable there than a mirrored (REFLECT) seam or a black band.
+	if err := gocv.Remap(src, &m.tmp, &m.fullMapX, &m.fullMapY, gocv.InterpolationLinear, gocv.BorderReplicate, color.RGBA{}); err != nil {
+		return fmt.Errorf("mesh remap: %w", err)
+	}
+	return warpFrame(m.tmp, dst, transform, m.w, m.h)
 }
 
 // flowFillState holds the fixed set of Mats EdgeModeFlowFill reuses

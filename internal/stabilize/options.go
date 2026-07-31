@@ -88,6 +88,13 @@ type Options struct {
 	// is EXPERIMENTAL and opt-in; the empty default leaves every existing
 	// analysis/sidecar byte-identical.
 	WarpModel WarpModel `json:"warpModel,omitempty"`
+
+	// MeshGrid is the WarpModelMesh grid size: the number of cells across the
+	// frame width (the vertical count is derived to keep cells ~square). 0 uses
+	// DefaultMeshGrid (16). A finer grid corrects more localized motion but is
+	// noisier per vertex; the best default is to be chosen empirically. Ignored
+	// unless WarpModel is WarpModelMesh.
+	MeshGrid int `json:"meshGrid,omitempty"`
 }
 
 // WarpModel names the per-frame motion model (see Options.WarpModel).
@@ -98,9 +105,19 @@ const (
 	// rotation + uniform scale). The empty string maps to it.
 	WarpModelSimilarity WarpModel = ""
 	// WarpModelHomography additionally fits an 8-DOF homography per frame pair
-	// and records its perspective residual. EXPERIMENTAL.
+	// and records its perspective residual. EXPERIMENTAL (measured to regress
+	// vs similarity -- see the homography-warp-experiment note).
 	WarpModelHomography WarpModel = "homography"
+	// WarpModelMesh estimates a spatially-varying MeshFlow-style residual
+	// motion field per frame pair (median-voted onto a grid) and corrects it on
+	// top of the similarity stabilization. EXPERIMENTAL. The median voting is
+	// the variance control the global-homography model lacked. See mesh.go.
+	WarpModelMesh WarpModel = "mesh"
 )
+
+// DefaultMeshGrid is the starting grid size (cells across the frame width) for
+// WarpModelMesh, to be tuned empirically -- see Options.MeshGrid.
+const DefaultMeshGrid = 16
 
 // DefaultOptions returns the starting-point tuning from the Phase 2 spec:
 // ~500 corners, quality 0.01, minimum spacing 15px. These are a starting

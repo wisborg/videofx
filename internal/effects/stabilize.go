@@ -172,7 +172,25 @@ type GoCVStabilizer struct {
 	// 0 (the zero value) is treated as the default (1.0 = full correction) in
 	// Apply. Lower it for a gentler perspective correction.
 	PerspectiveRegularize float64
+
+	// MeshGrid is the WarpModel "mesh" grid size (cells across the frame
+	// width); 0 uses stabilize.DefaultMeshGrid (16). Wired from --mesh-grid;
+	// only used when WarpModel is "mesh". Larger = more localized correction
+	// but noisier per vertex; the best value is to be chosen empirically.
+	MeshGrid int
+
+	// MeshStrength is the mesh correction gain in [0,1] (see
+	// stabilize.RenderOptions.MeshStrength): lower = less picture distortion at
+	// a little less stabilization. Negative (the zero-value sentinel) means
+	// "use the default" (DefaultMeshStrength) in Apply. Wired from
+	// --mesh-strength; only used when WarpModel is "mesh".
+	MeshStrength float64
 }
+
+// DefaultMeshStrength is the mesh gain when --mesh-strength is not set: a gentle
+// half-strength correction, since a spatially-varying warp trades picture
+// distortion for stabilization and the gentler setting reads cleaner.
+const DefaultMeshStrength = 0.5
 
 func (g *GoCVStabilizer) Name() string         { return "gocv-stabilizer" }
 func (g *GoCVStabilizer) FilenameSlug() string { return "gocv-stabilized" }
@@ -217,6 +235,11 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 	if homography {
 		trackOpts.WarpModel = stabilize.WarpModelHomography
 	}
+	meshMode := g.WarpModel == string(stabilize.WarpModelMesh)
+	if meshMode {
+		trackOpts.WarpModel = stabilize.WarpModelMesh
+		trackOpts.MeshGrid = g.MeshGrid // 0 -> DefaultMeshGrid in estimation
+	}
 
 	series, err := g.loadOrAnalyze(ctx, in.SourcePath, trackOpts)
 	if err != nil {
@@ -249,6 +272,18 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 		}
 		renderOpts.PerspectiveRegularize = reg
 		renderOpts.PerspectiveZoomMargin = 0.03 // small extra crop to cover perspective corner excursion
+	}
+	if meshMode {
+		strength := g.MeshStrength
+		if strength < 0 {
+			strength = DefaultMeshStrength
+		}
+		if strength > 1 {
+			strength = 1
+		}
+		renderOpts.Mesh = true
+		renderOpts.MeshStrength = strength
+		renderOpts.MeshZoomMargin = 0.02 // small safety on top of the crop measured to the mesh's actual exposed border
 	}
 
 	if _, err := stabilize.Render(ctx, in.SourcePath, series, result, renderOpts, in.OutputPath); err != nil {

@@ -198,6 +198,7 @@ func TestValidateWarpModel(t *testing.T) {
 	}{
 		{"similarity", false},
 		{"homography", false},
+		{"mesh", false},
 		{"", true},
 		{"affine", true},
 		{"Homography", true}, // case-sensitive

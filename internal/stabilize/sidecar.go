@@ -79,6 +79,18 @@ func (s *MotionSeries) hasPerspective() bool {
 	return false
 }
 
+// hasMesh reports whether any transition carries a mesh residual field (i.e.
+// the series was analyzed with WarpModelMesh). When false, the mesh correction
+// path is a no-op.
+func (s *MotionSeries) hasMesh() bool {
+	for i := range s.Transitions {
+		if s.Transitions[i].Mesh != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // WriteSidecar writes series to path as indented JSON. This is the
 // supported way to persist a MotionSeries; see package doc and
 // MotionSeries's doc comment for why the sidecar exists.

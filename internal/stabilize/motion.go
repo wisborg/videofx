@@ -50,6 +50,12 @@ type Transition struct {
 	// Near the identity for rigid motion. Analysis-resolution coordinates.
 	Perspective *matrix3 `json:"perspective,omitempty"`
 
+	// Mesh is the spatially-varying residual motion field for this frame pair
+	// (see mesh.go), populated only under Options.WarpModel == WarpModelMesh;
+	// nil otherwise (and omitted from the sidecar). Analysis-resolution
+	// coordinates.
+	Mesh *MeshField `json:"mesh,omitempty"`
+
 	// OK is false when estimation failed or was judged too unreliable to
 	// trust (too few surviving points, too few RANSAC inliers, or
 	// RANSAC/optical-flow itself failing outright). When OK is false,
@@ -144,6 +150,15 @@ func EstimateTransition(prev, curr gocv.Mat, prevPts []gocv.Point2f, opts Option
 	}
 	if opts.WarpModel == WarpModelHomography {
 		tr.Perspective = estimatePerspectiveResidual(fromPts, toPts, a, b, tx, ty, opts)
+	}
+	if opts.WarpModel == WarpModelMesh {
+		grid := opts.MeshGrid
+		if grid <= 0 {
+			grid = DefaultMeshGrid
+		}
+		cols, rows := meshVertexCounts(grid, prev.Cols(), prev.Rows())
+		field := buildMeshField(fromPts, toPts, tr, cols, rows, prev.Cols(), prev.Rows())
+		tr.Mesh = &field
 	}
 	return tr, toPts
 }
