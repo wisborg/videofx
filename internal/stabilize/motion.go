@@ -46,8 +46,8 @@ type Transition struct {
 	// carries BEYOND the similarity above -- the perspective/shear a global
 	// similarity can't represent. It is populated only under
 	// Options.WarpModel == WarpModelHomography; nil otherwise (and omitted
-	// from the sidecar JSON), so the default similarity path is unaffected.
-	// Near the identity for rigid motion. Analysis-resolution coordinates.
+	// from the sidecar record via its flag), so the default similarity path is
+	// unaffected. Near the identity for rigid motion. Analysis-res coordinates.
 	Perspective *matrix3 `json:"perspective,omitempty"`
 
 	// Mesh is the spatially-varying residual motion field for this frame pair

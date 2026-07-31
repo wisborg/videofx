@@ -59,9 +59,8 @@ type Pose struct {
 // run of many consecutive failures degrades gracefully into "trajectory
 // is flat here," not a crash or a wild extrapolation.
 //
-// As defense against a hand-edited or corrupted sidecar — the JSON
-// format is deliberately easy to inspect and modify, see package doc —
-// a non-positive Scale (which should never occur through normal
+// As defense against a corrupted sidecar (a truncated or garbled analysis
+// cache), a non-positive Scale (which should never occur through normal
 // Analyze/EstimateTransition output, but costs nothing to guard against)
 // is treated as the identity (log-scale contribution 0) rather than fed
 // to math.Log, which would return -Inf/NaN and poison every subsequent
@@ -78,7 +77,7 @@ func buildTrajectory(series *MotionSeries) []Pose {
 	// frame pair); the min() guards defensively against a
 	// short/truncated Transitions slice the same way trackForwardBackward
 	// guards its loop bound, rather than assuming the contract always
-	// holds for hand-edited sidecars.
+	// holds for a corrupted sidecar.
 	m := n - 1
 	if len(series.Transitions) < m {
 		m = len(series.Transitions)
