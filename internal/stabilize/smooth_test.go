@@ -489,3 +489,33 @@ func TestSmooth_EmptySeries(t *testing.T) {
 func kernelRadius(o SmoothOptions) int {
 	return int(math.Ceil(o.RadiusMultiple * o.Sigma))
 }
+
+func TestResidualShake(t *testing.T) {
+	s := &MotionSeries{SourceWidth: 3840, AnalysisWidth: 960}
+	// Magnitudes 1..10 via 3-4-5 triangles, plus a failed transition carrying a
+	// huge motion that must NOT be counted (it would otherwise look like the
+	// clip was rendered worse than it was).
+	for i := 1; i <= 10; i++ {
+		s.Transitions = append(s.Transitions, Transition{
+			DX: 0.6 * float64(i), DY: 0.8 * float64(i), Rotation: 0.01, Scale: 1, OK: true,
+		})
+	}
+	s.Transitions = append(s.Transitions, Transition{DX: 900, DY: 900, Rotation: 3, Scale: 1})
+
+	r := s.ResidualShake()
+	if r.Frames != 10 {
+		t.Errorf("Frames = %d, want 10 (the failed transition excluded)", r.Frames)
+	}
+	if math.Abs(r.MedianTranslation-6) > 1e-9 {
+		t.Errorf("MedianTranslation = %v, want 6", r.MedianTranslation)
+	}
+	if math.Abs(r.P90Translation-10) > 1e-9 {
+		t.Errorf("P90Translation = %v, want 10", r.P90Translation)
+	}
+	if want := 0.01 * 180 / math.Pi; math.Abs(r.MedianRotationDeg-want) > 1e-9 {
+		t.Errorf("MedianRotationDeg = %v, want %v", r.MedianRotationDeg, want)
+	}
+	if empty := (&MotionSeries{}).ResidualShake(); empty.Frames != 0 {
+		t.Errorf("empty series: %+v, want zero", empty)
+	}
+}

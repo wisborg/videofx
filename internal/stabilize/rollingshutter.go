@@ -298,9 +298,32 @@ const rsMinCalibrationSamples = 30
 // estimate. Measured on this project's footage, both of those come out at ~0
 // while the acceleration regressions come out at ~0.3 on both axes.
 func EstimateReadoutRatio(series *MotionSeries) RSCalibration {
+	return EstimateReadoutRatioAgainst(series, series)
+}
+
+// EstimateReadoutRatioAgainst measures the rolling shutter present in series
+// while taking the driving accelerations from predictors, a DIFFERENT but
+// frame-aligned clip.
+//
+// This exists to answer "how much rolling shutter is left in this render?",
+// which cannot be asked of the render alone. Stabilization smooths the motion,
+// so a rendered output no longer reveals the camera acceleration that produced
+// the distortion baked into its pixels -- measure it against itself and the
+// predictor is gone. Pass the RAW clip as predictors and the ratio that comes
+// back is directly comparable to the raw clip's own: unchanged means the
+// correction did nothing, near zero means it removed the shutter.
+//
+// The two series must correspond frame for frame (same source, same length, no
+// trimming or frame-rate change between them); the shorter one bounds the walk.
+func EstimateReadoutRatioAgainst(series, predictors *MotionSeries) RSCalibration {
+	n := len(series.Transitions)
+	if len(predictors.Transitions) < n {
+		n = len(predictors.Transitions)
+	}
 	var shear, stretch, predX, predY []float64
-	for k := 1; k < len(series.Transitions)-1; k++ {
-		tr, prev, next := series.Transitions[k], series.Transitions[k-1], series.Transitions[k+1]
+	for k := 1; k < n-1; k++ {
+		tr := series.Transitions[k]
+		prev, next := predictors.Transitions[k-1], predictors.Transitions[k+1]
 		if tr.RS == nil || !tr.OK || !prev.OK || !next.OK {
 			continue
 		}
@@ -343,18 +366,18 @@ func EstimateReadoutRatio(series *MotionSeries) RSCalibration {
 	sort.Float64s(sorted)
 	mad := sorted[len(sorted)/2] * 1.4826
 	keep := make([]bool, len(shear))
-	n := 0
+	kept := 0
 	for i := range keep {
 		keep[i] = mad <= 0 || res[i] <= 3*mad
 		if keep[i] {
-			n++
+			kept++
 		}
 	}
-	if n < rsMinCalibrationSamples {
-		keep, n = nil, len(shear)
+	if kept < rsMinCalibrationSamples {
+		keep, kept = nil, len(shear)
 	}
 
-	cal := RSCalibration{Ratio: pooled(keep), Samples: n, OK: true}
+	cal := RSCalibration{Ratio: pooled(keep), Samples: kept, OK: true}
 	cal.RatioH, cal.CorrH = axisFit(shear, predX, keep)
 	cal.RatioV, cal.CorrV = axisFit(stretch, predY, keep)
 
@@ -375,6 +398,163 @@ func EstimateReadoutRatio(series *MotionSeries) RSCalibration {
 	sort.Float64s(accel)
 	cal.MedianAccel = accel[len(accel)/2]
 	return cal
+}
+
+// RSRectifier is one frame's rolling-shutter rectification, as the two
+// dimensionless coefficients KX and KY: the frame's row u = (y - centreY) is
+// displaced by (KX*u, KY*u) relative to the centre row, so undoing it is
+//
+//	x' = x - KX*(y - centreY)      y' = y - KY*(y - centreY)
+//
+// That is exact, not a linearization, and the reason is worth stating because
+// it looks like it should only be first-order: a feature's exposure time is set
+// by the sensor row it is READ OUT on, which is the row it appears at in the
+// distorted frame -- not the row it would have occupied under a global shutter.
+// So the coefficients multiply the OBSERVED row, which is the one being warped
+// from. (Going the other way is the implicit direction: the forward skew has
+// the observed row on both sides of its own equation.)
+//
+// Both coefficients are ratios of two lengths measured at the same resolution
+// (rho * velocity / frame height), so unlike Transition.DX/DY they are
+// resolution-independent: the same KX/KY apply at analysis and at source
+// resolution, and only centreY has to be given in the coordinate space being
+// warped. That is why nothing here is multiplied by MotionSeries.ScaleFactor.
+//
+// The rectification is driven by the frame's VELOCITY, not by the acceleration
+// that EstimateReadoutRatio needed. Those are two different questions about the
+// same physics: a constant velocity skews every frame identically (invisible
+// between frames, which is why it cannot be used to calibrate rho, but very
+// much visible in the picture), while it is the change in that skew from frame
+// to frame that reads as wobble.
+type RSRectifier struct {
+	KX, KY float64
+}
+
+// affine returns the rectifying transform for a frame whose vertical centre is
+// at centreY, in whatever pixel coordinates centreY is expressed in.
+func (r RSRectifier) affine(centreY float64) affine2D {
+	return affine2D{
+		A: 1, B: -r.KX, Tx: r.KX * centreY,
+		C: 0, D: 1 - r.KY, Ty: r.KY * centreY,
+	}
+}
+
+// BuildRSRectifiers returns one rectification per FRAME (so len(Transitions)+1
+// entries, matching the frame count Render walks), for a clip whose readout
+// ratio is rho.
+//
+// A frame's velocity is taken as the average of the transitions either side of
+// it -- transitions[k-1] covers frame k-1 to k and transitions[k] covers k to
+// k+1, so their mean is centred on frame k itself, where a one-sided estimate
+// would be half a frame out of phase. On this footage the velocity reverses
+// several times a second, so that half-frame lag is not a rounding detail: it
+// would rectify each frame by something closer to its neighbour's skew than its
+// own.
+func BuildRSRectifiers(series *MotionSeries, rho float64) []RSRectifier {
+	n := len(series.Transitions)
+	if n == 0 || rho == 0 || series.AnalysisHeight <= 0 {
+		return nil
+	}
+	h := float64(series.AnalysisHeight)
+	vel := func(i int) (float64, float64, bool) {
+		if i < 0 || i >= n || !series.Transitions[i].OK {
+			return 0, 0, false
+		}
+		return series.Transitions[i].DX, series.Transitions[i].DY, true
+	}
+	out := make([]RSRectifier, n+1)
+	for k := 0; k <= n; k++ {
+		bx, by, bok := vel(k - 1)
+		ax, ay, aok := vel(k)
+		var vx, vy float64
+		switch {
+		case bok && aok:
+			vx, vy = (bx+ax)/2, (by+ay)/2
+		case bok:
+			vx, vy = bx, by
+		case aok:
+			vx, vy = ax, ay
+		default:
+			continue // no usable motion for this frame: leave it unrectified
+		}
+		out[k] = RSRectifier{KX: rho * vx / h, KY: rho * vy / h}
+	}
+	return out
+}
+
+// ZoomMargin is the extra fractional zoom needed so this rectification does not
+// pull content in past the frame edge, for a frame of frameW x frameH. A row at
+// the very top or bottom moves by K*frameH/2, which has to be covered on both
+// sides, hence the factor of 2 against the full dimension.
+func (r RSRectifier) ZoomMargin(frameW, frameH int) float64 {
+	if frameW <= 0 || frameH <= 0 {
+		return 0
+	}
+	w, h := float64(frameW), float64(frameH)
+	return math.Max(math.Abs(r.KX)*h/w, math.Abs(r.KY))
+}
+
+// RSZoomMargin is the single extra zoom fraction covering every frame's
+// rectification.
+//
+// It is deliberately ONE constant for the clip rather than a per-frame margin,
+// even though the per-frame requirement is known exactly. The rectification
+// tracks camera velocity, which on this footage reverses a few times a second;
+// a per-frame margin would therefore pump the zoom at the same rate, and a
+// visibly breathing frame is a far worse artefact than the fraction of a
+// percent of extra crop this costs (see the zoom-transition envelope, which
+// exists to keep the adaptive zoom from moving abruptly for the same reason).
+func RSZoomMargin(rect []RSRectifier, frameW, frameH int) float64 {
+	var worst float64
+	for _, r := range rect {
+		worst = math.Max(worst, r.ZoomMargin(frameW, frameH))
+	}
+	return worst
+}
+
+// DebiasRollingShutter returns a copy of series whose per-transition Rotation
+// and Scale have had their rolling-shutter contamination removed.
+//
+// This is the half of the correction that has nothing to do with pixels. A
+// 4-DOF similarity fitted to rolling-shutter-distorted frames cannot see the
+// shear or the row stretch as such, so it books them as camera motion: the
+// shear lands in ROTATION and the stretch lands in SCALE, each at half its size
+// (the other half goes into the fit's residual -- see RSObservables for why
+// these are the two degeneracies). The trajectory then contains a roll and a
+// zoom the camera never performed, the smoother sees them as shake, and the
+// renderer dutifully warps the frame to remove motion that was never there.
+//
+// The de-bias uses the MODEL's prediction, rho * (velocity change), rather than
+// the per-frame measured RSObservables. That is deliberate and is the lesson of
+// this project's earlier per-frame homography attempt: a noisy per-frame
+// estimate injected into a cumulative trajectory adds more jitter than the
+// effect it removes. Here one clip-wide constant is fitted against a smooth
+// predictor, so the correction carries essentially no new variance.
+//
+// Transitions are copied, not mutated: a MotionSeries is a cache that may be
+// read from a sidecar and reused, and silently rewriting it would make the
+// result depend on how many times it had been de-biased.
+func DebiasRollingShutter(series *MotionSeries, rho float64) *MotionSeries {
+	if rho == 0 || len(series.Transitions) == 0 || series.AnalysisHeight <= 0 {
+		return series
+	}
+	h := float64(series.AnalysisHeight)
+	out := *series
+	out.Transitions = append([]Transition(nil), series.Transitions...)
+
+	for k := 1; k < len(out.Transitions)-1; k++ {
+		prev, next := series.Transitions[k-1], series.Transitions[k+1]
+		if !out.Transitions[k].OK || !prev.OK || !next.OK {
+			continue
+		}
+		// The same centred velocity change the calibration regressed against,
+		// times rho: this transition's predicted shear and stretch.
+		shear := rho * (next.DX - prev.DX) / 2
+		stretch := rho * (next.DY - prev.DY) / 2
+		out.Transitions[k].Rotation += shear / (2 * h)
+		out.Transitions[k].Scale -= stretch / (2 * h)
+	}
+	return &out
 }
 
 // axisFit is the single-axis version of the pooled fit above, plus the Pearson

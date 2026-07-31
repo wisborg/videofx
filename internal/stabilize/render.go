@@ -148,6 +148,13 @@ type RenderOptions struct {
 	// Mesh is false.
 	MeshZoomMargin float64
 
+	// RS holds the per-frame rolling-shutter rectifications to apply before the
+	// stabilization correction (see BuildRSRectifiers), or nil to leave the
+	// shutter uncorrected. Unlike the perspective and mesh models this is not
+	// an extra warp: it composes into the same single WarpAffine, so enabling
+	// it costs nothing per frame beyond a 2x3 matrix multiply.
+	RS []RSRectifier
+
 	// MeshStrength is the mesh correction gain in [0,1] (see
 	// buildMeshCorrections): 1 applies the full correction, lower values scale
 	// it down for proportionally less picture distortion at a little less
@@ -346,6 +353,20 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 		}
 	}
 
+	// Rolling-shutter rectification, folded into the same transform as the
+	// correction below. One clip-wide zoom margin covers every frame's
+	// rectification; see RSZoomMargin for why it is not per-frame.
+	rsRect := opts.RS
+	if ff != nil {
+		// EdgeModeFlowFill does not crop at all, so there is no zoom to hide
+		// the band a rectification pulls in; it would show as a filled edge.
+		rsRect = nil
+	}
+	var rsMargin float64
+	if rsRect != nil {
+		rsMargin = RSZoomMargin(rsRect, w, h)
+	}
+
 	// Two Mats, reused across every frame -- see internal/vidio/decoder.go's
 	// NextFrame doc comment: every gocv.Mat is a C++ allocation the Go GC
 	// cannot reclaim, and at full source resolution (~25MB/frame at 4K) a
@@ -390,7 +411,18 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 		if mesh != nil {
 			z *= 1 + meshMargin
 		}
+		if rsRect != nil {
+			z *= 1 + rsMargin
+		}
 		transform := buildCorrectionTransform(corr, scaleFactor, w, h, z)
+
+		// total is the transform actually warped with: the correction alone
+		// (widened to an affine) unless a rectification is composed under it,
+		// applied FIRST so the correction acts on a global-shutter frame.
+		total := affineFromSimilarity(transform)
+		if rsRect != nil && frames < len(rsRect) {
+			total = total.mul(rsRect[frames].affine(float64(h) / 2))
+		}
 
 		switch {
 		case ff != nil:
@@ -406,8 +438,8 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 			if frames < len(perspCorr) {
 				p = perspCorr[frames]
 			}
-			total := transform.toMatrix3().mul(p.conjugateBy(scaleBasis))
-			if err := warpFramePerspective(src, &dst, total, w, h); err != nil {
+			full := total.toMatrix3().mul(p.conjugateBy(scaleBasis))
+			if err := warpFramePerspective(src, &dst, full, w, h); err != nil {
 				_ = enc.Close()
 				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
 			}
@@ -418,12 +450,12 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 			if frames < len(meshCorr) {
 				mc = meshCorr[frames]
 			}
-			if err := mesh.render(src, mc, transform, &dst); err != nil {
+			if err := mesh.render(src, mc, total, &dst); err != nil {
 				_ = enc.Close()
 				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
 			}
 		default:
-			if err := warpFrame(src, &dst, transform, w, h); err != nil {
+			if err := warpFrameAffine(src, &dst, total, w, h); err != nil {
 				_ = enc.Close()
 				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
 			}
@@ -456,6 +488,16 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 // visible in a correctly-computed adaptive render or a generously-sized
 // fixed one.
 func warpFrame(src gocv.Mat, dst *gocv.Mat, transform similarity2D, w, h int) error {
+	return warpFrameAffine(src, dst, affineFromSimilarity(transform), w, h)
+}
+
+// warpFrameAffine is warpFrame over the general affine form, which is what the
+// render loop actually calls: a rolling-shutter rectification composed under
+// the correction makes the total transform a shear, not a similarity. With no
+// rectification the matrix is numerically identical to the one warpFrame would
+// have built, so the uncorrected path is unchanged rather than merely
+// equivalent.
+func warpFrameAffine(src gocv.Mat, dst *gocv.Mat, transform affine2D, w, h int) error {
 	m := transform.toMat()
 	defer m.Close()
 	return gocv.WarpAffineWithParams(src, dst, m, image.Pt(w, h), gocv.InterpolationLinear, gocv.BorderConstant, color.RGBA{})
@@ -709,9 +751,9 @@ func (m *meshWarpState) Close() {
 // render applies one frame's mesh residual correction (corr, analysis coords)
 // then the global similarity+zoom transform, writing the result to dst. A
 // degenerate grid falls back to the similarity warp alone.
-func (m *meshWarpState) render(src gocv.Mat, corr MeshField, transform similarity2D, dst *gocv.Mat) error {
+func (m *meshWarpState) render(src gocv.Mat, corr MeshField, transform affine2D, dst *gocv.Mat) error {
 	if m.cols < 2 || m.rows < 2 || corr.Cols != m.cols || corr.Rows != m.rows {
-		return warpFrame(src, dst, transform, m.w, m.h)
+		return warpFrameAffine(src, dst, transform, m.w, m.h)
 	}
 	// Backward map at each grid vertex: the output vertex position minus its
 	// correction (in source pixels) is where to sample the source. Small
@@ -741,7 +783,7 @@ func (m *meshWarpState) render(src gocv.Mat, corr MeshField, transform similarit
 	if err := gocv.Remap(src, &m.tmp, &m.fullMapX, &m.fullMapY, gocv.InterpolationLinear, gocv.BorderReplicate, color.RGBA{}); err != nil {
 		return fmt.Errorf("mesh remap: %w", err)
 	}
-	return warpFrame(m.tmp, dst, transform, m.w, m.h)
+	return warpFrameAffine(m.tmp, dst, transform, m.w, m.h)
 }
 
 // flowFillState holds the fixed set of Mats EdgeModeFlowFill reuses

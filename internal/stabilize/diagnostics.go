@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 	"strconv"
 )
 
@@ -90,6 +91,62 @@ func (r *SmoothResult) Stats(scaleFactor float64, boundaryFrames int) Stats {
 	st.MeanRotationRad = rotationSum / float64(n)
 	st.ClampedFraction = float64(st.ClampedCount) / float64(n)
 	return st
+}
+
+// ResidualShake is how much frame-to-frame motion is LEFT in a clip: run
+// Analyze over an already-rendered output and this summarizes what the
+// stabilizer failed to remove.
+//
+// This is the project's standing shake metric, and re-tracking the output is
+// what makes it trustworthy -- it compares clips by how much their content
+// still moves, not by how different consecutive frames look, so it cannot be
+// won by rendering something blurrier.
+//
+// Know what it does NOT see. It reduces each frame pair to one global
+// similarity, so it measures TRANSLATION (and rotation) only; shear and
+// per-axis stretch have no representation in it at all, and a shear is
+// partially absorbed into the rotation figure rather than reported. A change
+// that removes rolling-shutter distortion can therefore leave this metric flat
+// or slightly worse while visibly improving the picture -- see
+// RSRectifier. Use it to check that a change did not cost translational
+// stability, not as the sole gate on one that targets something else.
+type ResidualShake struct {
+	Frames int
+
+	// MedianTranslation and P90Translation are in ANALYSIS-resolution pixels
+	// (multiply by MotionSeries.ScaleFactor for source pixels). The median is
+	// the headline number; the p90 covers the worst frames, which on
+	// action footage are the high-acceleration ones where the models being
+	// compared usually differ most.
+	MedianTranslation float64
+	P90Translation    float64
+
+	MedianRotationDeg float64
+}
+
+// ResidualShake computes the metric above over s. Failed transitions are
+// skipped rather than counted as zero motion, which would otherwise reward a
+// clip whose tracking broke down.
+func (s *MotionSeries) ResidualShake() ResidualShake {
+	var mags, rots []float64
+	for _, tr := range s.Transitions {
+		if !tr.OK {
+			continue
+		}
+		mags = append(mags, math.Hypot(tr.DX, tr.DY))
+		rots = append(rots, math.Abs(tr.Rotation))
+	}
+	if len(mags) == 0 {
+		return ResidualShake{}
+	}
+	sort.Float64s(mags)
+	sort.Float64s(rots)
+	return ResidualShake{
+		Frames:            len(mags),
+		MedianTranslation: mags[len(mags)/2],
+		P90Translation:    mags[min(len(mags)-1, len(mags)*90/100)],
+		MedianRotationDeg: rots[len(rots)/2] * 180 / math.Pi,
+	}
 }
 
 // WriteCSV dumps r's raw trajectory, smoothed trajectory, and derived

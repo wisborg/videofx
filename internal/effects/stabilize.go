@@ -185,6 +185,19 @@ type GoCVStabilizer struct {
 	// "use the default" (DefaultMeshStrength) in Apply. Wired from
 	// --mesh-strength; only used when WarpModel is "mesh".
 	MeshStrength float64
+
+	// RollingShutter enables rolling-shutter rectification (see
+	// stabilize.RSRectifier): the clip's readout ratio is calibrated from its
+	// own analysis and used both to de-bias the motion estimates and to
+	// un-skew each frame. Wired from --rolling-shutter. Works with any
+	// WarpModel; costs no extra warp pass.
+	RollingShutter bool
+
+	// RSRatio overrides the calibrated readout ratio (0-1) instead of measuring
+	// it from the clip. 0 (the default) calibrates. Wired from --rs-ratio, for
+	// sweeping the correction strength against a cached sidecar; only used when
+	// RollingShutter is true.
+	RSRatio float64
 }
 
 // DefaultMeshStrength is the mesh gain when --mesh-strength is not set. 0.3 is
@@ -252,6 +265,24 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 		return fmt.Errorf("gocv-stabilizer: %w", err)
 	}
 
+	// Rolling shutter, if asked for. This happens before Smooth because half
+	// the correction is to the MOTION ESTIMATES themselves: the similarity fit
+	// books a shutter shear as camera roll, and smoothing a trajectory that
+	// contains a roll the camera never performed makes the renderer warp the
+	// frame to remove it. The other half -- un-skewing the pixels -- is folded
+	// into the render transform below.
+	var rsRect []stabilize.RSRectifier
+	if g.RollingShutter {
+		rho, err := g.readoutRatio(series, in.SourcePath)
+		if err != nil {
+			return fmt.Errorf("gocv-stabilizer: %w", err)
+		}
+		if rho > 0 {
+			rsRect = stabilize.BuildRSRectifiers(series, rho)
+			series = stabilize.DebiasRollingShutter(series, rho)
+		}
+	}
+
 	sigma := g.Sigma
 	if sigma <= 0 {
 		sigma = mapStrengthToSigma(in.Strength)
@@ -266,6 +297,7 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 		MaxZoom:               g.MaxZoom,
 		Quality:               g.Quality,
 		ZoomTransitionSeconds: g.ZoomTransition,
+		RS:                    rsRect,
 	}
 	if homography {
 		reg := g.PerspectiveRegularize
@@ -285,13 +317,54 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 		}
 		renderOpts.Mesh = true
 		renderOpts.MeshStrength = strength
-		renderOpts.MeshZoomMargin = 0.02 // small safety on top of the crop measured to the mesh's actual exposed border
+		// Small safety cushion on top of the crop Render measures to the mesh's
+		// actual exposed border. Raised from 0.02 to 0.04 after a visual A/B on
+		// test_very_shaken: the measured crop is the 95th percentile of the
+		// per-frame requirement (see meshCoverageCrop), so the frames past it
+		// fall back to the mesh remap's BORDER_REPLICATE fill, and at the
+		// default grid-1 settings that smeared band was visibly streaking at
+		// the frame edges. Roughly two extra percent of crop removes it.
+		//
+		// This is a cushion on a percentile, not a measurement -- 0.04 is the
+		// value confirmed to clear the streaking by eye, not a computed
+		// minimum. Raising the percentile instead would be the principled fix,
+		// but the per-frame crop distribution on this footage is broad rather
+		// than outlier-driven (p95 needs ~38%, the worst frame ~74%), so it
+		// would cost several times more picture than this does.
+		renderOpts.MeshZoomMargin = 0.04
 	}
 
 	if _, err := stabilize.Render(ctx, in.SourcePath, series, result, renderOpts, in.OutputPath); err != nil {
 		return fmt.Errorf("gocv-stabilizer: rendering %s: %w", in.SourcePath, err)
 	}
 	return nil
+}
+
+// readoutRatio resolves the rolling-shutter readout ratio to correct with:
+// either RSRatio as given, or one calibrated from the clip's own motion.
+//
+// A clip that cannot be calibrated returns 0, meaning "correct nothing" -- with
+// a warning, because the alternative is worse in both directions: silently
+// doing nothing looks like the flag is broken, and applying a ratio fitted to
+// noise would warp every frame by a number that came from nowhere. Being
+// uncalibratable is usually just a clip that never accelerated hard enough to
+// reveal a shutter (a locked-off or gently-moving shot), and says nothing about
+// the camera -- see stabilize.RSCalibration.Reliable.
+func (g *GoCVStabilizer) readoutRatio(series *stabilize.MotionSeries, sourcePath string) (float64, error) {
+	if g.RSRatio != 0 {
+		if g.RSRatio < 0 || g.RSRatio > 1 {
+			return 0, fmt.Errorf("--rs-ratio %.3f is out of range; it is a fraction of the frame period, so it must be between 0 and 1", g.RSRatio)
+		}
+		return g.RSRatio, nil
+	}
+	cal := stabilize.EstimateReadoutRatio(series)
+	if !cal.Reliable() {
+		fmt.Fprintf(os.Stderr,
+			"gocv-stabilizer: warning: %s: no rolling shutter measurable (best fit %.3f, correlation %+.3f, median frame-to-frame motion change %.2f px) -- rendering without rolling-shutter correction; pass --rs-ratio to force one\n",
+			sourcePath, cal.Ratio, cal.Corr, cal.MedianAccel)
+		return 0, nil
+	}
+	return cal.Ratio, nil
 }
 
 // loadOrAnalyze returns the MotionSeries Apply should smooth and render:

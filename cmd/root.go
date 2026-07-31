@@ -52,6 +52,8 @@ var (
 	warpModel      string
 	meshGrid       int
 	meshStrength   float64
+	rollingShutter bool
+	rsRatio        float64
 
 	fitPath        string
 	offsetSeconds  float64
@@ -141,6 +143,10 @@ func NewRootCmd() *cobra.Command {
 		"gocv-stabilizer only: motion model. \"similarity\" (default) fits one 4-DOF transform per frame (pan/rotate/scale). \"mesh\" is EXPERIMENTAL: a MeshFlow-style spatially-varying correction (a median-voted grid of local residual motions on top of the similarity) that targets the rolling-shutter/parallax jitter a single transform leaves -- the median voting is the variance control the \"homography\" model lacked; tune the grid with --mesh-grid. \"homography\" is EXPERIMENTAL and NOT RECOMMENDED (its per-frame 8-DOF fit measured WORSE than similarity). NOTE: the model is baked into a --sidecar's analysis, so change --warp-model and --sidecar together (or delete the sidecar) to re-analyze")
 	root.Flags().IntVar(&meshGrid, "mesh-grid", 0,
 		"gocv-stabilizer only, --warp-model mesh: grid size (cells across the frame width; vertical count derived to keep cells ~square). 0 = default 1 (a 2x2 corner mesh, near-global -- the tuned default). Finer grids correct more localized motion but are noisier per vertex and crop more; coarser converges toward a global correction. Baked into a --sidecar's analysis (change --mesh-grid and --sidecar together)")
+	root.Flags().BoolVar(&rollingShutter, "rolling-shutter", false,
+		"gocv-stabilizer only: correct rolling-shutter skew. A rolling shutter scans the frame top to bottom over a few milliseconds, so a camera moving during that scan records each row from a slightly different position -- the picture shears and stretches by an amount that changes with the camera's velocity, which reads as wobble/jello. This measures the sensor's readout time from the clip's own motion and un-skews each frame, and also removes the fictitious roll a rolling shutter otherwise injects into the motion estimates (a 4-DOF fit cannot tell a per-row shear from camera roll, so it books it as one). Composes into the existing warp, so it costs no extra pass and only a fraction of a percent of extra crop. Warns and does nothing on a clip whose motion is too gentle to measure a readout from")
+	root.Flags().Float64Var(&rsRatio, "rs-ratio", 0,
+		"gocv-stabilizer only, with --rolling-shutter: force the sensor readout time as a fraction of the frame period (e.g. 0.3 = the sensor takes 30% of a frame period to scan top to bottom), instead of measuring it from the clip. 0 (default) measures it. Applied at render time, so it can be swept against a cached --sidecar without re-analyzing; use it on clips too gently-moving to self-calibrate, taking the value from a shakier clip shot in the same camera mode (`vidiobench -mode=rs` prints it)")
 	root.Flags().Float64Var(&meshStrength, "mesh-strength", -1,
 		"gocv-stabilizer only, --warp-model mesh: correction gain, 0.0-1.0. A spatially-varying warp trades picture distortion/crop for stabilization, so lower this to reduce the bending/swim and the crop at a little less shake removal; 1.0 is full strength, 0 disables the mesh (falls back to similarity). -1 (default) uses the built-in default of 0.3. Applied at render time, so it can be swept against a cached --sidecar without re-analyzing")
 	root.Flags().IntVar(&quality, "quality", 55,
@@ -478,6 +484,8 @@ func configureEffect(effect effects.Effect) error {
 		gs.WarpModel = warpModel
 		gs.MeshGrid = meshGrid
 		gs.MeshStrength = meshStrength
+		gs.RollingShutter = rollingShutter
+		gs.RSRatio = rsRatio
 	}
 	if h, ok := effect.(*effects.TelemetryHUD); ok {
 		loc, err := parseHUDTimeZone(hudTimeZone)

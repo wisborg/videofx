@@ -41,6 +41,14 @@
 //	           axes agreeing is what makes the number believable), and
 //	           the readout time in milliseconds implied by the clip's
 //	           frame rate.
+//	residual   reports how much frame-to-frame motion is LEFT in a clip
+//	           (internal/stabilize.MotionSeries.ResidualShake): re-analyze an
+//	           already-RENDERED output and print the median/p90 translation
+//	           and median rotation still in it. This is the project's standing
+//	           shake metric for comparing two renders of the same source --
+//	           re-tracking the output means it cannot be won by rendering
+//	           something blurrier. Read its doc comment before using it as a
+//	           gate: it is a TRANSLATION metric and is near-blind to shear.
 //	render     runs internal/stabilize.Render (Phase 4) against a
 //	           MotionSeries (fresh Analyze or -sidecar, exactly like
 //	           -mode=smooth) and Smooth's corrections: warps every frame,
@@ -72,6 +80,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"sort"
 	"syscall"
 	"time"
 
@@ -94,6 +103,7 @@ func main() {
 	edgeMode := flag.String("edge-mode", "fixed", "render mode: edge handling -- fixed, adaptive, or flow-fill (EXPERIMENTAL, see stabilize.EdgeModeFlowFill doc comment)")
 	fixedZoom := flag.Float64("fixed-zoom", 0.12, "render mode: -edge-mode=fixed's zoom fraction (0.12 = 12%)")
 	maxZoomFrac := flag.Float64("max-zoom", 0, "render mode: -edge-mode=adaptive's zoom cap fraction (0 = uncapped); when it binds, offending frames' corrections are scaled back rather than exposing a black border")
+	predFile := flag.String("pred-file", "", "rs mode: take the driving accelerations from this frame-aligned clip instead of -file. Pass the RAW source here when -file is a RENDERED output, to measure how much rolling shutter the render still carries -- a stabilized output has had the accelerations smoothed out of it and cannot reveal its own")
 	flag.Parse()
 
 	// The input is a -file flag, not a positional argument. Silently
@@ -138,7 +148,12 @@ func main() {
 		if *maxFrames > 0 {
 			fmt.Fprintln(os.Stderr, "vidiobench: note: -max-frames is ignored by -mode=rs (it always measures a full pass)")
 		}
-		err = runRS(ctx, smoothParams{file: *file, sidecar: *sidecar, writeSidecar: *writeSidecar})
+		err = runRS(ctx, smoothParams{file: *file, sidecar: *sidecar, writeSidecar: *writeSidecar}, *predFile)
+	case "residual":
+		if *maxFrames > 0 {
+			fmt.Fprintln(os.Stderr, "vidiobench: note: -max-frames is ignored by -mode=residual (it always measures a full pass)")
+		}
+		err = runResidual(ctx, smoothParams{file: *file, sidecar: *sidecar, writeSidecar: *writeSidecar})
 	case "render":
 		if *maxFrames > 0 {
 			fmt.Fprintln(os.Stderr, "vidiobench: note: -max-frames is ignored by -mode=render (it always renders the full clip)")
@@ -159,7 +174,7 @@ func main() {
 			maxZoom:   *maxZoomFrac,
 		})
 	default:
-		err = fmt.Errorf("unknown -mode %q (want analysis, roundtrip, stabilize, smooth, rs, or render)", *mode)
+		err = fmt.Errorf("unknown -mode %q (want analysis, roundtrip, stabilize, smooth, rs, residual, or render)", *mode)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "vidiobench:", err)
@@ -450,12 +465,20 @@ func runSmooth(ctx context.Context, p smoothParams) error {
 // across several clips: the same camera in the same capture mode should report
 // the same ratio every time, and a ratio that moves around from clip to clip is
 // noise being fitted, not a readout time being measured.
-func runRS(ctx context.Context, p smoothParams) error {
+func runRS(ctx context.Context, p smoothParams, predFile string) error {
 	series, _, err := loadMotionSeries(ctx, p)
 	if err != nil {
 		return err
 	}
-	cal := stabilize.EstimateReadoutRatio(series)
+	predictors := series
+	if predFile != "" {
+		predictors, _, err = loadMotionSeries(ctx, smoothParams{file: predFile})
+		if err != nil {
+			return fmt.Errorf("analyzing -pred-file: %w", err)
+		}
+		fmt.Printf("predictors: %s (frame-aligned)\n", predFile)
+	}
+	cal := stabilize.EstimateReadoutRatioAgainst(series, predictors)
 	if !cal.OK {
 		return fmt.Errorf("not enough usable transitions to estimate a readout ratio (clip too short, or tracking failed throughout)")
 	}
@@ -487,6 +510,20 @@ func runRS(ctx context.Context, p smoothParams) error {
 	fmt.Printf("  horizontal: %.3f (correlation %+.3f)\n", cal.RatioH, cal.CorrH)
 	fmt.Printf("  vertical:   %.3f (correlation %+.3f)\n", cal.RatioV, cal.CorrV)
 	fmt.Printf("  median frame-to-frame velocity change: %.2f analysis px\n", cal.MedianAccel)
+
+	// What correcting it would cost in crop, which is the other half of the
+	// decision to enable it: the rectification pulls the top and bottom rows
+	// inward, and that band has to be zoomed away.
+	rect := stabilize.BuildRSRectifiers(series, cal.Ratio)
+	margins := make([]float64, 0, len(rect))
+	for _, r := range rect {
+		margins = append(margins, r.ZoomMargin(series.SourceWidth, series.SourceHeight))
+	}
+	sort.Float64s(margins)
+	if n := len(margins); n > 0 {
+		fmt.Printf("  crop to correct it: median %.2f%%, p90 %.2f%%, p99 %.2f%%, worst frame %.2f%%\n",
+			margins[n/2]*100, margins[min(n-1, n*90/100)]*100, margins[min(n-1, n*99/100)]*100, margins[n-1]*100)
+	}
 
 	// An axis only measures the readout when the camera actually accelerated
 	// along it; on footage dominated by one axis the other one is fitting
@@ -852,4 +889,26 @@ func peakRSSBytes() (int64, bool) {
 		return 0, false
 	}
 	return ru.Maxrss, true
+}
+
+// runResidual reports the standing shake metric for an already-rendered clip.
+// Two renders of the same source, measured this way, are directly comparable --
+// but see stabilize.ResidualShake's doc comment for what the number cannot see
+// before treating a small move in it as a verdict.
+func runResidual(ctx context.Context, p smoothParams) error {
+	series, _, err := loadMotionSeries(ctx, p)
+	if err != nil {
+		return err
+	}
+	r := series.ResidualShake()
+	if r.Frames == 0 {
+		return fmt.Errorf("no usable transitions in %s (tracking failed throughout?)", p.file)
+	}
+	scale := series.ScaleFactor()
+	fmt.Printf("\nresidual shake over %d frames:\n", r.Frames)
+	fmt.Printf("  translation median %6.3f  p90 %6.3f  (analysis px)\n", r.MedianTranslation, r.P90Translation)
+	fmt.Printf("  translation median %6.2f  p90 %6.2f  (source px, x%.1f)\n",
+		r.MedianTranslation*scale, r.P90Translation*scale, scale)
+	fmt.Printf("  rotation    median %.4f deg\n", r.MedianRotationDeg)
+	return nil
 }

@@ -60,6 +60,67 @@ func (m similarity2D) invert() similarity2D {
 	}
 }
 
+// affine2D is a general 2x3 affine transform: a point p maps to
+// (A*p.X + B*p.Y + Tx, C*p.X + D*p.Y + Ty). It is strictly more general than
+// similarity2D -- it can express shear and per-axis scale, which a similarity
+// cannot -- and exists for the rolling-shutter rectification, which is exactly
+// a shear plus a vertical scale (see rollingshutter.go).
+//
+// The reason this is an affine and not a homography matters for cost: composing
+// the rectification into the correction keeps the render at ONE gocv.WarpAffine
+// per frame, the same call the similarity path already makes, rather than
+// adding a second warp pass or moving to the slower WarpPerspective.
+type affine2D struct {
+	A, B, Tx float64
+	C, D, Ty float64
+}
+
+// identityAffine2D is the no-op transform.
+var identityAffine2D = affine2D{A: 1, D: 1}
+
+// affineFromSimilarity widens a similarity into the general affine form.
+func affineFromSimilarity(m similarity2D) affine2D {
+	return affine2D{A: m.A, B: -m.B, Tx: m.Tx, C: m.B, D: m.A, Ty: m.Ty}
+}
+
+// mul returns the composition m*n: the transform that applies n FIRST and then
+// m. Order matters -- rectify-then-correct is not correct-then-rectify.
+func (m affine2D) mul(n affine2D) affine2D {
+	return affine2D{
+		A:  m.A*n.A + m.B*n.C,
+		B:  m.A*n.B + m.B*n.D,
+		Tx: m.A*n.Tx + m.B*n.Ty + m.Tx,
+		C:  m.C*n.A + m.D*n.C,
+		D:  m.C*n.B + m.D*n.D,
+		Ty: m.C*n.Tx + m.D*n.Ty + m.Ty,
+	}
+}
+
+// apply maps a point through the transform.
+func (m affine2D) apply(p point2) point2 {
+	return point2{X: m.A*p.X + m.B*p.Y + m.Tx, Y: m.C*p.X + m.D*p.Y + m.Ty}
+}
+
+// toMat builds the 2x3 CV64FC1 matrix gocv.WarpAffine expects. The caller owns
+// the returned Mat and must Close it.
+func (m affine2D) toMat() gocv.Mat {
+	mat := gocv.NewMatWithSize(2, 3, gocv.MatTypeCV64FC1)
+	mat.SetDoubleAt(0, 0, m.A)
+	mat.SetDoubleAt(0, 1, m.B)
+	mat.SetDoubleAt(0, 2, m.Tx)
+	mat.SetDoubleAt(1, 0, m.C)
+	mat.SetDoubleAt(1, 1, m.D)
+	mat.SetDoubleAt(1, 2, m.Ty)
+	return mat
+}
+
+// toMatrix3 is m as a full 3x3 homography, for composition with a perspective
+// correction (see homography.go / Render's WarpModelHomography path). An affine
+// is just a homography whose bottom row is unchanged.
+func (m affine2D) toMatrix3() matrix3 {
+	return matrix3{{m.A, m.B, m.Tx}, {m.C, m.D, m.Ty}, {0, 0, 1}}
+}
+
 // toMatrix3 is m as a full 3x3 homography, for composition with a perspective
 // correction (see homography.go / Render's WarpModelHomography path).
 func (m similarity2D) toMatrix3() matrix3 {
