@@ -91,9 +91,9 @@ type Options struct {
 
 	// MeshGrid is the WarpModelMesh grid size: the number of cells across the
 	// frame width (the vertical count is derived to keep cells ~square). 0 uses
-	// DefaultMeshGrid (16). A finer grid corrects more localized motion but is
-	// noisier per vertex; the best default is to be chosen empirically. Ignored
-	// unless WarpModel is WarpModelMesh.
+	// DefaultMeshGrid (1). A finer grid corrects more localized motion but is
+	// noisier per vertex and bends/exposes/crops more; coarser converges toward
+	// a global correction. Ignored unless WarpModel is WarpModelMesh.
 	MeshGrid int `json:"meshGrid,omitempty"`
 }
 
@@ -115,9 +115,14 @@ const (
 	WarpModelMesh WarpModel = "mesh"
 )
 
-// DefaultMeshGrid is the starting grid size (cells across the frame width) for
-// WarpModelMesh, to be tuned empirically -- see Options.MeshGrid.
-const DefaultMeshGrid = 16
+// DefaultMeshGrid is the grid size (cells across the frame width) for
+// WarpModelMesh. 1 (a 2x2 corner mesh) is the current tuned default: on very
+// shaken test footage coarser grids gave the strongest shake reduction, and by
+// grid 1 the mesh has effectively converged to a near-global correction that
+// matched the finer grids' shake while cropping the least (a coarse mesh bends
+// the whole frame, so it exposes -- and must crop away -- a large border). See
+// Options.MeshGrid; tunable per run with --mesh-grid.
+const DefaultMeshGrid = 1
 
 // DefaultOptions returns the starting-point tuning from the Phase 2 spec:
 // ~500 corners, quality 0.01, minimum spacing 15px. These are a starting

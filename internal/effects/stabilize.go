@@ -174,9 +174,9 @@ type GoCVStabilizer struct {
 	PerspectiveRegularize float64
 
 	// MeshGrid is the WarpModel "mesh" grid size (cells across the frame
-	// width); 0 uses stabilize.DefaultMeshGrid (16). Wired from --mesh-grid;
+	// width); 0 uses stabilize.DefaultMeshGrid (1). Wired from --mesh-grid;
 	// only used when WarpModel is "mesh". Larger = more localized correction
-	// but noisier per vertex; the best value is to be chosen empirically.
+	// but noisier per vertex and more crop; coarser -> near-global.
 	MeshGrid int
 
 	// MeshStrength is the mesh correction gain in [0,1] (see
@@ -187,10 +187,12 @@ type GoCVStabilizer struct {
 	MeshStrength float64
 }
 
-// DefaultMeshStrength is the mesh gain when --mesh-strength is not set: a gentle
-// half-strength correction, since a spatially-varying warp trades picture
-// distortion for stabilization and the gentler setting reads cleaner.
-const DefaultMeshStrength = 0.5
+// DefaultMeshStrength is the mesh gain when --mesh-strength is not set. 0.3 is
+// the current tuned default: a spatially-varying warp trades picture
+// distortion/crop for stabilization, and 0.3 (paired with the coarse default
+// grid) held the shake on very shaken test footage while keeping the crop and
+// edge exposure manageable -- a gentler setting than the earlier 0.5.
+const DefaultMeshStrength = 0.3
 
 func (g *GoCVStabilizer) Name() string         { return "gocv-stabilizer" }
 func (g *GoCVStabilizer) FilenameSlug() string { return "gocv-stabilized" }
