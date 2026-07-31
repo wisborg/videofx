@@ -31,6 +31,16 @@
 //	           clamping engaged, and boundary-vs-interior max translation
 //	           (see internal/stabilize.Stats). -max-frames is ignored, as
 //	           in -mode=stabilize.
+//	rs         reports the clip's rolling-shutter readout ratio
+//	           (internal/stabilize.EstimateReadoutRatio) from a
+//	           MotionSeries -- fresh Analyze or -sidecar, exactly like
+//	           -mode=smooth. Needs no pixels: the observables it fits are
+//	           recorded per transition by the analysis pass, so an
+//	           existing sidecar answers instantly. Reports the pooled
+//	           ratio, each axis separately with its correlation (the two
+//	           axes agreeing is what makes the number believable), and
+//	           the readout time in milliseconds implied by the clip's
+//	           frame rate.
 //	render     runs internal/stabilize.Render (Phase 4) against a
 //	           MotionSeries (fresh Analyze or -sidecar, exactly like
 //	           -mode=smooth) and Smooth's corrections: warps every frame,
@@ -124,6 +134,11 @@ func main() {
 			maxTransPx:      *maxTranslationPx,
 			maxRotDeg:       *maxRotationDeg,
 		})
+	case "rs":
+		if *maxFrames > 0 {
+			fmt.Fprintln(os.Stderr, "vidiobench: note: -max-frames is ignored by -mode=rs (it always measures a full pass)")
+		}
+		err = runRS(ctx, smoothParams{file: *file, sidecar: *sidecar, writeSidecar: *writeSidecar})
 	case "render":
 		if *maxFrames > 0 {
 			fmt.Fprintln(os.Stderr, "vidiobench: note: -max-frames is ignored by -mode=render (it always renders the full clip)")
@@ -144,7 +159,7 @@ func main() {
 			maxZoom:   *maxZoomFrac,
 		})
 	default:
-		err = fmt.Errorf("unknown -mode %q (want analysis, roundtrip, stabilize, smooth, or render)", *mode)
+		err = fmt.Errorf("unknown -mode %q (want analysis, roundtrip, stabilize, smooth, rs, or render)", *mode)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "vidiobench:", err)
@@ -428,6 +443,69 @@ func runSmooth(ctx context.Context, p smoothParams) error {
 
 	return nil
 }
+
+// runRS reports the rolling-shutter calibration for a clip. Unlike every other
+// mode here this measures a property of the CAMERA rather than of the footage
+// or of this code's throughput, so the useful thing to do with it is run it
+// across several clips: the same camera in the same capture mode should report
+// the same ratio every time, and a ratio that moves around from clip to clip is
+// noise being fitted, not a readout time being measured.
+func runRS(ctx context.Context, p smoothParams) error {
+	series, _, err := loadMotionSeries(ctx, p)
+	if err != nil {
+		return err
+	}
+	cal := stabilize.EstimateReadoutRatio(series)
+	if !cal.OK {
+		return fmt.Errorf("not enough usable transitions to estimate a readout ratio (clip too short, or tracking failed throughout)")
+	}
+
+	if !cal.Reliable() {
+		fmt.Printf("\nrolling shutter: NOT MEASURABLE on this clip\n")
+		fmt.Printf("  best fit would be %.3f, but it explains almost nothing (correlation %+.3f over %d frames)\n",
+			cal.Ratio, cal.Corr, cal.Samples)
+		fmt.Printf("  median frame-to-frame velocity change: %.2f analysis px\n", cal.MedianAccel)
+		// The two reasons look identical in the ratio and completely different
+		// in what they imply, so name the likely one rather than leaving the
+		// reader to assume the camera has a global shutter.
+		if cal.MedianAccel < 1 {
+			fmt.Println("  the clip barely accelerates, so there was nothing for a rolling shutter to act on --")
+			fmt.Println("  this says nothing about the camera; try a clip with real shake in it.")
+		} else {
+			fmt.Println("  the clip does accelerate, so this looks like a genuinely rolling-shutter-free source")
+			fmt.Println("  (a global shutter, or in-camera correction already applied).")
+		}
+		return nil
+	}
+
+	fmt.Printf("\nrolling shutter: readout ratio %.3f of the frame period (correlation %+.3f over %d frames)\n",
+		cal.Ratio, cal.Corr, cal.Samples)
+	if series.FPS > 0 {
+		fmt.Printf("  implied readout time: %.2f ms (frame period %.2f ms at %.3f fps)\n",
+			cal.Ratio*1000/series.FPS, 1000/series.FPS, series.FPS)
+	}
+	fmt.Printf("  horizontal: %.3f (correlation %+.3f)\n", cal.RatioH, cal.CorrH)
+	fmt.Printf("  vertical:   %.3f (correlation %+.3f)\n", cal.RatioV, cal.CorrV)
+	fmt.Printf("  median frame-to-frame velocity change: %.2f analysis px\n", cal.MedianAccel)
+
+	// An axis only measures the readout when the camera actually accelerated
+	// along it; on footage dominated by one axis the other one is fitting
+	// noise, and saying so beats printing two numbers as if they were equals.
+	switch {
+	case cal.CorrH < rsMinAxisCorrelation || cal.CorrV < rsMinAxisCorrelation:
+		fmt.Println("  note: one axis correlates weakly -- the clip lacked acceleration along it, so the")
+		fmt.Println("        pooled ratio (which weights each axis by how well it was observed) is the number.")
+	case math.Abs(cal.RatioH-cal.RatioV) < 0.1:
+		fmt.Println("  the two axes agree independently, which is what a real readout time looks like.")
+	default:
+		fmt.Println("  note: the axes disagree by more than 0.1 despite both correlating -- worth a look.")
+	}
+	return nil
+}
+
+// rsMinAxisCorrelation is only a reporting threshold for the per-axis
+// diagnostics above; the trust decision is stabilize.RSCalibration.Reliable.
+const rsMinAxisCorrelation = 0.3
 
 // loadMotionSeries returns the MotionSeries runSmooth should work from:
 // either read from p.sidecar (analyzeElapsed 0, since no analysis ran),

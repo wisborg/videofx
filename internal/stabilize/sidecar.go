@@ -110,13 +110,14 @@ func (s *MotionSeries) hasMesh() bool {
 // stale one is simply overwritten rather than migrated.
 var sidecarMagic = [6]byte{'V', 'F', 'X', 'M', 'O', 'T'}
 
-const sidecarVersion uint8 = 1
+const sidecarVersion uint8 = 2
 
 // per-frame flag bits in the binary body.
 const (
 	sidecarFlagOK          = 1 << 0
 	sidecarFlagPerspective = 1 << 1
 	sidecarFlagMesh        = 1 << 2
+	sidecarFlagRS          = 1 << 3
 )
 
 // sidecarHeader is the JSON metadata block: everything in MotionSeries except
@@ -201,8 +202,9 @@ func WriteSidecar(path string, series *MotionSeries) error {
 }
 
 // writeTransition writes one fixed-layout record: a flags byte, the float64
-// similarity fields, the int32 counts, then the optional float32 perspective
-// (9 values) and mesh (meshCols*meshRows VX then the same count VY).
+// similarity fields, the int32 counts, the optional float32 rolling-shutter
+// pair, then the optional float32 perspective (9 values) and mesh
+// (meshCols*meshRows VX then the same count VY).
 func writeTransition(w io.Writer, tr *Transition, meshCols, meshRows int) error {
 	le := binary.LittleEndian
 	var flags uint8
@@ -215,6 +217,9 @@ func writeTransition(w io.Writer, tr *Transition, meshCols, meshRows int) error 
 	if tr.Mesh != nil && tr.Mesh.Cols == meshCols && tr.Mesh.Rows == meshRows {
 		flags |= sidecarFlagMesh
 	}
+	if tr.RS != nil {
+		flags |= sidecarFlagRS
+	}
 	if err := binary.Write(w, le, flags); err != nil {
 		return err
 	}
@@ -223,6 +228,11 @@ func writeTransition(w io.Writer, tr *Transition, meshCols, meshRows int) error 
 	}
 	if err := binary.Write(w, le, []int32{int32(tr.Tracked), int32(tr.Inliers)}); err != nil {
 		return err
+	}
+	if flags&sidecarFlagRS != 0 {
+		if err := binary.Write(w, le, []float32{float32(tr.RS.Shear), float32(tr.RS.Stretch)}); err != nil {
+			return err
+		}
 	}
 	if flags&sidecarFlagPerspective != 0 {
 		p := tr.Perspective
@@ -329,6 +339,13 @@ func readTransition(r io.Reader, tr *Transition, meshCols, meshRows int) error {
 	tr.Tracked, tr.Inliers = int(counts[0]), int(counts[1])
 	tr.OK = flags&sidecarFlagOK != 0
 
+	if flags&sidecarFlagRS != 0 {
+		v := make([]float32, 2)
+		if err := binary.Read(r, le, v); err != nil {
+			return err
+		}
+		tr.RS = &RSObservables{Shear: float64(v[0]), Stretch: float64(v[1])}
+	}
 	if flags&sidecarFlagPerspective != 0 {
 		v := make([]float32, 9)
 		if err := binary.Read(r, le, v); err != nil {

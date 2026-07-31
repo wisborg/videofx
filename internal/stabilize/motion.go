@@ -50,6 +50,16 @@ type Transition struct {
 	// unaffected. Near the identity for rigid motion. Analysis-res coordinates.
 	Perspective *matrix3 `json:"perspective,omitempty"`
 
+	// RS holds this frame pair's rolling-shutter observables (see
+	// RSObservables), or nil when they could not be measured. Unlike
+	// Perspective and Mesh, these are measured unconditionally rather than
+	// under a WarpModel: they cost one extra least-squares fit over points
+	// that have already been tracked (immeasurable next to the optical flow
+	// that produced them), and measuring them always means every sidecar can
+	// be asked for a readout-ratio calibration after the fact, instead of the
+	// answer depending on which flags the analysis pass happened to run with.
+	RS *RSObservables `json:"rs,omitempty"`
+
 	// Mesh is the spatially-varying residual motion field for this frame pair
 	// (see mesh.go), populated only under Options.WarpModel == WarpModelMesh;
 	// nil otherwise (and omitted from the sidecar). Analysis-resolution
@@ -148,6 +158,7 @@ func EstimateTransition(prev, curr gocv.Mat, prevPts []gocv.Point2f, opts Option
 		Inliers:  inlierCount,
 		OK:       true,
 	}
+	tr.RS = estimateRSObservables(fromPts, toPts, inliersMat, prev.Cols(), prev.Rows())
 	if opts.WarpModel == WarpModelHomography {
 		tr.Perspective = estimatePerspectiveResidual(fromPts, toPts, a, b, tx, ty, opts)
 	}
