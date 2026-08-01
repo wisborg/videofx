@@ -211,6 +211,25 @@ type RenderStats struct {
 	// (AdaptiveZoomResult.ClampedFrames); zero for the other two modes
 	// and for an unclamped (or uncapped) adaptive render.
 	ClampedFrames int
+
+	// MeshMargin and RSMargin are the extra zoom fractions the mesh and
+	// rolling-shutter corrections needed on TOP of Zoom (0 when that
+	// correction is off). They are reported separately because they are
+	// multiplied onto Zoom rather than added, so Zoom alone understates -- in
+	// the mesh's case badly understates -- how much picture a render actually
+	// discarded. See TotalZoom, which is the number to compare across renders:
+	// crop is the currency this stabilizer spends, and comparing two
+	// configurations without matching it measures mostly the crop difference.
+	MeshMargin float64
+	RSMargin   float64
+}
+
+// TotalZoom is the combined zoom fraction actually applied: the edge mode's
+// zoom with the mesh and rolling-shutter margins compounded onto it, as one
+// fraction (0.35 = 35% of the picture's linear dimension spent). For a
+// per-frame zoom envelope this is the peak.
+func (s RenderStats) TotalZoom() float64 {
+	return (1+s.Zoom)*(1+s.MeshMargin)*(1+s.RSMargin) - 1
 }
 
 // identityCorrection is used for any decoded frame index past the end of
@@ -350,6 +369,7 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 			// cheap analytic estimate as a floor, plus a small safety cushion.
 			measured := meshCoverageCrop(meshCorr, corrections, zoomFactor, zooms, scaleFactor, w, h)
 			meshMargin = math.Max(measured, meshCropMargin(meshCorr, scaleFactor, w, h)) + opts.MeshZoomMargin
+			stats.MeshMargin = meshMargin
 		}
 	}
 
@@ -365,6 +385,7 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 	var rsMargin float64
 	if rsRect != nil {
 		rsMargin = RSZoomMargin(rsRect, w, h)
+		stats.RSMargin = rsMargin
 	}
 
 	// Two Mats, reused across every frame -- see internal/vidio/decoder.go's

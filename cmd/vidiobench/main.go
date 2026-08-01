@@ -103,6 +103,9 @@ func main() {
 	edgeMode := flag.String("edge-mode", "fixed", "render mode: edge handling -- fixed, adaptive, or flow-fill (EXPERIMENTAL, see stabilize.EdgeModeFlowFill doc comment)")
 	fixedZoom := flag.Float64("fixed-zoom", 0.12, "render mode: -edge-mode=fixed's zoom fraction (0.12 = 12%)")
 	maxZoomFrac := flag.Float64("max-zoom", 0, "render mode: -edge-mode=adaptive's zoom cap fraction (0 = uncapped); when it binds, offending frames' corrections are scaled back rather than exposing a black border")
+	meshRender := flag.Bool("mesh", false, "render mode: apply the mesh (MeshFlow) correction; requires a sidecar analyzed with --warp-model mesh")
+	meshStrengthFlag := flag.Float64("mesh-strength", 0.3, "render mode, with -mesh: correction gain 0-1")
+	zoomTransition := flag.Float64("zoom-transition", 0, "render mode, -edge-mode=adaptive: seconds over which the per-frame zoom envelope eases between calm and shaky sections. 0 (the default here, unlike the CLI's 0.5) gives ONE constant clip-wide zoom -- which is what you want when comparing configurations, since an envelope makes the crop vary per frame and there is then no single crop to match on")
 	predFile := flag.String("pred-file", "", "rs mode: take the driving accelerations from this frame-aligned clip instead of -file. Pass the RAW source here when -file is a RENDERED output, to measure how much rolling shutter the render still carries -- a stabilized output has had the accelerations smoothed out of it and cannot reveal its own")
 	flag.Parse()
 
@@ -168,10 +171,13 @@ func main() {
 				maxTransPx:      *maxTranslationPx,
 				maxRotDeg:       *maxRotationDeg,
 			},
-			out:       *out,
-			edgeMode:  *edgeMode,
-			fixedZoom: *fixedZoom,
-			maxZoom:   *maxZoomFrac,
+			out:            *out,
+			edgeMode:       *edgeMode,
+			fixedZoom:      *fixedZoom,
+			maxZoom:        *maxZoomFrac,
+			mesh:           *meshRender,
+			meshStrength:   *meshStrengthFlag,
+			zoomTransition: *zoomTransition,
 		})
 	default:
 		err = fmt.Errorf("unknown -mode %q (want analysis, roundtrip, stabilize, smooth, rs, residual, or render)", *mode)
@@ -590,10 +596,13 @@ func loadMotionSeries(ctx context.Context, p smoothParams) (*stabilize.MotionSer
 // with Render bolted on at the end instead of a statistics printout.
 type renderParams struct {
 	smoothParams
-	out       string
-	edgeMode  string
-	fixedZoom float64
-	maxZoom   float64 // fraction; 0 = uncapped
+	out            string
+	edgeMode       string
+	fixedZoom      float64
+	maxZoom        float64 // fraction; 0 = uncapped
+	mesh           bool
+	meshStrength   float64
+	zoomTransition float64 // seconds; 0 = one constant clip-wide zoom
 }
 
 // runRender drives Phase 4's acceptance-gate measurement: given a
@@ -647,9 +656,15 @@ func runRender(ctx context.Context, p renderParams) error {
 	}
 
 	renderOpts := stabilize.RenderOptions{
-		EdgeMode:  edgeMode,
-		FixedZoom: p.fixedZoom,
-		MaxZoom:   p.maxZoom,
+		EdgeMode:              edgeMode,
+		FixedZoom:             p.fixedZoom,
+		MaxZoom:               p.maxZoom,
+		ZoomTransitionSeconds: p.zoomTransition,
+	}
+	if p.mesh {
+		renderOpts.Mesh = true
+		renderOpts.MeshStrength = p.meshStrength
+		renderOpts.MeshZoomMargin = 0.04 // matches the effect's cushion
 	}
 
 	start := time.Now()
@@ -674,6 +689,13 @@ func runRender(ctx context.Context, p renderParams) error {
 		}
 	case stabilize.EdgeModeFlowFill:
 		fmt.Println("zoom: n/a (borders filled from the previous frame / BORDER_REFLECT101, not hidden by cropping)")
+	}
+	// The mesh margin is multiplied ONTO the edge mode's zoom, so the line above
+	// understates the crop badly whenever the mesh is on. This is the number to
+	// compare two configurations by.
+	if stats.MeshMargin > 0 || stats.RSMargin > 0 {
+		fmt.Printf("total crop: %.2f%% (edge %.2f%% x mesh %.2f%% x rolling-shutter %.2f%%)\n",
+			100*stats.TotalZoom(), 100*stats.Zoom, 100*stats.MeshMargin, 100*stats.RSMargin)
 	}
 	if analyzeElapsed > 0 {
 		fmt.Printf("analysis elapsed: %s\n", analyzeElapsed)
