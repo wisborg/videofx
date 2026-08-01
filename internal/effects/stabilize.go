@@ -251,16 +251,24 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 	if g.AnalysisWidth > 0 {
 		trackOpts.AnalysisWidth = g.AnalysisWidth
 	}
-	homography := g.WarpModel == string(stabilize.WarpModelHomography)
+	// An unset WarpModel means "the product default", not "similarity" --
+	// stabilize.WarpModelSimilarity is the empty string, so the two would
+	// otherwise be indistinguishable here. A caller that wants the similarity
+	// asks for it by name, exactly as the CLI does.
+	warpModel := g.WarpModel
+	if warpModel == "" {
+		warpModel = string(stabilize.DefaultWarpModel)
+	}
+	homography := warpModel == string(stabilize.WarpModelHomography)
 	if homography {
 		trackOpts.WarpModel = stabilize.WarpModelHomography
 	}
-	meshMode := g.WarpModel == string(stabilize.WarpModelMesh)
+	meshMode := warpModel == string(stabilize.WarpModelMesh)
 	if meshMode {
 		trackOpts.WarpModel = stabilize.WarpModelMesh
 		trackOpts.MeshGrid = g.MeshGrid // 0 -> DefaultMeshGrid in estimation
 	}
-	rotationMode := g.WarpModel == string(stabilize.WarpModelRotation)
+	rotationMode := warpModel == string(stabilize.WarpModelRotation)
 	if rotationMode {
 		trackOpts.WarpModel = stabilize.WarpModelRotation
 		trackOpts.Lens = g.Lens // nil -> calibrate from the clip
@@ -319,15 +327,27 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 	}
 	if rotationMode {
 		renderOpts.Rotation = true
-		if series.Lens == nil || !series.Lens.Reliable() {
+		switch {
+		case series.Options.WarpModel != stabilize.WarpModelRotation:
+			// A sidecar analyzed under a different model carries no rotations.
+			// loadOrAnalyze has already said so and named the fix, so don't
+			// repeat it here as a second, differently-worded warning.
+			renderOpts.Rotation = false
+		case series.Lens == nil || !series.Lens.Reliable():
 			// Nothing measured, so nothing to stabilize with. Say so rather than
-			// silently rendering through the 2D fallback under a flag that
+			// silently rendering through the 2D fallback under a model that
 			// promised something else -- the same call --rolling-shutter makes
 			// when a clip is too gentle to calibrate a readout from.
-			fmt.Fprintf(os.Stderr, "gocv-stabilizer: warning: %s: --warp-model rotation could not calibrate a lens (the clip's motion does not distinguish one) -- falling back to the similarity model; pass --lens-focal to force one\n", in.SourcePath)
+			fmt.Fprintf(os.Stderr, "gocv-stabilizer: warning: %s: the rotation model could not calibrate a lens (the clip's motion does not distinguish one) -- falling back to the similarity model, which is the right answer for this clip; pass --lens/--lens-focal to force a lens, or --warp-model similarity to silence this\n", in.SourcePath)
 			renderOpts.Rotation = false
-		} else {
+		default:
 			fmt.Fprintf(os.Stderr, "gocv-stabilizer: %s: %s\n", in.SourcePath, series.Lens)
+		}
+		if renderOpts.Rotation && g.RollingShutter {
+			// The rectification is an affine folded into the 2D warp, and the
+			// rotation path has no 2D warp to fold it into -- see Render. Saying
+			// nothing would leave --rolling-shutter looking like it worked.
+			fmt.Fprintf(os.Stderr, "gocv-stabilizer: warning: %s: --rolling-shutter is not applied under the rotation model (its rectification composes into a 2D warp, which this model does not use) -- pass --warp-model similarity or mesh to use it\n", in.SourcePath)
 		}
 	}
 	if meshMode {
@@ -390,6 +410,15 @@ func (g *GoCVStabilizer) readoutRatio(series *stabilize.MotionSeries, sourcePath
 	return cal.Ratio, nil
 }
 
+// modelName renders a WarpModel for humans, spelling out the empty string that
+// stands for the similarity rather than printing nothing at all.
+func modelName(m stabilize.WarpModel) string {
+	if m == stabilize.WarpModelSimilarity {
+		return "similarity"
+	}
+	return string(m)
+}
+
 // loadOrAnalyze returns the MotionSeries Apply should smooth and render:
 // either read back from g.SidecarPath (if set and the file exists) or a
 // fresh stabilize.Analyze pass over sourcePath, persisted to
@@ -410,6 +439,17 @@ func (g *GoCVStabilizer) loadOrAnalyze(ctx context.Context, sourcePath string, o
 			if series.SourcePath != "" && series.SourcePath != sourcePath {
 				return nil, fmt.Errorf("sidecar %s was analyzed from %q, not %q -- refusing to apply another clip's motion data (use a different -sidecar, or delete this one to re-analyze)",
 					g.SidecarPath, series.SourcePath, sourcePath)
+			}
+			// The motion model is baked into the analysis, not the render: a
+			// sidecar recorded under one model carries none of the per-frame
+			// data another needs. Falling back silently would hand back the old
+			// model's output under the new model's name -- which is precisely
+			// what a cached sidecar from before the default became "rotation"
+			// would do, on a machine where everything appears to be up to date.
+			if series.Options.WarpModel != opts.WarpModel {
+				fmt.Fprintf(os.Stderr,
+					"gocv-stabilizer: warning: %s: sidecar %s was analyzed with --warp-model %s, but this run asked for %s -- rendering with %s, since the model is baked into the analysis; delete the sidecar to re-analyze\n",
+					sourcePath, g.SidecarPath, modelName(series.Options.WarpModel), modelName(opts.WarpModel), modelName(series.Options.WarpModel))
 			}
 			return series, nil
 		}

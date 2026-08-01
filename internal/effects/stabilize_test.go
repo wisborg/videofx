@@ -387,3 +387,44 @@ func TestGoCVStabilizer_Apply_RespectsCanceledContext(t *testing.T) {
 		t.Fatal("expected Apply to fail against an already-canceled context")
 	}
 }
+
+// TestWarpModelDefault pins that an unset WarpModel means the product default
+// (the rotation model), not the similarity.
+//
+// The distinction is easy to get wrong and impossible to see at a glance:
+// stabilize.WarpModelSimilarity IS the empty string, so "" reaching the model
+// switch would silently select the similarity and look entirely correct while
+// quietly undoing the default. The CLI always passes a name, so nothing else
+// would catch it.
+func TestWarpModelDefault(t *testing.T) {
+	if stabilize.DefaultWarpModel != stabilize.WarpModelRotation {
+		t.Fatalf("DefaultWarpModel = %q, want %q", stabilize.DefaultWarpModel, stabilize.WarpModelRotation)
+	}
+	if stabilize.WarpModelSimilarity != "" {
+		t.Fatalf("this test's premise no longer holds: WarpModelSimilarity is %q, not the empty string", stabilize.WarpModelSimilarity)
+	}
+
+	// A zero-valued Options must still mean the similarity: a bare struct
+	// literal picking up a lens-calibration pass would be a surprising thing
+	// for the library to do to a caller who asked for nothing.
+	if (stabilize.Options{}).WarpModel != stabilize.WarpModelSimilarity {
+		t.Error("a zero-valued Options no longer means the similarity model")
+	}
+}
+
+// TestModelName spells out the empty string rather than printing nothing, so a
+// warning about a sidecar's model does not read as a missing value.
+func TestModelName(t *testing.T) {
+	for _, tc := range []struct {
+		in   stabilize.WarpModel
+		want string
+	}{
+		{stabilize.WarpModelSimilarity, "similarity"},
+		{stabilize.WarpModelRotation, "rotation"},
+		{stabilize.WarpModelMesh, "mesh"},
+	} {
+		if got := modelName(tc.in); got != tc.want {
+			t.Errorf("modelName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

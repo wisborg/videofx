@@ -130,6 +130,20 @@ const (
 	WarpModelMesh WarpModel = "mesh"
 )
 
+// DefaultWarpModel is the motion model videofx applies when the caller names
+// none. It is WarpModelRotation as of 2026-08-01: modelling the camera's lens
+// and stabilizing a rotation of its viewing rays measured better than the 2D
+// similarity on every clip it has been tried against -- substantially better on
+// most -- and it self-disables back to the similarity on any clip whose motion
+// does not determine a lens, so it has no footage on which it can do worse.
+//
+// Note this is NOT the same thing as Options' zero value, which is still
+// WarpModelSimilarity (the empty string). A zero-valued Options is a bare
+// struct literal, and a bare struct literal quietly acquiring a lens
+// calibration pass would be a surprising thing for a library to do; callers
+// who want the product's default should ask for it by name.
+const DefaultWarpModel = WarpModelRotation
+
 // DefaultMeshGrid is the grid size (cells across the frame width) for
 // WarpModelMesh. 1 (a 2x2 corner mesh) is the current tuned default: on very
 // shaken test footage coarser grids gave the strongest shake reduction, and by
