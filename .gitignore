@@ -1,0 +1,11 @@
+# macOS Finder metadata. Not anchored: these appear in any directory.
+.DS_Store
+
+# The built CLI (`make build` writes it here). Anchored to the repo root so it
+# cannot shadow a future source directory that happens to share the name.
+/videofx
+
+# Sample footage used for benchmarking and stabilizer comparisons -- several
+# gigabytes of 4K clips, plus the FIT activity file the telemetry effects are
+# tested against. Far too large for the repo; keep it locally.
+/test_videos/
