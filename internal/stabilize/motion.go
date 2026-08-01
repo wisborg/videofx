@@ -60,6 +60,18 @@ type Transition struct {
 	// answer depending on which flags the analysis pass happened to run with.
 	RS *RSObservables `json:"rs,omitempty"`
 
+	// Rotation3 is this frame pair's camera rotation as a unit quaternion: the
+	// rotation carrying the rays this frame saw onto the rays the next frame
+	// sees, under the clip's calibrated Lens. Populated only under
+	// Options.WarpModel == WarpModelRotation; nil otherwise (and omitted from
+	// the sidecar record via its flag), so every other model's analysis is
+	// unaffected.
+	//
+	// Unlike DX/DY this is resolution-INDEPENDENT -- it is an angle, not a
+	// displacement -- so it needs no ScaleFactor conversion. The lens it was
+	// measured under does: see Lens.Scaled.
+	Rotation3 *Quat `json:"rotation3,omitempty"`
+
 	// Mesh is the spatially-varying residual motion field for this frame pair
 	// (see mesh.go), populated only under Options.WarpModel == WarpModelMesh;
 	// nil otherwise (and omitted from the sidecar). Analysis-resolution
@@ -99,10 +111,24 @@ func identityTransition(tracked, inliers int) Transition {
 // runs over many thousands of frames, and a single bad frame must not
 // abort the whole pass.
 func EstimateTransition(prev, curr gocv.Mat, prevPts []gocv.Point2f, opts Options) (Transition, []gocv.Point2f) {
+	tr, _, toPts := estimateTransitionPoints(prev, curr, prevPts, opts)
+	return tr, toPts
+}
+
+// estimateTransitionPoints is EstimateTransition, additionally returning the
+// surviving correspondences the fit was made from.
+//
+// Analyze needs them for the rotation model: a rotation can only be fitted once
+// the clip's lens is known, and the lens is calibrated from these same
+// correspondences part-way through the pass. Rather than have EstimateTransition
+// know about clip-level state it cannot see, it hands the points back and
+// Analyze decides what to do with them.
+func estimateTransitionPoints(prev, curr gocv.Mat, prevPts []gocv.Point2f, opts Options) (Transition, correspondence, []gocv.Point2f) {
 	fromPts, toPts := trackForwardBackward(prev, curr, prevPts, opts)
+	pts := correspondence{from: fromPts, to: toPts}
 
 	if len(fromPts) < minCorrespondences {
-		return identityTransition(len(fromPts), 0), toPts
+		return identityTransition(len(fromPts), 0), pts, toPts
 	}
 
 	fromVec := gocv.NewPoint2fVectorFromPoints(fromPts)
@@ -126,7 +152,7 @@ func EstimateTransition(prev, curr gocv.Mat, prevPts []gocv.Point2f, opts Option
 	// that the same as "not enough inliers": a failed, identity
 	// Transition, not a crash on the GetDoubleAt calls below.
 	if affine.Empty() || affine.Rows() < 2 || affine.Cols() < 3 {
-		return identityTransition(len(fromPts), 0), toPts
+		return identityTransition(len(fromPts), 0), pts, toPts
 	}
 
 	inlierCount := 0
@@ -136,7 +162,7 @@ func EstimateTransition(prev, curr gocv.Mat, prevPts []gocv.Point2f, opts Option
 		}
 	}
 	if inlierCount < opts.MinInliers {
-		return identityTransition(len(fromPts), inlierCount), toPts
+		return identityTransition(len(fromPts), inlierCount), pts, toPts
 	}
 
 	// The 2x3 similarity matrix estimateAffinePartial2D returns has the
@@ -171,7 +197,7 @@ func EstimateTransition(prev, curr gocv.Mat, prevPts []gocv.Point2f, opts Option
 		field := buildMeshField(fromPts, toPts, tr, cols, rows, prev.Cols(), prev.Rows())
 		tr.Mesh = &field
 	}
-	return tr, toPts
+	return tr, pts, toPts
 }
 
 // estimatePerspectiveResidual fits a full homography to the same

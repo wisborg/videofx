@@ -142,6 +142,17 @@ type RenderOptions struct {
 	// identical to before.
 	Mesh bool
 
+	// Rotation enables the WarpModelRotation render path: stabilize by
+	// rotating the camera's rays under the clip's calibrated lens rather than
+	// by transforming the picture in 2D. Requires a series analyzed with
+	// WarpModel == WarpModelRotation whose lens calibration is Reliable; it is
+	// a no-op otherwise, falling back to the 2D path.
+	//
+	// This path OWNS the whole geometry when it engages -- the mesh,
+	// perspective and 2D correction/zoom machinery are all bypassed, because
+	// they are alternative answers to the same question rather than layers.
+	Rotation bool
+
 	// MeshZoomMargin is a small extra fractional zoom added ON TOP of the crop
 	// that Render sizes to the mesh's actual edge displacement (see
 	// meshCropMargin) -- a safety cushion, not the primary crop. Ignored when
@@ -222,6 +233,11 @@ type RenderStats struct {
 	// configurations without matching it measures mostly the crop difference.
 	MeshMargin float64
 	RSMargin   float64
+
+	// Lens is the camera model the rotation path rendered with, or nil when
+	// that path did not engage. Reported so a render is self-describing about
+	// the geometry it assumed.
+	Lens *LensCalibration
 }
 
 // TotalZoom is the combined zoom fraction actually applied: the edge mode's
@@ -322,6 +338,41 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 		zoomFactor = 1.0 // no crop -- borders are filled, not hidden by zooming
 	}
 
+	// Rotation model. When it engages it replaces the 2D correction and its
+	// zoom outright, so it is computed here, before the encoder is opened, and
+	// the 2D zoom decided above is discarded.
+	var sphere *sphereWarpState
+	var rotCorr []Quat
+	var rotZooms []float64
+	if opts.Rotation && series.hasRotations() {
+		if corr := BuildRotationCorrections(series, result.Options.Sigma, result.Options.RadiusMultiple); len(corr) > 0 {
+			// The lens was calibrated in analysis-resolution pixels; the render
+			// warps source-resolution ones. Getting this conversion wrong is
+			// the same silent, plausible-looking 4x error Transition.DX/DY
+			// warns about.
+			lens := series.Lens.Lens.Scaled(scaleFactor)
+			maxZoomFactor := 0.0
+			if opts.MaxZoom > 0 {
+				maxZoomFactor = 1 + opts.MaxZoom
+			}
+			sigmaFrames := 0.0
+			if opts.ZoomTransitionSeconds > 0 {
+				sigmaFrames = opts.ZoomTransitionSeconds * info.FPS
+			}
+			plan := PlanRotationZoom(corr, lens, w, h, maxZoomFactor, sigmaFrames)
+			rotCorr = plan.Corrections
+			rotZooms = plan.Zooms
+			sphere = newSphereWarpState(lens, w, h)
+			defer sphere.Close()
+
+			stats.Zoom = plan.PeakZoom - 1
+			stats.RequiredZoom = plan.PeakRequired - 1
+			stats.ClampedFrames = plan.ClampedFrames
+			stats.MeshMargin, stats.RSMargin = 0, 0
+			stats.Lens = series.Lens
+		}
+	}
+
 	enc, err := vidio.OpenEncoder(ctx, vidio.EncoderConfig{
 		OutputPath: outputPath,
 		Width:      w,
@@ -346,7 +397,7 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 	// residuals, in which case the loop stays on the pure-similarity WarpAffine
 	// path below.
 	var perspCorr []matrix3
-	if opts.PerspectiveRegularize > 0 && ff == nil && series.hasPerspective() {
+	if opts.PerspectiveRegularize > 0 && ff == nil && sphere == nil && series.hasPerspective() {
 		perspCorr = buildPerspectiveCorrections(series, result.Options.Sigma, result.Options.RadiusMultiple, opts.PerspectiveRegularize)
 	}
 	// scaleBasis moves an analysis-coordinate perspective correction into
@@ -360,7 +411,7 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 	var meshCorr []MeshField
 	var mesh *meshWarpState
 	var meshMargin float64
-	if opts.Mesh && ff == nil && perspCorr == nil && series.hasMesh() {
+	if opts.Mesh && ff == nil && sphere == nil && perspCorr == nil && series.hasMesh() {
 		meshCorr = buildMeshCorrections(series, result.Options.Sigma, result.Options.RadiusMultiple, opts.MeshStrength, meshDenoiseSigma)
 		if len(meshCorr) > 0 {
 			mesh = newMeshWarpState(meshCorr[0].Cols, meshCorr[0].Rows, w, h, size.MatType(), scaleFactor)
@@ -377,6 +428,13 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 	// correction below. One clip-wide zoom margin covers every frame's
 	// rectification; see RSZoomMargin for why it is not per-frame.
 	rsRect := opts.RS
+	if sphere != nil {
+		// The rolling-shutter rectification is an affine composed into the 2D
+		// warp; there is no 2D warp on this path. Correcting it here would mean
+		// composing a shear into the spherical map, which is a separate piece
+		// of work -- see the rotation model's notes.
+		rsRect = nil
+	}
 	if ff != nil {
 		// EdgeModeFlowFill does not crop at all, so there is no zoom to hide
 		// the band a rectification pulls in; it would show as a filled edge.
@@ -443,6 +501,27 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 		total := affineFromSimilarity(transform)
 		if rsRect != nil && frames < len(rsRect) {
 			total = total.mul(rsRect[frames].affine(float64(h) / 2))
+		}
+
+		if sphere != nil {
+			q := identityQuat
+			if frames < len(rotCorr) {
+				q = rotCorr[frames]
+			}
+			rz := 1.0
+			if frames < len(rotZooms) {
+				rz = rotZooms[frames]
+			}
+			if err := sphere.render(src, q, rz, &dst); err != nil {
+				_ = enc.Close()
+				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
+			}
+			if err := enc.WriteFrame(dst); err != nil {
+				_ = enc.Close()
+				return stats, fmt.Errorf("stabilize: rendering %s: writing frame %d: %w", sourcePath, frames, err)
+			}
+			frames++
+			continue
 		}
 
 		switch {

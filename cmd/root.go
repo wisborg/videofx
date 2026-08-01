@@ -51,6 +51,8 @@ var (
 	zoomTransition float64
 	warpModel      string
 	meshGrid       int
+	lensModel      string
+	lensFocal      float64
 	meshStrength   float64
 	rollingShutter bool
 	rsRatio        float64
@@ -140,9 +142,13 @@ func NewRootCmd() *cobra.Command {
 	root.Flags().IntVar(&analysisWidth, "analysis-width", 0,
 		"gocv-stabilizer only: width in pixels at which motion is estimated (0 = default 960; height derived). Larger localizes features more finely but is slower; EXPERIMENTAL -- on the test footage it did not measurably reduce residual shake (whether it yields visibly cleaner warps is an eyeball call). NOTE: baked into a --sidecar's cached analysis, so change --analysis-width and --sidecar together (or delete the sidecar) to re-analyze")
 	root.Flags().StringVar(&warpModel, "warp-model", "similarity",
-		"gocv-stabilizer only: motion model. \"similarity\" (default) fits one 4-DOF transform per frame (pan/rotate/scale). \"mesh\" is EXPERIMENTAL: a MeshFlow-style spatially-varying correction (a median-voted grid of local residual motions on top of the similarity) that targets the rolling-shutter/parallax jitter a single transform leaves -- the median voting is the variance control the \"homography\" model lacked; tune the grid with --mesh-grid. \"homography\" is EXPERIMENTAL and NOT RECOMMENDED (its per-frame 8-DOF fit measured WORSE than similarity). NOTE: the model is baked into a --sidecar's analysis, so change --warp-model and --sidecar together (or delete the sidecar) to re-analyze")
+		"gocv-stabilizer only: motion model. \"similarity\" (default) fits one 4-DOF transform per frame (pan/rotate/scale). \"rotation\" models the camera's actual lens geometry and fits a 3-DOF rotation of its viewing rays instead of transforming the picture -- on wide-angle action-cam footage this is the physically correct model (a rotation does not translate a fisheye picture, it sweeps the centre and the edges differently), and it measures far less residual shake than any 2D model here; it calibrates the lens from the clip's own motion and warns if it cannot. \"mesh\" is EXPERIMENTAL: a MeshFlow-style spatially-varying correction (a median-voted grid of local residual motions on top of the similarity) that targets the rolling-shutter/parallax jitter a single transform leaves -- the median voting is the variance control the \"homography\" model lacked; tune the grid with --mesh-grid. \"homography\" is EXPERIMENTAL and NOT RECOMMENDED (its per-frame 8-DOF fit measured WORSE than similarity). NOTE: the model is baked into a --sidecar's analysis, so change --warp-model and --sidecar together (or delete the sidecar) to re-analyze")
 	root.Flags().IntVar(&meshGrid, "mesh-grid", 0,
 		"gocv-stabilizer only, --warp-model mesh: grid size (cells across the frame width; vertical count derived to keep cells ~square). 0 = default 1 (a 2x2 corner mesh, near-global -- the tuned default). Finer grids correct more localized motion but are noisier per vertex and crop more; coarser converges toward a global correction. Baked into a --sidecar's analysis (change --mesh-grid and --sidecar together)")
+	root.Flags().StringVar(&lensModel, "lens", "",
+		"gocv-stabilizer only, --warp-model rotation: force the lens projection model (perspective, equidistant, equisolid, stereographic) instead of measuring it from the clip. Requires --lens-focal. Use it on footage too gently-moving to calibrate itself, taking the values from a shakier clip shot on the same camera in the same mode")
+	root.Flags().Float64Var(&lensFocal, "lens-focal", 0,
+		"gocv-stabilizer only, --warp-model rotation: force the lens focal length in ANALYSIS-resolution pixels (the analysis width is 960 unless --analysis-width says otherwise), instead of measuring it. Requires --lens. Baked into a --sidecar's analysis, so change it and --sidecar together")
 	root.Flags().BoolVar(&rollingShutter, "rolling-shutter", false,
 		"gocv-stabilizer only: correct rolling-shutter skew. A rolling shutter scans the frame top to bottom over a few milliseconds, so a camera moving during that scan records each row from a slightly different position -- the picture shears and stretches by an amount that changes with the camera's velocity, which reads as wobble/jello. This measures the sensor's readout time from the clip's own motion and un-skews each frame, and also removes the fictitious roll a rolling shutter otherwise injects into the motion estimates (a 4-DOF fit cannot tell a per-row shear from camera roll, so it books it as one). Composes into the existing warp, so it costs no extra pass and only a fraction of a percent of extra crop. Warns and does nothing on a clip whose motion is too gentle to measure a readout from")
 	root.Flags().Float64Var(&rsRatio, "rs-ratio", 0,
@@ -361,14 +367,44 @@ func parsePowerSource(mode string) telemetry.PowerSource {
 	return powerSourceModes[mode] // zero value is PowerAuto
 }
 
+// buildForcedLens turns --lens/--lens-focal into an explicit camera model, or
+// nil to let the clip calibrate its own.
+//
+// The two flags are required together because either alone is meaningless: a
+// projection model with no focal length has no scale, and a focal length with no
+// model does not say what it is the focal length OF. Silently defaulting the
+// missing half would produce a plausible-looking lens that was never measured
+// and never chosen, which is exactly the kind of number this package's
+// calibration work exists to avoid.
+func buildForcedLens(model string, focal float64) (*stabilize.Lens, error) {
+	if model == "" && focal == 0 {
+		return nil, nil
+	}
+	if model == "" || focal == 0 {
+		return nil, fmt.Errorf("--lens and --lens-focal must be given together (got --lens %q, --lens-focal %v)", model, focal)
+	}
+	if focal <= 0 {
+		return nil, fmt.Errorf("--lens-focal must be positive, got %v", focal)
+	}
+	kind, err := stabilize.ParseLensKind(model)
+	if err != nil {
+		return nil, err
+	}
+	// The principal point is left unset: Analyze fills it with the actual
+	// frame centre, which is also what the calibration sweep assumes. An
+	// off-centre principal point is a parameter neither path fits, so there is
+	// nothing here for a caller to specify.
+	return &stabilize.Lens{Kind: kind, Focal: focal}, nil
+}
+
 // validateWarpModel rejects an unknown --warp-model up front (mirrors the set
 // stabilize.WarpModel accepts; "similarity" maps to the default empty model).
 func validateWarpModel(model string) error {
 	switch model {
-	case "similarity", "homography", "mesh":
+	case "similarity", "homography", "mesh", "rotation":
 		return nil
 	default:
-		return fmt.Errorf("--warp-model %q is invalid; use similarity, homography, or mesh", model)
+		return fmt.Errorf("--warp-model %q is invalid; use similarity, rotation, mesh, or homography", model)
 	}
 }
 
@@ -486,6 +522,11 @@ func configureEffect(effect effects.Effect) error {
 		gs.MeshStrength = meshStrength
 		gs.RollingShutter = rollingShutter
 		gs.RSRatio = rsRatio
+		lens, err := buildForcedLens(lensModel, lensFocal)
+		if err != nil {
+			return err
+		}
+		gs.Lens = lens
 	}
 	if h, ok := effect.(*effects.TelemetryHUD); ok {
 		loc, err := parseHUDTimeZone(hudTimeZone)

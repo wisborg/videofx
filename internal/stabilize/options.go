@@ -89,6 +89,14 @@ type Options struct {
 	// analysis/sidecar byte-identical.
 	WarpModel WarpModel `json:"warpModel,omitempty"`
 
+	// Lens, when non-nil, forces WarpModelRotation's camera model instead of
+	// calibrating one from the clip (see LensCalibration). Its lengths are in
+	// ANALYSIS-resolution pixels. Use it on footage too gently-moving to
+	// calibrate itself, taking the value from a shakier clip shot on the same
+	// camera in the same mode -- exactly as --rs-ratio does for the
+	// rolling-shutter readout.
+	Lens *Lens `json:"lens,omitempty"`
+
 	// MeshGrid is the WarpModelMesh grid size: the number of cells across the
 	// frame width (the vertical count is derived to keep cells ~square). 0 uses
 	// DefaultMeshGrid (1). A finer grid corrects more localized motion but is
@@ -108,6 +116,13 @@ const (
 	// and records its perspective residual. EXPERIMENTAL (measured to regress
 	// vs similarity -- see the homography-warp-experiment note).
 	WarpModelHomography WarpModel = "homography"
+	// WarpModelRotation models the camera's actual projection geometry and
+	// fits a 3-DOF rotation on the sphere per frame pair, rather than any 2D
+	// transform of the picture. On wide-angle (action-cam) footage this is the
+	// physically correct model -- see lens.go -- and it is the only model here
+	// that is BOTH more expressive spatially and cheaper in degrees of freedom
+	// than the similarity it replaces.
+	WarpModelRotation WarpModel = "rotation"
 	// WarpModelMesh estimates a spatially-varying MeshFlow-style residual
 	// motion field per frame pair (median-voted onto a grid) and corrects it on
 	// top of the similarity stabilization. EXPERIMENTAL. The median voting is

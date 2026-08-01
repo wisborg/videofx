@@ -275,17 +275,9 @@ func AdaptiveZoomTimeVarying(corrections []Correction, scaleFactor float64, fram
 		raw[i] = minZoomForCorrection(c, scaleFactor, frameW, frameH, maxZoomSearchBound)
 	}
 
-	kernel := gaussianKernel(sigmaFrames, zoomEnvelopeRadiusMultiple)
-	radius := (len(kernel) - 1) / 2
-	env := smoothSeries(runningMax(raw, radius), kernel)
-
-	// Floor with the per-frame requirement so no frame is ever rendered
-	// below the zoom it needs (guards float rounding in dilate+smooth).
-	for i := range env {
-		if env[i] < raw[i] {
-			env[i] = raw[i]
-		}
-	}
+	// Steps 2 and 3 above; shared with the rotation path's zoom planner so the
+	// two cannot drift apart (see smoothUpperEnvelope).
+	env := smoothUpperEnvelope(raw, sigmaFrames)
 
 	res := AdaptiveZoomEnvelope{
 		Zooms:             env, // env is mutated in-place by the cap below

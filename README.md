@@ -108,10 +108,12 @@ Flags:
 - `--analysis-width` — gocv-stabilizer only: width in pixels at which motion is estimated (`0` = default `960`; height derived). Larger localizes features more finely but is slower. **Experimental**: on the test footage it did not measurably reduce residual shake — the residual there is real low-frequency motion the smoother keeps, not estimation noise — so whether a higher width yields visibly cleaner warps is an eyeball call. The chosen width is baked into a `--sidecar`'s cached analysis, so change `--analysis-width` and `--sidecar` together (or delete the sidecar) to re-analyze.
 - `--warp-model` — gocv-stabilizer only: the per-frame motion model.
   - `similarity` (default) fits one 4-DOF transform (pan/rotate/scale) per frame — the proven path.
+  - `rotation` (**RECOMMENDED for action-cam footage**) models the camera's actual lens geometry and fits a **3-DOF rotation of its viewing rays**, instead of transforming the picture in 2D at all. It calibrates the lens from the clip's own motion, integrates the per-frame rotations into an orientation trajectory, low-passes that trajectory on SO(3), and re-projects each frame through the smoothed orientation. **It is the biggest measured shake reduction this project has: `4.40` residual on the very-shaken test clip against `7.41` for the previous best (`mesh`) and `6.49` for Adobe Premiere's Warp Stabilizer — while cropping less than either.** See [Why the lens matters](#why-the-lens-matters) for the measurement that motivated it. It **self-disables** with a warning on any clip whose motion doesn't determine a lens (falling back to `similarity`, byte-identically), so it is safe to pass unconditionally; `--lens`/`--lens-focal` force a calibration for clips too gentle to measure their own.
   - `mesh` (**EXPERIMENTAL**) adds a MeshFlow-style correction on top of the similarity: it median-votes each frame's local feature motions onto a grid of vertices (`--mesh-grid`), smooths each vertex's path, and warps the frame with the resulting mesh — targeting the rolling-shutter/parallax jitter a single global transform leaves behind. The **median voting is the variance control** the `homography` model lacked, and because it corrects only the *residual* beyond the similarity, it's a no-op on rigid/gentle footage (no regression there). On the very-shaken test clip it measurably beats similarity. The correction inevitably exposes a border (a spatially-varying warp bends the frame), which is **auto-cropped** to a clean frame sized to the 95th-percentile frame; `--mesh-strength` dials the whole correction down to trade shake removal for less crop/distortion. Defaults: grid `1` (a near-global 2×2 mesh — coarser stopped buying shake reduction while cropping least) at strength `0.3`. Tuning is ongoing.
   - `homography` (**EXPERIMENTAL, not recommended**): fits one 8-DOF homography per frame. It *registers* frames ~42% better than a similarity, but as a per-frame stabilizer the 8-DOF fit's variance **injected more jitter than it removed** (residual `12.15` vs `10.81`) — kept only as scaffolding; use `mesh` instead.
   
   The model is baked into a `--sidecar`'s analysis, so change `--warp-model` (or `--mesh-grid`) and `--sidecar` together — or delete the sidecar — to re-analyze.
+- `--lens` / `--lens-focal` — gocv-stabilizer only, `--warp-model rotation`: force the camera model instead of measuring it from the clip. `--lens` is the projection (`perspective`, `equidistant`, `equisolid`, `stereographic`) and `--lens-focal` the focal length **in analysis-resolution pixels** (the analysis width is `960` unless `--analysis-width` says otherwise). They must be given together — either alone is meaningless. Use them on footage too gently-moving to calibrate itself, taking the values from a shakier clip shot on the same camera in the same mode (the calibration is printed on every rotation-model run). Baked into a `--sidecar`'s analysis.
 - `--mesh-grid` — gocv-stabilizer only, `--warp-model mesh`: the mesh grid size, in cells across the frame width (the vertical count is derived to keep cells roughly square). `0` = default `1` (a 2×2 corner mesh — see below). A finer grid corrects more localized motion but is noisier per vertex (a wigglier warp) and exposes/crops more of the frame; coarser converges toward a single global correction. Baked into a `--sidecar`'s analysis (change it and `--sidecar` together).
 - `--mesh-strength` — gocv-stabilizer only, `--warp-model mesh`: the mesh correction gain, `0.0`–`1.0`. A spatially-varying warp inherently trades some picture distortion (a per-frame bend/swim) **and crop** for stabilization, so **lower this to reduce both** at a little less shake removal; `1.0` is full strength, `0` disables the mesh (falls back to similarity). `-1` (default) uses the built-in default of `0.3`. Unlike `--mesh-grid`, this is applied at **render time**, so it can be swept against a cached `--sidecar` without re-analyzing.
 - `--fit` — **telemetry / telemetry-hud only**, and **required** when either is in `--effect` (Cobra can't express a conditional-required flag, so this is validated by hand at startup with a clear error if missing). Path to the Garmin FIT activity file to sync GPS/telemetry from.
@@ -649,6 +651,87 @@ to steady *framing* but still looks soft, and the crop's upscale adds a touch mo
 softness. That's a capture-time issue (use a faster shutter), not something any 2D
 stabilizer can recover — so on visibly motion-blurred footage, don't spend extra crop
 raising `--sigma` chasing shake that's already essentially gone.
+
+## Why the lens matters
+
+The `rotation` warp model exists because of one measurement, and the measurement is
+worth understanding before tuning anything in this area.
+
+Every 2D motion model — similarity, affine, homography, mesh — describes what a camera
+*rotation* does to the picture only when the lens is narrow enough that the image plane
+is roughly flat across the field of view. An action camera is the opposite case. At
+~106° horizontal field of view, **a rotation does not translate the picture**: it sweeps
+the centre and the edges by different amounts, in different directions. No 2D transform
+can say that, so a 2D fit returns the average and leaves a large error that varies
+smoothly across the frame.
+
+The error is not small, and it is measurable without rendering anything. Fit a
+similarity to the tracked points in the **left** half of a frame pair, fit another to
+the **right** half of the same pair, and ask how far apart the two place the picture
+(`go test ./internal/stabilize -run ParallaxProbe`):
+
+| split                       | similarity | rotation + lens model |
+|-----------------------------|-----------:|----------------------:|
+| random halves (noise floor) |      1.62  |             **0.38**  |
+| left vs right               |     10.01  |             **3.87**  |
+| top vs bottom               |      5.62  |             **2.56**  |
+
+(analysis pixels, median over 1086 frame pairs of `test_very_shaken.mp4`)
+
+That 10-pixel left/right disagreement is the whole problem. It is re-rolled every frame
+as the tracked feature set shifts around, so **whichever way the sample happens to lean
+becomes a camera motion that was never there** — and the stabilizer faithfully warps it
+into the output as shake it can neither see nor remove. It also explains a
+long-standing puzzle in this project's numbers: the rendered output measured ~7.4 px of
+frame-to-frame motion while the smoothed path it was warped onto only moved ~3.9. A
+warp executes exactly, so the excess was never the warp failing — it was the "camera
+motion" being fitted not being a well-defined quantity.
+
+The fix is not a more flexible model. It is a **more correct** one: un-project each
+pixel to the ray the camera actually saw, rotate the rays, project back. That is
+**3 degrees of freedom — fewer than the similarity's 4** — which is why it succeeds
+where this project's two previous attempts to beat the similarity both regressed. The
+8-DOF global homography and the per-cell bundled homography each bought spatial
+expressiveness with free parameters and paid for it in estimator variance; this buys
+the same expressiveness by being right about the physics, and pays nothing.
+
+The lens is measured, not assumed. `CalibrateLens` sweeps four projection models across
+a range of focal lengths and takes the minimum of the per-point registration error — the
+same methodology the rolling-shutter work used to recover the sensor readout ratio. On
+`test_very_shaken` it recovers an **equisolid fisheye at 538 analysis px (~106° HFOV)**,
+and recovers the same value from the first 200 pairs, the first 400, or all 1086. A clip
+whose motion does not determine a lens produces a flat error curve, which
+`LensCalibration.Reliable` detects; that clip falls back to `similarity` with a warning
+rather than being warped by a number that came from nowhere.
+
+**Measured end to end** on `test_very_shaken.mp4` (residual shake = re-tracking the
+finished render, so it cannot be won by rendering something blurrier; crop measured by
+registering each output back against its source):
+
+| render                         | residual median | p90   | rotation | crop   | source-referred |
+|--------------------------------|----------------:|------:|---------:|-------:|----------------:|
+| raw source                     |          16.22  | 38.31 |  0.489°  |     —  |          16.22  |
+| Adobe Premiere Warp Stabilizer |           6.49  | 16.61 |  0.252°  | 29.7%  |           4.56  |
+| videofx `similarity`           |           9.95  | 24.47 |  0.150°  | 17.1%  |           8.26  |
+| videofx `mesh` (previous best) |           7.41  | 18.59 |  0.151°  |  ~0%*  |           7.42  |
+| videofx **`rotation`**         |       **4.40**  |  9.71 |  0.098°  | 18.7%  |       **3.58**  |
+
+\* the `mesh` default uses a per-frame zoom envelope, so its *median* frame is barely
+cropped while its worst frames are cropped hard; the others are closer to a constant crop.
+The last column divides out each render's own magnification, since **crop is the currency
+this stabilizer spends** — a bigger crop magnifies whatever residual is left, so two
+configurations are only comparable at matched crop.
+
+**32% less residual shake than Premiere, on 11 percentage points less crop**, and 56%
+less than the `similarity` model **at essentially matched crop** (18.7% vs 17.1%) — so
+the win is the model, not the zoom. The p90, which covers the high-acceleration frames
+where models differ most, improves further: `9.71` against Premiere's `16.61`.
+
+**Where it does not help.** The win scales with how much *rotational* shake there is and
+how *wide* the lens is. On gentle footage (`test_small.mp4`) the clip's motion does not
+determine a lens at all and the model self-disables; forcing a borrowed calibration
+there measured `2.03` against `similarity`'s `1.93` — a wash. This is a fix for severe
+shake on wide-angle cameras, which is exactly the case it was built for.
 
 ## Design
 

@@ -51,6 +51,12 @@ type MotionSeries struct {
 	// tracking/RANSAC settings produced these numbers.
 	Options Options `json:"options"`
 
+	// Lens is the camera model WarpModelRotation calibrated (or was given)
+	// for this clip, in ANALYSIS-resolution pixel units. nil for every other
+	// warp model. See LensCalibration -- and note Reliable(), which is what
+	// decides whether the rotation path may be used at all.
+	Lens *LensCalibration `json:"lens,omitempty"`
+
 	// Transitions holds one entry per consecutive frame pair, in frame
 	// order: Transitions[i] is the motion from frame i to frame i+1.
 	Transitions []Transition `json:"transitions"`
@@ -76,6 +82,22 @@ func (s *MotionSeries) ScaleFactor() float64 {
 func (s *MotionSeries) hasPerspective() bool {
 	for i := range s.Transitions {
 		if s.Transitions[i].Perspective != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// hasRotations reports whether the series carries a usable rotation model: a
+// reliable lens calibration and at least one fitted per-pair rotation. When
+// false the rotation render path must not engage -- there is nothing to apply,
+// and quietly warping by identity would be indistinguishable from a bug.
+func (s *MotionSeries) hasRotations() bool {
+	if s.Lens == nil || !s.Lens.Reliable() {
+		return false
+	}
+	for i := range s.Transitions {
+		if s.Transitions[i].Rotation3 != nil {
 			return true
 		}
 	}
@@ -110,7 +132,7 @@ func (s *MotionSeries) hasMesh() bool {
 // stale one is simply overwritten rather than migrated.
 var sidecarMagic = [6]byte{'V', 'F', 'X', 'M', 'O', 'T'}
 
-const sidecarVersion uint8 = 2
+const sidecarVersion uint8 = 3
 
 // per-frame flag bits in the binary body.
 const (
@@ -118,6 +140,7 @@ const (
 	sidecarFlagPerspective = 1 << 1
 	sidecarFlagMesh        = 1 << 2
 	sidecarFlagRS          = 1 << 3
+	sidecarFlagRotation    = 1 << 4
 )
 
 // sidecarHeader is the JSON metadata block: everything in MotionSeries except
@@ -137,6 +160,8 @@ type sidecarHeader struct {
 	MeshCols       int     `json:"meshCols,omitempty"`
 	MeshRows       int     `json:"meshRows,omitempty"`
 	NumTransitions int     `json:"numTransitions"`
+
+	Lens *LensCalibration `json:"lens,omitempty"`
 }
 
 // WriteSidecar persists series to path in the binary format described above.
@@ -162,6 +187,7 @@ func WriteSidecar(path string, series *MotionSeries) error {
 		MeshCols:       meshCols,
 		MeshRows:       meshRows,
 		NumTransitions: len(series.Transitions),
+		Lens:           series.Lens,
 	})
 	if err != nil {
 		return fmt.Errorf("stabilize: encoding sidecar header: %w", err)
@@ -220,6 +246,9 @@ func writeTransition(w io.Writer, tr *Transition, meshCols, meshRows int) error 
 	if tr.RS != nil {
 		flags |= sidecarFlagRS
 	}
+	if tr.Rotation3 != nil {
+		flags |= sidecarFlagRotation
+	}
 	if err := binary.Write(w, le, flags); err != nil {
 		return err
 	}
@@ -231,6 +260,15 @@ func writeTransition(w io.Writer, tr *Transition, meshCols, meshRows int) error 
 	}
 	if flags&sidecarFlagRS != 0 {
 		if err := binary.Write(w, le, []float32{float32(tr.RS.Shear), float32(tr.RS.Stretch)}); err != nil {
+			return err
+		}
+	}
+	if flags&sidecarFlagRotation != 0 {
+		// float32 is ample: a per-frame rotation is a few hundredths of a
+		// radian, so float32's ~1e-7 relative precision leaves the implied
+		// pixel error at 4K several orders of magnitude below a pixel.
+		q := tr.Rotation3
+		if err := binary.Write(w, le, []float32{float32(q[0]), float32(q[1]), float32(q[2]), float32(q[3])}); err != nil {
 			return err
 		}
 	}
@@ -307,6 +345,7 @@ func ReadSidecar(path string) (*MotionSeries, error) {
 		FPS:            h.FPS,
 		FrameCount:     h.FrameCount,
 		Options:        h.Options,
+		Lens:           h.Lens,
 	}
 	if h.NumTransitions > 0 {
 		series.Transitions = make([]Transition, h.NumTransitions)
@@ -345,6 +384,14 @@ func readTransition(r io.Reader, tr *Transition, meshCols, meshRows int) error {
 			return err
 		}
 		tr.RS = &RSObservables{Shear: float64(v[0]), Stretch: float64(v[1])}
+	}
+	if flags&sidecarFlagRotation != 0 {
+		v := make([]float32, 4)
+		if err := binary.Read(r, le, v); err != nil {
+			return err
+		}
+		q := Quat{float64(v[0]), float64(v[1]), float64(v[2]), float64(v[3])}.Normalized()
+		tr.Rotation3 = &q
 	}
 	if flags&sidecarFlagPerspective != 0 {
 		v := make([]float32, 9)

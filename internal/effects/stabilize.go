@@ -186,6 +186,11 @@ type GoCVStabilizer struct {
 	// --mesh-strength; only used when WarpModel is "mesh".
 	MeshStrength float64
 
+	// Lens, when non-nil, forces --warp-model rotation's camera model instead
+	// of calibrating one from the clip. Analysis-resolution pixel units. Wired
+	// from --lens/--lens-focal.
+	Lens *stabilize.Lens
+
 	// RollingShutter enables rolling-shutter rectification (see
 	// stabilize.RSRectifier): the clip's readout ratio is calibrated from its
 	// own analysis and used both to de-bias the motion estimates and to
@@ -255,6 +260,11 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 		trackOpts.WarpModel = stabilize.WarpModelMesh
 		trackOpts.MeshGrid = g.MeshGrid // 0 -> DefaultMeshGrid in estimation
 	}
+	rotationMode := g.WarpModel == string(stabilize.WarpModelRotation)
+	if rotationMode {
+		trackOpts.WarpModel = stabilize.WarpModelRotation
+		trackOpts.Lens = g.Lens // nil -> calibrate from the clip
+	}
 
 	series, err := g.loadOrAnalyze(ctx, in.SourcePath, trackOpts)
 	if err != nil {
@@ -306,6 +316,19 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 		}
 		renderOpts.PerspectiveRegularize = reg
 		renderOpts.PerspectiveZoomMargin = 0.03 // small extra crop to cover perspective corner excursion
+	}
+	if rotationMode {
+		renderOpts.Rotation = true
+		if series.Lens == nil || !series.Lens.Reliable() {
+			// Nothing measured, so nothing to stabilize with. Say so rather than
+			// silently rendering through the 2D fallback under a flag that
+			// promised something else -- the same call --rolling-shutter makes
+			// when a clip is too gentle to calibrate a readout from.
+			fmt.Fprintf(os.Stderr, "gocv-stabilizer: warning: %s: --warp-model rotation could not calibrate a lens (the clip's motion does not distinguish one) -- falling back to the similarity model; pass --lens-focal to force one\n", in.SourcePath)
+			renderOpts.Rotation = false
+		} else {
+			fmt.Fprintf(os.Stderr, "gocv-stabilizer: %s: %s\n", in.SourcePath, series.Lens)
+		}
 	}
 	if meshMode {
 		strength := g.MeshStrength
