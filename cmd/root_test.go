@@ -2,11 +2,13 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"videofx/internal/calibrate"
 	"videofx/internal/effects"
@@ -196,6 +198,7 @@ func TestValidateWarpModel(t *testing.T) {
 		model   string
 		wantErr bool
 	}{
+		{"rotation", false},
 		{"similarity", false},
 		{"homography", false},
 		{"mesh", false},
@@ -592,7 +595,7 @@ func TestConfigureEffect_GoCVQuality(t *testing.T) {
 	edgeMode = "adaptive" // configureEffect parses this; must be valid
 
 	gs := &effects.GoCVStabilizer{}
-	if err := configureEffect(gs); err != nil {
+	if err := configureEffect(gs, pflag.NewFlagSet("test", pflag.ContinueOnError)); err != nil {
 		t.Fatalf("configureEffect returned error: %v", err)
 	}
 	if gs.Quality != 60 {
@@ -627,7 +630,7 @@ func TestConfigureEffect_TelemetryHUD(t *testing.T) {
 	elevLoss = 95
 
 	h := &effects.TelemetryHUD{}
-	if err := configureEffect(h); err != nil {
+	if err := configureEffect(h, pflag.NewFlagSet("test", pflag.ContinueOnError)); err != nil {
 		t.Fatalf("configureEffect: %v", err)
 	}
 	if h.FitPath != "run.fit" || h.OffsetSeconds != -2.5 || h.Quality != 60 {
@@ -652,5 +655,54 @@ func TestNewRootCmd_ZoomTransitionFlagRegistered(t *testing.T) {
 	}
 	if f.DefValue != "0.5" {
 		t.Errorf("--zoom-transition default = %q, want \"0.5\" (time-varying zoom on by default)", f.DefValue)
+	}
+}
+
+// TestConfigureEffect_RollingShutterDefault pins that the rectification is on
+// unless it is turned off, and that configureEffect passes through whether the
+// caller named the flag -- which is what decides whether an uncalibratable clip
+// warns or stays quiet (see GoCVStabilizer.RollingShutterExplicit).
+func TestConfigureEffect_RollingShutterDefault(t *testing.T) {
+	origRS, origEdge := rollingShutter, edgeMode
+	t.Cleanup(func() { rollingShutter, edgeMode = origRS, origEdge })
+	edgeMode = "adaptive"
+
+	// The flag's own default, as registered on the command.
+	cmd := NewRootCmd()
+	if f := cmd.Flags().Lookup("rolling-shutter"); f == nil {
+		t.Fatal("--rolling-shutter is not registered")
+	} else if f.DefValue != "true" {
+		t.Errorf("--rolling-shutter default is %q, want \"true\"", f.DefValue)
+	}
+
+	for _, tc := range []struct {
+		value    bool
+		explicit bool
+	}{
+		{true, false},  // the default, not named
+		{true, true},   // named explicitly
+		{false, true},  // turned off (which is necessarily explicit)
+	} {
+		// NewRootCmd binds every flag to its package variable and writes the
+		// default into it, so the flag set must be built BEFORE the value under
+		// test is chosen -- otherwise it silently resets it.
+		flags := NewRootCmd().Flags()
+		if tc.explicit {
+			if err := flags.Set("rolling-shutter", fmt.Sprint(tc.value)); err != nil {
+				t.Fatalf("setting the flag: %v", err)
+			}
+		} else {
+			rollingShutter = tc.value
+		}
+		gs := &effects.GoCVStabilizer{}
+		if err := configureEffect(gs, flags); err != nil {
+			t.Fatalf("configureEffect returned error: %v", err)
+		}
+		if gs.RollingShutter != tc.value {
+			t.Errorf("value %v/explicit %v: RollingShutter = %v", tc.value, tc.explicit, gs.RollingShutter)
+		}
+		if gs.RollingShutterExplicit != tc.explicit {
+			t.Errorf("value %v/explicit %v: RollingShutterExplicit = %v", tc.value, tc.explicit, gs.RollingShutterExplicit)
+		}
 	}
 }

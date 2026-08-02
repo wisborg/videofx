@@ -3,6 +3,7 @@ package effects
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 
 	"videofx/internal/stabilize"
@@ -11,10 +12,11 @@ import (
 func init() {
 	Register("gocv-stabilizer", func() Effect {
 		return &GoCVStabilizer{
-			TrackOptions: stabilize.DefaultOptions(),
-			EdgeMode:     stabilize.EdgeModeAdaptive,
-			FixedZoom:    stabilize.DefaultRenderOptions().FixedZoom,
-			MaxZoom:      0,
+			TrackOptions:   stabilize.DefaultOptions(),
+			EdgeMode:       stabilize.EdgeModeAdaptive,
+			FixedZoom:      stabilize.DefaultRenderOptions().FixedZoom,
+			MaxZoom:        0,
+			RollingShutter: true,
 		}
 	})
 }
@@ -198,6 +200,26 @@ type GoCVStabilizer struct {
 	// from --lens/--lens-focal.
 	Lens *stabilize.Lens
 
+	// Warn is where warnings and --debug diagnostics go. nil means os.Stderr;
+	// tests set it to capture what a given combination of flags actually says,
+	// since when these messages fire is real logic and not decoration.
+	Warn io.Writer
+
+	// WarpModelExplicit records that the caller named WarpModel rather than
+	// receiving it as the default, and serves the same purpose as
+	// RollingShutterExplicit: a lens that cannot be calibrated is a failure to
+	// do what was asked when "rotation" was requested by name, and merely the
+	// default declining to act when it was not.
+	WarpModelExplicit bool
+
+	// RollingShutterExplicit records that the caller asked for RollingShutter
+	// by name rather than receiving it as the default. It changes nothing about
+	// the correction -- only how loudly a clip that cannot be calibrated is
+	// reported: being unable to measure a readout ratio is a failure to do what
+	// was asked when the flag was passed deliberately, and merely the default
+	// declining to act when it was not. See readoutRatio.
+	RollingShutterExplicit bool
+
 	// RollingShutter enables rolling-shutter rectification (see
 	// stabilize.RSRectifier): the clip's readout ratio is calibrated from its
 	// own analysis and used both to de-bias the motion estimates and to
@@ -340,29 +362,7 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 		renderOpts.PerspectiveZoomMargin = 0.03 // small extra crop to cover perspective corner excursion
 	}
 	if rotationMode {
-		renderOpts.Rotation = true
-		switch {
-		case series.Options.WarpModel != stabilize.WarpModelRotation:
-			// A sidecar analyzed under a different model carries no rotations.
-			// loadOrAnalyze has already said so and named the fix, so don't
-			// repeat it here as a second, differently-worded warning.
-			renderOpts.Rotation = false
-		case series.Lens == nil || !series.Lens.Reliable():
-			// Nothing measured, so nothing to stabilize with. Say so rather than
-			// silently rendering through the 2D fallback under a model that
-			// promised something else -- the same call --rolling-shutter makes
-			// when a clip is too gentle to calibrate a readout from.
-			fmt.Fprintf(os.Stderr, "gocv-stabilizer: warning: %s: the rotation model could not calibrate a lens (the clip's motion does not distinguish one) -- falling back to the similarity model, which is the right answer for this clip; pass --lens/--lens-focal to force a lens, or --warp-model similarity to silence this\n", in.SourcePath)
-			renderOpts.Rotation = false
-		default:
-			// Diagnostic, not news: a successful calibration is the expected
-			// case, and printing one line per clip would be pure noise in a
-			// batch. The failures above still speak up unconditionally, since
-			// those change what the render actually did.
-			if g.Debug {
-				fmt.Fprintf(os.Stderr, "gocv-stabilizer: %s: %s\n", in.SourcePath, series.Lens)
-			}
-		}
+		renderOpts.Rotation = g.reportLens(g.warnWriter(), in.SourcePath, series)
 		if renderOpts.Rotation {
 			// The rotation path rectifies from the ratio directly rather than
 			// from prebuilt 2D rectifiers: its correction needs the per-frame
@@ -423,12 +423,68 @@ func (g *GoCVStabilizer) readoutRatio(series *stabilize.MotionSeries, sourcePath
 	}
 	cal := stabilize.EstimateReadoutRatio(series)
 	if !cal.Reliable() {
-		fmt.Fprintf(os.Stderr,
-			"gocv-stabilizer: warning: %s: no rolling shutter measurable (best fit %.3f, correlation %+.3f, median frame-to-frame motion change %.2f px) -- rendering without rolling-shutter correction; pass --rs-ratio to force one\n",
-			sourcePath, cal.Ratio, cal.Corr, cal.MedianAccel)
+		// Whether this is a warning depends on who asked. Passing
+		// --rolling-shutter deliberately and getting nothing is a failure to do
+		// what was asked, and says so. Now that the correction is on by
+		// default, the same event on a clip too gentle to measure a readout
+		// from is just the default correctly declining to act -- on most
+		// footage, every time -- so it stays a diagnostic.
+		if g.RollingShutterExplicit {
+			fmt.Fprintf(g.warnWriter(),
+				"gocv-stabilizer: warning: %s: no rolling shutter measurable (best fit %.3f, correlation %+.3f, median frame-to-frame motion change %.2f px) -- rendering without rolling-shutter correction; pass --rs-ratio to force one\n",
+				sourcePath, cal.Ratio, cal.Corr, cal.MedianAccel)
+		} else if g.Debug {
+			fmt.Fprintf(g.warnWriter(),
+				"gocv-stabilizer: %s: no rolling shutter measurable (best fit %.3f, correlation %+.3f, median frame-to-frame motion change %.2f px) -- rendering without rolling-shutter correction\n",
+				sourcePath, cal.Ratio, cal.Corr, cal.MedianAccel)
+		}
 		return 0, nil
 	}
 	return cal.Ratio, nil
+}
+
+// warnWriter is where this effect's warnings and diagnostics go.
+func (g *GoCVStabilizer) warnWriter() io.Writer {
+	if g.Warn != nil {
+		return g.Warn
+	}
+	return os.Stderr
+}
+
+// reportLens decides whether the rotation render path can engage, and says why
+// when it cannot. It returns true only when the series carries a lens worth
+// stabilizing with.
+//
+// Whether "no lens" is a WARNING depends on who asked for the rotation model.
+// Naming it explicitly and getting the 2D fallback is a failure to do what was
+// asked. Since it became the default, though, the same event on a clip whose
+// motion does not determine a lens is just the default correctly declining to
+// act -- which on gentle footage is every run, and a warning that amounts to
+// "this is fine" trains people to ignore warnings that are not.
+func (g *GoCVStabilizer) reportLens(w io.Writer, sourcePath string, series *stabilize.MotionSeries) bool {
+	switch {
+	case series.Options.WarpModel != stabilize.WarpModelRotation:
+		// A sidecar analyzed under a different model carries no rotations.
+		// loadOrAnalyze has already said so and named the fix, so don't repeat
+		// it here as a second, differently-worded warning.
+		return false
+	case series.Lens == nil || !series.Lens.Reliable():
+		msg := "gocv-stabilizer: %s: no lens measurable (the clip's motion does not distinguish one) -- stabilizing with the similarity model, which is the right answer for this clip\n"
+		if g.WarpModelExplicit {
+			msg = "gocv-stabilizer: warning: %s: --warp-model rotation could not calibrate a lens (the clip's motion does not distinguish one) -- falling back to the similarity model, which is the right answer for this clip; pass --lens/--lens-focal to force a lens\n"
+		} else if !g.Debug {
+			return false
+		}
+		fmt.Fprintf(w, msg, sourcePath)
+		return false
+	default:
+		// Diagnostic, not news: a successful calibration is the expected case,
+		// and printing one line per clip would be pure noise in a batch.
+		if g.Debug {
+			fmt.Fprintf(w, "gocv-stabilizer: %s: %s\n", sourcePath, series.Lens)
+		}
+		return true
+	}
 }
 
 // modelName renders a WarpModel for humans, spelling out the empty string that
@@ -468,7 +524,7 @@ func (g *GoCVStabilizer) loadOrAnalyze(ctx context.Context, sourcePath string, o
 			// what a cached sidecar from before the default became "rotation"
 			// would do, on a machine where everything appears to be up to date.
 			if series.Options.WarpModel != opts.WarpModel {
-				fmt.Fprintf(os.Stderr,
+				fmt.Fprintf(g.warnWriter(),
 					"gocv-stabilizer: warning: %s: sidecar %s was analyzed with --warp-model %s, but this run asked for %s -- rendering with %s, since the model is baked into the analysis; delete the sidecar to re-analyze\n",
 					sourcePath, g.SidecarPath, modelName(series.Options.WarpModel), modelName(opts.WarpModel), modelName(series.Options.WarpModel))
 			}

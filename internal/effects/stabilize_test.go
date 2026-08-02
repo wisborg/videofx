@@ -1,6 +1,7 @@
 package effects
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -429,48 +430,128 @@ func TestModelName(t *testing.T) {
 	}
 }
 
-// TestLensCalibrationIsDebugOnly pins the split between diagnostics and
-// warnings: a successful lens calibration is the expected case and must not
-// print (one line per clip is pure noise across a batch), while anything that
-// makes the render differ from what was asked for must print regardless.
-//
-// This is a documentation test over the source rather than a behavioural one --
-// exercising it for real would need a full analyze+render pass over a clip with
-// a calibratable lens, which is minutes of 4K decode per case. What it protects
-// against is the cheap mistake: someone adding a new unconditional Fprintf for
-// something that is merely informational.
-func TestLensCalibrationIsDebugOnly(t *testing.T) {
-	src, err := os.ReadFile("stabilize.go")
-	if err != nil {
-		t.Fatalf("reading stabilize.go: %v", err)
-	}
-	text := string(src)
 
-	// The calibration print must sit inside a g.Debug guard.
-	i := strings.Index(text, `"gocv-stabilizer: %s: %s\n", in.SourcePath, series.Lens`)
-	if i < 0 {
-		t.Fatal("could not find the lens-calibration print; update this test if it moved")
+// rotationSeries is a MotionSeries that looks like a rotation-model analysis,
+// with a lens whose reliability the caller chooses.
+func rotationSeries(reliableLens bool) *stabilize.MotionSeries {
+	s := &stabilize.MotionSeries{
+		Options:       stabilize.Options{WarpModel: stabilize.WarpModelRotation},
+		AnalysisWidth: 960, AnalysisHeight: 720,
+		SourceWidth: 3840, SourceHeight: 2880, FrameCount: 2,
 	}
-	if guard := strings.LastIndex(text[:i], "if g.Debug {"); guard < 0 || i-guard > 400 {
-		t.Error("the lens-calibration print is no longer guarded by g.Debug -- it would print on every clip")
+	if reliableLens {
+		s.Lens = &stabilize.LensCalibration{
+			Lens:  stabilize.Lens{Kind: stabilize.LensEquisolid, Focal: 538, CX: 480, CY: 360},
+			Error: 1.9, FlatError: 2.5, Pairs: 200,
+		}
 	}
+	return s
+}
 
-	// Warnings must NOT be gated. Each of these reports that the render is not
-	// what the flags asked for.
-	for _, warning := range []string{
-		"could not calibrate a lens",
-		"was analyzed with --warp-model",
-		"no rolling shutter measurable",
+// TestReportLens covers when the rotation model speaks up and when it keeps
+// quiet. The rule being pinned: a message is a WARNING only when the render
+// differs from what the caller asked for. Since the rotation model became the
+// default, a clip whose motion cannot determine a lens is the default correctly
+// declining to act -- which happens on every run over gentle footage, so
+// warning about it would train people to ignore warnings that do matter.
+func TestReportLens(t *testing.T) {
+	tests := []struct {
+		name         string
+		series       *stabilize.MotionSeries
+		explicit     bool
+		debug        bool
+		wantRotation bool
+		wantOutput   string // substring; "" means nothing must be printed
+	}{
+		{
+			name: "calibrated, default flags: engages silently",
+			series: rotationSeries(true), wantRotation: true,
+		},
+		{
+			name: "calibrated, --debug: reports the lens",
+			series: rotationSeries(true), debug: true, wantRotation: true,
+			wantOutput: "equisolid lens",
+		},
+		{
+			name: "no lens, model not named: silent, no warning",
+			series: rotationSeries(false),
+		},
+		{
+			name: "no lens, model not named, --debug: says so quietly",
+			series: rotationSeries(false), debug: true,
+			wantOutput: "no lens measurable",
+		},
+		{
+			name: "no lens, --warp-model rotation named: warns",
+			series: rotationSeries(false), explicit: true,
+			wantOutput: "warning:",
+		},
+		{
+			name: "sidecar analyzed under another model: silent (loadOrAnalyze already said so)",
+			series: &stabilize.MotionSeries{Options: stabilize.Options{WarpModel: stabilize.WarpModelSimilarity}},
+			explicit: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			g := &GoCVStabilizer{WarpModelExplicit: tc.explicit, Debug: tc.debug}
+			got := g.reportLens(&buf, "clip.mp4", tc.series)
+			if got != tc.wantRotation {
+				t.Errorf("reportLens = %v, want %v", got, tc.wantRotation)
+			}
+			out := buf.String()
+			switch {
+			case tc.wantOutput == "" && out != "":
+				t.Errorf("expected silence, got %q", out)
+			case tc.wantOutput != "" && !strings.Contains(out, tc.wantOutput):
+				t.Errorf("expected output containing %q, got %q", tc.wantOutput, out)
+			}
+			// A message that is not a warning must not look like one.
+			if tc.wantOutput != "" && tc.wantOutput != "warning:" && strings.Contains(out, "warning:") {
+				t.Errorf("diagnostic was emitted as a warning: %q", out)
+			}
+		})
+	}
+}
+
+// TestReadoutRatioReporting is the rolling-shutter counterpart, and pins the
+// same rule now that the rectification is on by default.
+func TestReadoutRatioReporting(t *testing.T) {
+	// A series with no measurable rolling shutter: no per-transition
+	// observables at all, so the calibration cannot be Reliable.
+	flat := &stabilize.MotionSeries{
+		Options:       stabilize.Options{},
+		AnalysisWidth: 960, AnalysisHeight: 720, FrameCount: 3,
+		Transitions: []stabilize.Transition{{Scale: 1, OK: true}, {Scale: 1, OK: true}},
+	}
+	for _, tc := range []struct {
+		name       string
+		explicit   bool
+		debug      bool
+		wantOutput string
+	}{
+		{name: "default, unmeasurable: silent"},
+		{name: "default, unmeasurable, --debug: says so quietly", debug: true, wantOutput: "no rolling shutter measurable"},
+		{name: "--rolling-shutter named, unmeasurable: warns", explicit: true, wantOutput: "warning:"},
 	} {
-		j := strings.Index(text, warning)
-		if j < 0 {
-			t.Errorf("warning %q not found; update this test if it was reworded", warning)
-			continue
-		}
-		// Look back a short way for a debug guard that would suppress it.
-		start := max(0, j-600)
-		if strings.Contains(text[start:j], "if g.Debug {") {
-			t.Errorf("warning %q appears to be gated behind --debug; warnings must always print", warning)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			g := &GoCVStabilizer{Warn: &buf, RollingShutter: true, RollingShutterExplicit: tc.explicit, Debug: tc.debug}
+			rho, err := g.readoutRatio(flat, "clip.mp4")
+			if err != nil {
+				t.Fatalf("readoutRatio: %v", err)
+			}
+			if rho != 0 {
+				t.Errorf("unmeasurable clip returned ratio %v, want 0", rho)
+			}
+			out := buf.String()
+			switch {
+			case tc.wantOutput == "" && out != "":
+				t.Errorf("expected silence, got %q", out)
+			case tc.wantOutput != "" && !strings.Contains(out, tc.wantOutput):
+				t.Errorf("expected output containing %q, got %q", tc.wantOutput, out)
+			}
+		})
 	}
 }

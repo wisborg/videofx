@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"videofx/internal/cliutil"
 	"videofx/internal/effects"
@@ -149,8 +150,8 @@ func NewRootCmd() *cobra.Command {
 		"gocv-stabilizer only, --warp-model rotation: force the lens projection model (perspective, equidistant, equisolid, stereographic) instead of measuring it from the clip. Requires --lens-focal. Use it on footage too gently-moving to calibrate itself, taking the values from a shakier clip shot on the same camera in the same mode")
 	root.Flags().Float64Var(&lensFocal, "lens-focal", 0,
 		"gocv-stabilizer only, --warp-model rotation: force the lens focal length in ANALYSIS-resolution pixels (the analysis width is 960 unless --analysis-width says otherwise), instead of measuring it. Requires --lens. Baked into a --sidecar's analysis, so change it and --sidecar together")
-	root.Flags().BoolVar(&rollingShutter, "rolling-shutter", false,
-		"gocv-stabilizer only: correct rolling-shutter skew. A rolling shutter scans the frame top to bottom over a few milliseconds, so a camera moving during that scan records each row from a slightly different position -- the picture shears and stretches by an amount that changes with the camera's velocity, which reads as wobble/jello. This measures the sensor's readout time from the clip's own motion and un-skews each frame, and also removes the fictitious roll a rolling shutter otherwise injects into the motion estimates (a 4-DOF fit cannot tell a per-row shear from camera roll, so it books it as one). Composes into the existing warp, so it costs no extra pass and only a fraction of a percent of extra crop. Warns and does nothing on a clip whose motion is too gentle to measure a readout from. Under --warp-model rotation the correction is done properly rather than approximated: a rolling shutter means each row saw a different camera ORIENTATION, which that model states directly instead of flattening into a shear of the picture, and the crop it needs is folded into the same per-frame containment test as everything else (measured cost on the test clip: none)")
+	root.Flags().BoolVar(&rollingShutter, "rolling-shutter", true,
+		"gocv-stabilizer only: correct rolling-shutter skew (ON by default; pass --rolling-shutter=false to turn it off). A rolling shutter scans the frame top to bottom over a few milliseconds, so a camera moving during that scan records each row from a slightly different position -- the picture shears and stretches by an amount that changes with the camera's velocity, which reads as wobble/jello. This measures the sensor's readout time from the clip's own motion and un-skews each frame, and also removes the fictitious roll a rolling shutter otherwise injects into the motion estimates (a 4-DOF fit cannot tell a per-row shear from camera roll, so it books it as one). Composes into the existing warp, so it costs no extra pass and only a fraction of a percent of extra crop. Warns and does nothing on a clip whose motion is too gentle to measure a readout from. Under --warp-model rotation the correction is done properly rather than approximated: a rolling shutter means each row saw a different camera ORIENTATION, which that model states directly instead of flattening into a shear of the picture, and the crop it needs is folded into the same per-frame containment test as everything else (measured cost on the test clip: none)")
 	root.Flags().Float64Var(&rsRatio, "rs-ratio", 0,
 		"gocv-stabilizer only, with --rolling-shutter: force the sensor readout time as a fraction of the frame period (e.g. 0.3 = the sensor takes 30% of a frame period to scan top to bottom), instead of measuring it from the clip. 0 (default) measures it. Applied at render time, so it can be swept against a cached --sidecar without re-analyzing; use it on clips too gently-moving to self-calibrate, taking the value from a shakier clip shot in the same camera mode (`vidiobench -mode=rs` prints it)")
 	root.Flags().Float64Var(&meshStrength, "mesh-strength", -1,
@@ -488,7 +489,7 @@ func checkAvailable(effect effects.Effect) error {
 // perf profile, a vidstab motion-analysis pass, gocv edge-handling, or
 // telemetry-sync inputs. In a chain this is called once per effect, so each
 // effect in the pipeline picks up the flags meant for it.
-func configureEffect(effect effects.Effect) error {
+func configureEffect(effect effects.Effect, flags *pflag.FlagSet) error {
 	if tunable, ok := effect.(effects.Tunable); ok {
 		tunable.SetPerfOptions(effects.PerfOptions{
 			Preset:        preset,
@@ -521,6 +522,8 @@ func configureEffect(effect effects.Effect) error {
 		gs.MeshGrid = meshGrid
 		gs.MeshStrength = meshStrength
 		gs.RollingShutter = rollingShutter
+		gs.RollingShutterExplicit = flags.Changed("rolling-shutter")
+		gs.WarpModelExplicit = flags.Changed("warp-model")
 		gs.RSRatio = rsRatio
 		gs.Debug = debugMode
 		lens, err := buildForcedLens(lensModel, lensFocal)
@@ -690,7 +693,7 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		if err := effect.ValidateStrength(strength); err != nil {
 			return err
 		}
-		if err := configureEffect(effect); err != nil {
+		if err := configureEffect(effect, cmd.Flags()); err != nil {
 			return err
 		}
 	}
