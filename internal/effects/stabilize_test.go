@@ -428,3 +428,49 @@ func TestModelName(t *testing.T) {
 		}
 	}
 }
+
+// TestLensCalibrationIsDebugOnly pins the split between diagnostics and
+// warnings: a successful lens calibration is the expected case and must not
+// print (one line per clip is pure noise across a batch), while anything that
+// makes the render differ from what was asked for must print regardless.
+//
+// This is a documentation test over the source rather than a behavioural one --
+// exercising it for real would need a full analyze+render pass over a clip with
+// a calibratable lens, which is minutes of 4K decode per case. What it protects
+// against is the cheap mistake: someone adding a new unconditional Fprintf for
+// something that is merely informational.
+func TestLensCalibrationIsDebugOnly(t *testing.T) {
+	src, err := os.ReadFile("stabilize.go")
+	if err != nil {
+		t.Fatalf("reading stabilize.go: %v", err)
+	}
+	text := string(src)
+
+	// The calibration print must sit inside a g.Debug guard.
+	i := strings.Index(text, `"gocv-stabilizer: %s: %s\n", in.SourcePath, series.Lens`)
+	if i < 0 {
+		t.Fatal("could not find the lens-calibration print; update this test if it moved")
+	}
+	if guard := strings.LastIndex(text[:i], "if g.Debug {"); guard < 0 || i-guard > 400 {
+		t.Error("the lens-calibration print is no longer guarded by g.Debug -- it would print on every clip")
+	}
+
+	// Warnings must NOT be gated. Each of these reports that the render is not
+	// what the flags asked for.
+	for _, warning := range []string{
+		"could not calibrate a lens",
+		"was analyzed with --warp-model",
+		"no rolling shutter measurable",
+	} {
+		j := strings.Index(text, warning)
+		if j < 0 {
+			t.Errorf("warning %q not found; update this test if it was reworded", warning)
+			continue
+		}
+		// Look back a short way for a debug guard that would suppress it.
+		start := max(0, j-600)
+		if strings.Contains(text[start:j], "if g.Debug {") {
+			t.Errorf("warning %q appears to be gated behind --debug; warnings must always print", warning)
+		}
+	}
+}

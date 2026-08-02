@@ -132,6 +132,13 @@ type GoCVStabilizer struct {
 	// single input file.
 	SidecarPath string
 
+	// Debug prints extra diagnostic output that a successful run otherwise
+	// keeps to itself -- currently the rotation model's lens calibration, which
+	// is worth seeing when investigating a clip and is noise on every other
+	// run. Warnings are NOT gated on it: those report that the render differs
+	// from what was asked for, which is always worth saying. Wired from --debug.
+	Debug bool
+
 	// Quality selects the HEVC encoder's constant-quality level for the
 	// render pass, on hevc_videotoolbox's native 1-100 scale (higher =
 	// better/larger) -- see vidio.EncoderConfig.Quality. It is deliberately
@@ -348,7 +355,13 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 			fmt.Fprintf(os.Stderr, "gocv-stabilizer: warning: %s: the rotation model could not calibrate a lens (the clip's motion does not distinguish one) -- falling back to the similarity model, which is the right answer for this clip; pass --lens/--lens-focal to force a lens, or --warp-model similarity to silence this\n", in.SourcePath)
 			renderOpts.Rotation = false
 		default:
-			fmt.Fprintf(os.Stderr, "gocv-stabilizer: %s: %s\n", in.SourcePath, series.Lens)
+			// Diagnostic, not news: a successful calibration is the expected
+			// case, and printing one line per clip would be pure noise in a
+			// batch. The failures above still speak up unconditionally, since
+			// those change what the render actually did.
+			if g.Debug {
+				fmt.Fprintf(os.Stderr, "gocv-stabilizer: %s: %s\n", in.SourcePath, series.Lens)
+			}
 		}
 		if renderOpts.Rotation {
 			// The rotation path rectifies from the ratio directly rather than

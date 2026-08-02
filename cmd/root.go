@@ -101,7 +101,7 @@ func NewRootCmd() *cobra.Command {
 	root.Flags().Float64Var(&trimEnd, "end", 0,
 		"only process up to this time (seconds) of each input; default 0 = to the end. See --start")
 	root.Flags().BoolVar(&debugMode, "debug", false,
-		"print extra diagnostic output -- currently the telemetry effect's underlying ffmpeg logs (banner, stream info), which are suppressed by default")
+		"print extra diagnostic output that a successful run otherwise keeps to itself: the telemetry and rotate effects' underlying ffmpeg logs (banner, stream info), and gocv-stabilizer's lens calibration under --warp-model rotation. Warnings are not affected -- those always print")
 	root.Flags().IntVar(&rotateDeg, "rotate", 0,
 		"rotate effect only (--effect rotate): rotate the video this many degrees CLOCKWISE for display -- 90, 180, or 270. Lossless: it sets the display-rotation flag via stream copy (no re-encode) and composes with any rotation the source already has. Required (and must be 90/180/270) when --effect includes rotate")
 
@@ -522,6 +522,7 @@ func configureEffect(effect effects.Effect) error {
 		gs.MeshStrength = meshStrength
 		gs.RollingShutter = rollingShutter
 		gs.RSRatio = rsRatio
+		gs.Debug = debugMode
 		lens, err := buildForcedLens(lensModel, lensFocal)
 		if err != nil {
 			return err
