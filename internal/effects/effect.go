@@ -24,15 +24,17 @@ type Input struct {
 	// parameter range.
 	Strength float64
 	// Log is where the effect's warnings and diagnostics go, already
-	// configured with the run's --log-level/--debug. Effects should narrow it
+	// configured with the run's --log-level/--debug and already carrying a
+	// "file" field naming the clip being processed. Effects should narrow it
 	// to their own name once, at the top of Apply:
 	//
 	//	log := in.Log.Named(t.Name())
 	//
-	// so the effect never writes its own "name: " prefix or "warning: " marker
-	// into a message. nil is fine and means logging.Default() -- the zero
-	// Input still logs somewhere sane, so tests that don't care can leave it
-	// unset and tests that do can set logging.New(&buf, ...).
+	// so the effect never writes its own "name: " prefix or severity marker
+	// into a message -- and, because the clip is already a field, never writes
+	// SourcePath into one either. nil is fine and means logging.Default(): the
+	// zero Input still logs somewhere sane, so tests that don't care can leave
+	// it unset and tests that do can set logging.New(&buf, ...).
 	Log *logging.Logger
 }
 

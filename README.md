@@ -582,12 +582,12 @@ end. Each file prints a `processing <file> ...` line when it starts and a
 counted result line the moment it finishes:
 
 ```
-videofx: processing clip1.mp4 ...
-videofx: processing clip2.mp4 ...
-videofx: [1/4] OK      clip1.mp4 -> clip1 - telemetry.mp4  (410ms)
-videofx: processing clip3.mp4 ...
-videofx: [2/4] OK      clip2.mp4 -> clip2 - telemetry.mp4  (410ms)
-videofx: error: [3/4] FAILED  clip3.mp4: <error>
+2026-08-02 14:23:01.123 INFO  videofx: processing file="clip1.mp4"
+2026-08-02 14:23:01.140 INFO  videofx: processing file="clip2.mp4"
+2026-08-02 14:23:01.550 INFO  videofx: [1/4] OK file="clip1.mp4" output="clip1 - telemetry.mp4" took=410ms
+2026-08-02 14:23:01.551 INFO  videofx: processing file="clip3.mp4"
+2026-08-02 14:23:01.562 INFO  videofx: [2/4] OK file="clip2.mp4" output="clip2 - telemetry.mp4" took=410ms
+2026-08-02 14:23:02.004 ERROR videofx: [3/4] FAILED: <error> file="clip3.mp4"
 ...
 ```
 
@@ -600,6 +600,26 @@ concurrent workers never interleave mid-sentence.
 
 All of it goes to **stderr** at `info` level, so `--log-level warn` silences
 the progress stream while still reporting anything that went wrong.
+
+### Log line format
+
+Every line is `<timestamp> <LEVEL> <component>: <message> <fields>`:
+
+- **timestamp** — local wall-clock time to the millisecond, fixed width.
+- **level** — `DEBUG`, `INFO`, `WARN`, or `ERROR`, padded so the message text
+  starts at the same column on every line whatever its severity.
+- **component** — `videofx` for the CLI itself, otherwise the effect that
+  emitted it (`gocv-stabilizer`, `telemetry`, …), so a chained run says which
+  step is talking.
+- **fields** — trailing `key=value` pairs carrying what the message is *about*
+  rather than what it says. `file` is on every per-clip line and names the
+  video **you** asked for, not whatever intermediate the chain is on at the
+  time; effects add their own (`fit`, `sidecar`, `output`, `took`). Values are
+  quoted when they contain spaces, which video paths routinely do.
+
+Because the filename is a field, messages don't repeat it in their prose —
+`grep 'file="clip - raw.mp4"'` gets every line about one clip out of a batch,
+across all severities and effects.
 
 ## Partial / mixed-shake footage
 

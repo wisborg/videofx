@@ -277,6 +277,13 @@ func processOne(ctx context.Context, job Job, cfg ProcessorConfig) Result {
 	current := source              // input to the next effect (trimmed clip, or the original)
 	currentIsIntermediate := false // is `current` a temp file we own?
 
+	// Every line an effect logs is about THIS clip, so the clip is a field on
+	// the logger rather than something each message has to name. It carries
+	// job.SourcePath -- the file the user asked for -- not `current`, which
+	// partway through a chain is a step%d.mp4 in a temp directory that tells
+	// the reader nothing about which of their videos is being discussed.
+	jobLog := cfg.Log.WithField("file", job.SourcePath)
+
 	for i, eff := range cfg.Effects {
 		last := i == len(cfg.Effects)-1
 
@@ -289,7 +296,7 @@ func processOne(ctx context.Context, job Job, cfg ProcessorConfig) Result {
 			SourcePath: current,
 			OutputPath: out,
 			Strength:   cfg.Strength,
-			Log:        cfg.Log,
+			Log:        jobLog,
 		}); applyErr != nil {
 			// Name the failing effect: in a chain "gocv-stabilizer: ..." is
 			// far more useful than a bare error. Best-effort remove this

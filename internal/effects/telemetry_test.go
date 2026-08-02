@@ -639,7 +639,7 @@ func TestTelemetry_Apply_PartialOverlapWarns(t *testing.T) {
 	err := tel.Apply(context.Background(), Input{
 		SourcePath: src,
 		OutputPath: filepath.Join(dir, "o.mp4"),
-		Log:        logging.New(&buf, logging.LevelInfo),
+		Log:        logging.New(&buf, logging.LevelInfo).WithField("file", "src.mp4"),
 	})
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -649,9 +649,16 @@ func TestTelemetry_Apply_PartialOverlapWarns(t *testing.T) {
 	if !strings.Contains(out, "only partially overlaps") {
 		t.Errorf("expected a partial-overlap warning, got: %q", out)
 	}
-	// The effect's name and the severity come from the logger now, so neither
-	// is spelled into the message -- assert they still reach the output.
-	if !strings.Contains(out, "telemetry: warning: ") {
-		t.Errorf("warning lost its component/severity prefix: %q", out)
+	// The component, the severity, and both files now come from the logger
+	// rather than from the message text -- assert they still reach the output,
+	// since a warning nobody can attribute to a clip is barely a warning.
+	if !strings.Contains(out, "WARN  telemetry: ") {
+		t.Errorf("warning lost its level/component columns: %q", out)
+	}
+	if !strings.Contains(out, "file=src.mp4") {
+		t.Errorf("warning does not name the clip it is about: %q", out)
+	}
+	if !strings.Contains(out, `fit="`+fitPath+`"`) {
+		t.Errorf("warning does not name the FIT file it is about: %q", out)
 	}
 }

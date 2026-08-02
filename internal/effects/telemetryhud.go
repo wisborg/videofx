@@ -110,7 +110,9 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		return fmt.Errorf("telemetry-hud: --fit is required (path to a Garmin FIT activity file)")
 	}
 
-	log := in.Log.Named(t.Name())
+	// Same rationale as Telemetry.Apply: the FIT file is a field, not
+	// something every message has to name.
+	log := in.Log.Named(t.Name()).WithField("fit", t.FitPath)
 
 	track, err := telemetry.Decode(t.FitPath)
 	if err != nil {
@@ -127,7 +129,7 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 			"copy of one -- that still has it)", in.SourcePath, t.FitPath)
 	}
 	if info.CreationTimeNaive {
-		log.Warnf("%s's creation_time has no timezone marker -- assuming UTC", in.SourcePath)
+		log.Warnf("creation_time has no timezone marker -- assuming UTC")
 	}
 	if info.FPS <= 0 || info.Width <= 0 || info.Height <= 0 {
 		return fmt.Errorf("telemetry-hud: %s reported unusable dimensions/fps (%dx%d @ %v)", in.SourcePath, info.Width, info.Height, info.FPS)
@@ -145,9 +147,9 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 			sync.Start.Format(time.RFC3339), sync.End.Format(time.RFC3339), t.FitPath,
 			sync.CoverageStart.Format(time.RFC3339), sync.CoverageEnd.Format(time.RFC3339))
 	case telemetry.PartialOverlap:
-		log.Warnf("clip window [%s, %s] only partially overlaps %s's coverage [%s, %s] -- "+
+		log.Warnf("clip window [%s, %s] only partially overlaps the FIT file's coverage [%s, %s] -- "+
 			"gauges show placeholders outside it",
-			sync.Start.Format(time.RFC3339), sync.End.Format(time.RFC3339), t.FitPath,
+			sync.Start.Format(time.RFC3339), sync.End.Format(time.RFC3339),
 			sync.CoverageStart.Format(time.RFC3339), sync.CoverageEnd.Format(time.RFC3339))
 	}
 

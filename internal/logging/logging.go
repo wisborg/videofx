@@ -9,8 +9,10 @@
 // nothing outside it imports log/slog, and even the severity levels are this
 // package's own type rather than slog.Level.
 //
-// Output is CLI prose, not slog's key=value records — see handler.go for why,
-// and for the exact line format.
+// Every line carries a timestamp, its severity, the component that emitted it,
+// the message, and whatever fields were attached with WithField — see
+// handler.go for the exact column layout and why slog's own handlers are not
+// used to produce it.
 package logging
 
 import (
@@ -19,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sort"
 	"sync"
 )
 
@@ -175,10 +178,45 @@ func (l *Logger) Named(name string) *Logger {
 	return &Logger{sl: r.sl.With(slog.String(nameKey, name)), name: name}
 }
 
-// With returns a copy of l carrying additional structured key/value context,
-// rendered as trailing key=value pairs. Most videofx messages are prose with
-// their values written into the sentence (the wording is often the actionable
-// part), so this is for genuinely incidental context rather than the norm.
+// WithField returns a copy of l that appends key=value to every message it
+// logs, in the style of logrus:
+//
+//	log := in.Log.WithField("file", in.SourcePath)
+//	log.Warnf("creation_time has no timezone marker -- assuming UTC")
+//	// -> ... WARN  telemetry: creation_time has no timezone marker ... file="clip.mp4"
+//
+// Use it for the thing a message is ABOUT rather than for what it says: the
+// clip being processed, the sidecar being read. Once a value is a field it
+// should not also be written into the sentence -- the whole benefit is that
+// every line carries it without every message having to mention it, and a
+// filename printed twice per line is worse than one printed once.
+//
+// Fields accumulate in the order they are added, and a derived logger never
+// affects its parent or its siblings.
+func (l *Logger) WithField(key string, value any) *Logger {
+	return l.With(key, value)
+}
+
+// WithFields is WithField for several at once. The map is rendered in sorted
+// key order, since Go map iteration order is random and log lines that shuffle
+// their own fields between runs cannot be diffed.
+func (l *Logger) WithFields(fields map[string]any) *Logger {
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	args := make([]any, 0, 2*len(keys))
+	for _, k := range keys {
+		args = append(args, k, fields[k])
+	}
+	return l.With(args...)
+}
+
+// With is the slog-native form of WithField, taking alternating key/value
+// arguments. WithField/WithFields are the ones to reach for; this exists for
+// callers that already have their context in that shape.
 func (l *Logger) With(args ...any) *Logger {
 	r := l.resolve()
 	return &Logger{sl: r.sl.With(args...), name: r.name}

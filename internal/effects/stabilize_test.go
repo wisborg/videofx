@@ -432,15 +432,20 @@ func TestModelName(t *testing.T) {
 }
 
 
+// warnTag is how a warning identifies itself in the rendered line: the level
+// column, not anything in the message text.
+const warnTag = "WARN "
+
 // captureLog returns a logger writing into buf, at the level --debug would
-// have selected. The level IS the flag now, so these tests exercise the same
+// have selected and carrying the "file" field the processor attaches to every
+// per-clip logger. The level IS the flag now, so these tests exercise the same
 // switch a real run does.
 func captureLog(buf *bytes.Buffer, debug bool) *logging.Logger {
 	level := logging.LevelInfo
 	if debug {
 		level = logging.LevelDebug
 	}
-	return logging.New(buf, level).Named("gocv-stabilizer")
+	return logging.New(buf, level).Named("gocv-stabilizer").WithField("file", "clip.mp4")
 }
 
 // rotationSeries is a MotionSeries that looks like a rotation-model analysis,
@@ -496,7 +501,7 @@ func TestReportLens(t *testing.T) {
 		{
 			name: "no lens, --warp-model rotation named: warns",
 			series: rotationSeries(false), explicit: true,
-			wantOutput: "warning:",
+			wantOutput: warnTag,
 		},
 		{
 			name: "sidecar analyzed under another model: silent (loadOrAnalyze already said so)",
@@ -508,7 +513,7 @@ func TestReportLens(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			g := &GoCVStabilizer{WarpModelExplicit: tc.explicit}
-			got := g.reportLens(captureLog(&buf, tc.debug), "clip.mp4", tc.series)
+			got := g.reportLens(captureLog(&buf, tc.debug), tc.series)
 			if got != tc.wantRotation {
 				t.Errorf("reportLens = %v, want %v", got, tc.wantRotation)
 			}
@@ -519,9 +524,15 @@ func TestReportLens(t *testing.T) {
 			case tc.wantOutput != "" && !strings.Contains(out, tc.wantOutput):
 				t.Errorf("expected output containing %q, got %q", tc.wantOutput, out)
 			}
-			// A message that is not a warning must not look like one.
-			if tc.wantOutput != "" && tc.wantOutput != "warning:" && strings.Contains(out, "warning:") {
+			// A message that is not a warning must not be logged as one --
+			// the level column is the whole distinction between these two
+			// forms of the same message.
+			if tc.wantOutput != "" && tc.wantOutput != warnTag && strings.Contains(out, warnTag) {
 				t.Errorf("diagnostic was emitted as a warning: %q", out)
+			}
+			// Whichever fired, it must identify the clip it is about.
+			if out != "" && !strings.Contains(out, `file=clip.mp4`) {
+				t.Errorf("message does not carry the file field: %q", out)
 			}
 		})
 	}
@@ -545,12 +556,12 @@ func TestReadoutRatioReporting(t *testing.T) {
 	}{
 		{name: "default, unmeasurable: silent"},
 		{name: "default, unmeasurable, --debug: says so quietly", debug: true, wantOutput: "no rolling shutter measurable"},
-		{name: "--rolling-shutter named, unmeasurable: warns", explicit: true, wantOutput: "warning:"},
+		{name: "--rolling-shutter named, unmeasurable: warns", explicit: true, wantOutput: warnTag},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			g := &GoCVStabilizer{RollingShutter: true, RollingShutterExplicit: tc.explicit}
-			rho, err := g.readoutRatio(captureLog(&buf, tc.debug), flat, "clip.mp4")
+			rho, err := g.readoutRatio(captureLog(&buf, tc.debug), flat)
 			if err != nil {
 				t.Fatalf("readoutRatio: %v", err)
 			}

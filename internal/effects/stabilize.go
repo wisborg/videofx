@@ -315,7 +315,7 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 	var rho float64
 	if g.RollingShutter {
 		var err error
-		rho, err = g.readoutRatio(log, series, in.SourcePath)
+		rho, err = g.readoutRatio(log, series)
 		if err != nil {
 			return fmt.Errorf("gocv-stabilizer: %w", err)
 		}
@@ -355,7 +355,7 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 		renderOpts.PerspectiveZoomMargin = 0.03 // small extra crop to cover perspective corner excursion
 	}
 	if rotationMode {
-		renderOpts.Rotation = g.reportLens(log, in.SourcePath, series)
+		renderOpts.Rotation = g.reportLens(log, series)
 		if renderOpts.Rotation {
 			// The rotation path rectifies from the ratio directly rather than
 			// from prebuilt 2D rectifiers: its correction needs the per-frame
@@ -407,7 +407,7 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 // uncalibratable is usually just a clip that never accelerated hard enough to
 // reveal a shutter (a locked-off or gently-moving shot), and says nothing about
 // the camera -- see stabilize.RSCalibration.Reliable.
-func (g *GoCVStabilizer) readoutRatio(log *logging.Logger, series *stabilize.MotionSeries, sourcePath string) (float64, error) {
+func (g *GoCVStabilizer) readoutRatio(log *logging.Logger, series *stabilize.MotionSeries) (float64, error) {
 	if g.RSRatio != 0 {
 		if g.RSRatio < 0 || g.RSRatio > 1 {
 			return 0, fmt.Errorf("--rs-ratio %.3f is out of range; it is a fraction of the frame period, so it must be between 0 and 1", g.RSRatio)
@@ -423,11 +423,11 @@ func (g *GoCVStabilizer) readoutRatio(log *logging.Logger, series *stabilize.Mot
 		// from is just the default correctly declining to act -- on most
 		// footage, every time -- so it stays a diagnostic.
 		if g.RollingShutterExplicit {
-			log.Warnf("%s: no rolling shutter measurable (best fit %.3f, correlation %+.3f, median frame-to-frame motion change %.2f px) -- rendering without rolling-shutter correction; pass --rs-ratio to force one",
-				sourcePath, cal.Ratio, cal.Corr, cal.MedianAccel)
+			log.Warnf("no rolling shutter measurable (best fit %.3f, correlation %+.3f, median frame-to-frame motion change %.2f px) -- rendering without rolling-shutter correction; pass --rs-ratio to force one",
+				cal.Ratio, cal.Corr, cal.MedianAccel)
 		} else {
-			log.Debugf("%s: no rolling shutter measurable (best fit %.3f, correlation %+.3f, median frame-to-frame motion change %.2f px) -- rendering without rolling-shutter correction",
-				sourcePath, cal.Ratio, cal.Corr, cal.MedianAccel)
+			log.Debugf("no rolling shutter measurable (best fit %.3f, correlation %+.3f, median frame-to-frame motion change %.2f px) -- rendering without rolling-shutter correction",
+				cal.Ratio, cal.Corr, cal.MedianAccel)
 		}
 		return 0, nil
 	}
@@ -444,7 +444,7 @@ func (g *GoCVStabilizer) readoutRatio(log *logging.Logger, series *stabilize.Mot
 // motion does not determine a lens is just the default correctly declining to
 // act -- which on gentle footage is every run, and a warning that amounts to
 // "this is fine" trains people to ignore warnings that are not.
-func (g *GoCVStabilizer) reportLens(log *logging.Logger, sourcePath string, series *stabilize.MotionSeries) bool {
+func (g *GoCVStabilizer) reportLens(log *logging.Logger, series *stabilize.MotionSeries) bool {
 	switch {
 	case series.Options.WarpModel != stabilize.WarpModelRotation:
 		// A sidecar analyzed under a different model carries no rotations.
@@ -453,15 +453,15 @@ func (g *GoCVStabilizer) reportLens(log *logging.Logger, sourcePath string, seri
 		return false
 	case series.Lens == nil || !series.Lens.Reliable():
 		if g.WarpModelExplicit {
-			log.Warnf("%s: --warp-model rotation could not calibrate a lens (the clip's motion does not distinguish one) -- falling back to the similarity model, which is the right answer for this clip; pass --lens/--lens-focal to force a lens", sourcePath)
+			log.Warnf("--warp-model rotation could not calibrate a lens (the clip's motion does not distinguish one) -- falling back to the similarity model, which is the right answer for this clip; pass --lens/--lens-focal to force a lens")
 		} else {
-			log.Debugf("%s: no lens measurable (the clip's motion does not distinguish one) -- stabilizing with the similarity model, which is the right answer for this clip", sourcePath)
+			log.Debugf("no lens measurable (the clip's motion does not distinguish one) -- stabilizing with the similarity model, which is the right answer for this clip")
 		}
 		return false
 	default:
 		// Diagnostic, not news: a successful calibration is the expected case,
 		// and printing one line per clip would be pure noise in a batch.
-		log.Debugf("%s: %s", sourcePath, series.Lens)
+		log.Debugf("%s", series.Lens)
 		return true
 	}
 }
@@ -503,8 +503,9 @@ func (g *GoCVStabilizer) loadOrAnalyze(ctx context.Context, log *logging.Logger,
 			// what a cached sidecar from before the default became "rotation"
 			// would do, on a machine where everything appears to be up to date.
 			if series.Options.WarpModel != opts.WarpModel {
-				log.Warnf("%s: sidecar %s was analyzed with --warp-model %s, but this run asked for %s -- rendering with %s, since the model is baked into the analysis; delete the sidecar to re-analyze",
-					sourcePath, g.SidecarPath, modelName(series.Options.WarpModel), modelName(opts.WarpModel), modelName(series.Options.WarpModel))
+				log.WithField("sidecar", g.SidecarPath).Warnf(
+					"sidecar was analyzed with --warp-model %s, but this run asked for %s -- rendering with %s, since the model is baked into the analysis; delete the sidecar to re-analyze",
+					modelName(series.Options.WarpModel), modelName(opts.WarpModel), modelName(series.Options.WarpModel))
 			}
 			return series, nil
 		}

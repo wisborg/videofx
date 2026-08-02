@@ -7,29 +7,37 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 )
 
 // nameKey is the attribute Named uses to carry a component name through slog.
-// It is stripped from the rendered attributes and turned into the line's
-// prefix instead.
+// It is stripped from the rendered fields and turned into the line's prefix
+// instead.
 const nameKey = "logger.name"
 
-// cliHandler renders slog records as the lines videofx has always printed:
+// timeLayout is the timestamp column: local wall-clock time to the
+// millisecond. No timezone offset is printed -- these lines are read on the
+// machine that produced them, alongside a run whose duration is the thing
+// being judged, and a fixed-width column that lines up down the page is worth
+// more there than an offset that never varies within a run.
+const timeLayout = "2006-01-02 15:04:05.000"
+
+// cliHandler renders slog records as fixed-width columns:
 //
-//	gocv-stabilizer: warning: clip.mp4: no rolling shutter measurable (best fit 0.312)
-//	gocv-stabilizer: clip.mp4: focal 1180.4 px, principal (960.0, 540.0)
-//	videofx: processing clip.mp4 ...
+//	2026-08-02 14:23:01.123 INFO  videofx: processing file="clip.mp4"
+//	2026-08-02 14:23:04.881 DEBUG gocv-stabilizer: equisolid lens, focal 538.0 px file="clip.mp4"
+//	2026-08-02 14:23:09.204 WARN  gocv-stabilizer: no lens measurable file="clip.mp4"
+//	2026-08-02 14:24:51.077 ERROR videofx: [1/2] FAILED: ... file="clip2.mp4"
 //
-// That is, "<name>: " when the logger is Named, then "warning: " or "error: "
-// for those two severities and NOTHING for info/debug, then the message, then
-// any structured attributes as trailing key=value pairs.
+// That is: timestamp, then a 5-character level, then "<name>: " when the
+// logger is Named, then the message, then any fields as trailing key=value
+// pairs (quoted when the value would otherwise be ambiguous -- video paths
+// contain spaces routinely).
 //
-// Debug and info deliberately carry no severity tag. This is not cosmetic: a
-// diagnostic that reads like a warning is a warning as far as anyone scanning
-// the output is concerned, and several messages exist in both forms depending
-// on whether the user asked for the thing that could not be done (warning) or
-// merely got the default declining to act (diagnostic). The tag is the whole
-// distinction.
+// The timestamp and level columns are fixed width so the eye can scan straight
+// down them and the message always starts at the same offset regardless of
+// severity. Every line states its level explicitly, so nothing about how a
+// message is worded has to imply how serious it is.
 //
 // slog's own TextHandler/JSONHandler are not used because their output
 // (time=... level=WARN msg="...") is a record format for log aggregation, not
@@ -42,7 +50,12 @@ type cliHandler struct {
 	mu    *sync.Mutex // shared by every handler derived from this one
 	name  string
 	attrs []slog.Attr
-	group string // set by WithGroup; prefixes subsequent attribute keys
+	group string // set by WithGroup; prefixes subsequent field keys
+
+	// now, when set, replaces the record's own timestamp. Only tests set it,
+	// so they can assert on a whole rendered line rather than on all of it
+	// except the part that changes every run.
+	now func() time.Time
 }
 
 func newCLIHandler(w io.Writer, min slog.Level) *cliHandler {
@@ -54,16 +67,19 @@ func (h *cliHandler) Enabled(_ context.Context, level slog.Level) bool {
 }
 
 func (h *cliHandler) Handle(_ context.Context, r slog.Record) error {
+	ts := r.Time
+	if h.now != nil {
+		ts = h.now()
+	}
+
 	var b strings.Builder
+	b.WriteString(ts.Format(timeLayout))
+	b.WriteByte(' ')
+	b.WriteString(levelTag(r.Level))
+	b.WriteByte(' ')
 	if h.name != "" {
 		b.WriteString(h.name)
 		b.WriteString(": ")
-	}
-	switch {
-	case r.Level >= slog.LevelError:
-		b.WriteString("error: ")
-	case r.Level >= slog.LevelWarn:
-		b.WriteString("warning: ")
 	}
 	b.WriteString(r.Message)
 
@@ -85,8 +101,23 @@ func (h *cliHandler) Handle(_ context.Context, r slog.Record) error {
 	return err
 }
 
-// appendAttr writes one attribute as " key=value", skipping the empty Attr and
-// the internal name key (which became the line's prefix instead).
+// levelTag renders a level as a fixed-width column. The padding is what keeps
+// the message text aligned across severities.
+func levelTag(l slog.Level) string {
+	switch {
+	case l >= slog.LevelError:
+		return "ERROR"
+	case l >= slog.LevelWarn:
+		return "WARN "
+	case l >= slog.LevelInfo:
+		return "INFO "
+	default:
+		return "DEBUG"
+	}
+}
+
+// appendAttr writes one field as " key=value", skipping the empty Attr and the
+// internal name key (which became the line's prefix instead).
 func appendAttr(b *strings.Builder, group string, a slog.Attr) {
 	a.Value = a.Value.Resolve()
 	if a.Equal(slog.Attr{}) || a.Key == nameKey {
@@ -98,7 +129,23 @@ func appendAttr(b *strings.Builder, group string, a slog.Attr) {
 		}
 		return
 	}
-	fmt.Fprintf(b, " %s=%v", joinGroup(group, a.Key), a.Value.Any())
+	val := fmt.Sprint(a.Value.Any())
+	if needsQuote(val) {
+		fmt.Fprintf(b, " %s=%q", joinGroup(group, a.Key), val)
+		return
+	}
+	fmt.Fprintf(b, " %s=%s", joinGroup(group, a.Key), val)
+}
+
+// needsQuote reports whether a field value would be ambiguous unquoted. Video
+// paths routinely contain spaces ("2026-07-05 063256 Run.fit"), which is the
+// case this exists for; the empty string is quoted so a missing value reads as
+// "" rather than as nothing at all.
+func needsQuote(s string) bool {
+	if s == "" {
+		return true
+	}
+	return strings.ContainsAny(s, " \t\"=")
 }
 
 func joinGroup(group, key string) string {
@@ -114,9 +161,9 @@ func (h *cliHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	}
 	c := h.clone()
 	for _, a := range attrs {
-		// The component name is a prefix, not an attribute; Named passes it
-		// through WithAttrs only because that is slog's only channel for
-		// handler-level context.
+		// The component name is a prefix, not a field; Named passes it through
+		// WithAttrs only because that is slog's only channel for handler-level
+		// context.
 		if a.Key == nameKey {
 			c.name = a.Value.String()
 			continue
@@ -138,7 +185,7 @@ func (h *cliHandler) WithGroup(name string) slog.Handler {
 func (h *cliHandler) clone() *cliHandler {
 	c := *h
 	// Copy rather than share the backing array: two loggers derived from the
-	// same parent must not append into each other's attributes.
+	// same parent must not append into each other's fields.
 	c.attrs = append([]slog.Attr(nil), h.attrs...)
 	return &c
 }

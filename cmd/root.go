@@ -761,16 +761,19 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	total := len(jobs)
 	completed := 0
 	cfg.OnStart = func(job video.Job) {
-		log.Infof("processing %s ...", job.SourcePath)
+		log.WithField("file", job.SourcePath).Infof("processing")
 	}
 	cfg.OnResult = func(res video.Result) {
 		completed++
+		jobLog := log.WithField("file", res.SourcePath)
 		if res.Err != nil {
-			log.Errorf("[%d/%d] FAILED  %s: %v", completed, total, res.SourcePath, res.Err)
+			jobLog.Errorf("[%d/%d] FAILED: %v", completed, total, res.Err)
 			return
 		}
-		log.Infof("[%d/%d] OK      %s -> %s  (%s)",
-			completed, total, res.SourcePath, res.OutputPath, formatJobDuration(res.Duration))
+		jobLog.WithFields(map[string]any{
+			"output": res.OutputPath,
+			"took":   formatJobDuration(res.Duration),
+		}).Infof("[%d/%d] OK", completed, total)
 	}
 
 	results := video.Run(cmd.Context(), jobs, cfg)
