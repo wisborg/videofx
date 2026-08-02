@@ -88,7 +88,8 @@ Flags:
 - `--output-dir` — write results here instead of alongside each input.
 - `--suffix` — override the filename suffix appended before the extension. By default each effect supplies its own (`gocv-stabilizer` → `gocv-stabilized`, `warp-stabilizer` → `stabilized`, `telemetry` → `telemetry`), so `clip.mp4` becomes e.g. `clip - gocv-stabilized.mp4`; `--suffix stable` makes it `clip - stable.mp4` instead. The ` - ` separator and the collision counter (`clip - stable - 1.mp4`, …) are added automatically, so give just the word. Applies to every input in the batch, and to any sidecar an effect derives from the output name (e.g. `telemetry`'s `.gpx`). Must not contain a path separator (the output is always a sibling of the input, never redirected elsewhere — use `--output-dir` to change the directory).
 - `--concurrency` — number of videos to process in parallel. Default `1`. When it is greater than `1` and more than one file is given, the batch is dispatched **largest-first** (see [Batch ordering](#batch-ordering) below) so the overall run finishes as quickly as possible.
-- `--debug` — print extra diagnostic output that a successful run otherwise keeps to itself. By default the `telemetry` and `rotate` effects' underlying ffmpeg calls run at ffmpeg's `error` log level, so a successful run is silent (no banner/stream-info dump) and only real errors surface; `--debug` restores ffmpeg's full output. It also makes `gocv-stabilizer` report the lens it calibrated under `--warp-model rotation` (which model, focal length, field of view, and how well it fitted) — useful when investigating a clip, noise on every other run, and the value to copy into `--lens`/`--lens-focal` for a clip too gentle to calibrate itself. **Warnings are not affected and always print**: anything that makes the render differ from what the flags asked for says so regardless.
+- `--debug` — print extra diagnostic output that a successful run otherwise keeps to itself. By default the `telemetry` and `rotate` effects' underlying ffmpeg calls run at ffmpeg's `error` log level, so a successful run is silent (no banner/stream-info dump) and only real errors surface; `--debug` restores ffmpeg's full output. It also makes `gocv-stabilizer` report the lens it calibrated under `--warp-model rotation` (which model, focal length, field of view, and how well it fitted) — useful when investigating a clip, noise on every other run, and the value to copy into `--lens`/`--lens-focal` for a clip too gentle to calibrate itself. **Warnings are not affected and always print**: anything that makes the render differ from what the flags asked for says so regardless. Shorthand for `--log-level debug`, and it wins if both are given.
+- `--log-level` — lowest severity to print: `debug` (everything, same as `--debug`), `info` (**default** — per-file progress plus warnings), `warn` (warnings only: no `processing …` or `[1/3] OK` lines), or `error` (failures only). All output goes to **stderr**, so `--log-level warn` is the way to keep a scripted batch quiet without losing the messages that matter.
 - `--start` / `--end` — process only the `[--start, --end)` span (seconds) of each input; defaults `0`/`0` = the whole video (`--end 0` means "to the end"). The clip is trimmed to that span once, up front, as a **lossless stream copy**, and the effects run on it. `creation_time` is shifted by `--start` so telemetry still syncs. Because a stream copy can't begin mid-GOP, the **start snaps to the nearest keyframe** (the cut may land up to one GOP early); the end is exact. Applies per file in a batch (each clamped to its own duration).
 - `--rotate` — **rotate effect only**, and **required** when `--effect` includes `rotate` (must be `90`, `180`, or `270`). Rotates the video's display orientation this many degrees **clockwise**, losslessly (stream copy + display-rotation flag, no re-encode), composing with any rotation the source already has. Passing `--rotate` without `--effect rotate` is an error. See [Rotate](#rotate) below.
 - `--preset` — encoder speed/quality preset (`ultrafast`…`veryslow`). **warp-stabilizer only** — see Performance below; `gocv-stabilizer`'s encoder is currently hardcoded (see Design) and ignores this. Default `veryfast`.
@@ -581,12 +582,12 @@ end. Each file prints a `processing <file> ...` line when it starts and a
 counted result line the moment it finishes:
 
 ```
-processing clip1.mp4 ...
-processing clip2.mp4 ...
-[1/4] OK      clip1.mp4 -> clip1 - telemetry.mp4  (410ms)
-processing clip3.mp4 ...
-[2/4] OK      clip2.mp4 -> clip2 - telemetry.mp4  (410ms)
-[3/4] FAILED  clip3.mp4: <error>
+videofx: processing clip1.mp4 ...
+videofx: processing clip2.mp4 ...
+videofx: [1/4] OK      clip1.mp4 -> clip1 - telemetry.mp4  (410ms)
+videofx: processing clip3.mp4 ...
+videofx: [2/4] OK      clip2.mp4 -> clip2 - telemetry.mp4  (410ms)
+videofx: error: [3/4] FAILED  clip3.mp4: <error>
 ...
 ```
 
@@ -594,9 +595,11 @@ The `[k/N]` counter climbs as files complete, and each success shows how long
 it took — useful for spotting a slow clip in a large batch. At
 `--concurrency` > 1 several files are in flight at once, so lines appear in
 **start/finish order, not command-line order** (the example above shows two
-starting together under `--concurrency 2`). `OK` lines go to stdout and
-`processing`/`FAILED` lines to stderr, so redirecting stdout keeps a clean
-result log while the live status still shows on the terminal.
+starting together under `--concurrency 2`); each line is written whole, so
+concurrent workers never interleave mid-sentence.
+
+All of it goes to **stderr** at `info` level, so `--log-level warn` silences
+the progress stream while still reporting anything that went wrong.
 
 ## Partial / mixed-shake footage
 

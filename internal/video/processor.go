@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"videofx/internal/effects"
+	"videofx/internal/logging"
 	"videofx/internal/naming"
 	"videofx/internal/vidio"
 )
@@ -66,6 +67,11 @@ type ProcessorConfig struct {
 	// progress while executing.
 	OnStart  func(job Job)
 	OnResult func(res Result)
+
+	// Log is handed to every effect via effects.Input.Log, so the whole batch
+	// logs through one configured logger rather than each effect picking its
+	// own sink. nil means logging.Default().
+	Log *logging.Logger
 }
 
 // Run processes every job, applying cfg.Effects (a left-to-right pipeline)
@@ -283,6 +289,7 @@ func processOne(ctx context.Context, job Job, cfg ProcessorConfig) Result {
 			SourcePath: current,
 			OutputPath: out,
 			Strength:   cfg.Strength,
+			Log:        cfg.Log,
 		}); applyErr != nil {
 			// Name the failing effect: in a chain "gocv-stabilizer: ..." is
 			// far more useful than a bare error. Best-effort remove this

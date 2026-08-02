@@ -1,8 +1,10 @@
 package effects
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"videofx/internal/logging"
 	"videofx/internal/telemetry"
 )
 
@@ -583,7 +586,7 @@ func TestTelemetry_Apply_SRTSidecar(t *testing.T) {
 
 // TestTelemetry_Apply_QuietByDefault pins that the mux runs at ffmpeg's
 // "error" log level by default (so a successful run is silent), and that
-// --debug (Debug=true) removes that prefix to restore ffmpeg's full output.
+// logging at debug level removes that prefix to restore ffmpeg's full output.
 func TestTelemetry_Apply_QuietByDefault(t *testing.T) {
 	requireFFmpeg(t)
 	fitPath := realFITPath(t)
@@ -601,11 +604,54 @@ func TestTelemetry_Apply_QuietByDefault(t *testing.T) {
 	}
 
 	fr2 := &fakeRunner{}
-	tel2 := &Telemetry{Runner: fr2, FitPath: fitPath, Debug: true}
-	if err := tel2.Apply(context.Background(), Input{SourcePath: src, OutputPath: filepath.Join(dir, "o2.mp4")}); err != nil {
+	tel2 := &Telemetry{Runner: fr2, FitPath: fitPath}
+	debugIn := Input{
+		SourcePath: src,
+		OutputPath: filepath.Join(dir, "o2.mp4"),
+		Log:        logging.New(io.Discard, logging.LevelDebug),
+	}
+	if err := tel2.Apply(context.Background(), debugIn); err != nil {
 		t.Fatalf("Apply(debug): %v", err)
 	}
 	if a := fr2.calls[0].args; a[0] == "-hide_banner" {
 		t.Errorf("--debug run must not prefix quiet flags, got head: %v", a[:min(4, len(a))])
+	}
+}
+
+// TestTelemetry_Apply_PartialOverlapWarns pins that a clip running off the end
+// of the FIT file's coverage says so. Until Input carried a logger this effect
+// wrote to os.Stderr directly and there was nothing to assert against, so the
+// message could have rotted silently -- when it fires is real logic, since a
+// run that quietly emits a half-empty sidecar looks exactly like a wrong
+// --offset that nobody caught.
+func TestTelemetry_Apply_PartialOverlapWarns(t *testing.T) {
+	requireFFmpeg(t)
+	fitPath := realFITPath(t)
+	dir := t.TempDir()
+
+	// The real FIT sample's coverage ends at 2026-07-05T01:06:19Z (see
+	// realFITPath); a 2-second clip starting one second before that runs off
+	// the end of it.
+	src := generateSyntheticSource(t, dir, "src.mp4", "2026-07-05T01:06:18Z")
+
+	var buf bytes.Buffer
+	tel := &Telemetry{Runner: &fakeRunner{}, FitPath: fitPath}
+	err := tel.Apply(context.Background(), Input{
+		SourcePath: src,
+		OutputPath: filepath.Join(dir, "o.mp4"),
+		Log:        logging.New(&buf, logging.LevelInfo),
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "only partially overlaps") {
+		t.Errorf("expected a partial-overlap warning, got: %q", out)
+	}
+	// The effect's name and the severity come from the logger now, so neither
+	// is spelled into the message -- assert they still reach the output.
+	if !strings.Contains(out, "telemetry: warning: ") {
+		t.Errorf("warning lost its component/severity prefix: %q", out)
 	}
 }

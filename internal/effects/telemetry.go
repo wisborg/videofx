@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"videofx/internal/logging"
 	"videofx/internal/runner"
 	"videofx/internal/telemetry"
 	"videofx/internal/vidio"
@@ -109,12 +110,6 @@ type Telemetry struct {
 	// by default, matching telemetry.FieldOptions.Stryd's own documented
 	// default and rationale.
 	IncludeStryd bool
-
-	// Debug shows the underlying ffmpeg mux's full output (banner, input/
-	// output stream info). Off by default -- the mux is run at ffmpeg's
-	// "error" log level so a successful run is silent and only real errors
-	// reach the terminal. Wired from --debug.
-	Debug bool
 }
 
 func (t *Telemetry) Name() string         { return "telemetry" }
@@ -137,6 +132,8 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 		return fmt.Errorf("telemetry: --fit is required (path to a Garmin FIT activity file)")
 	}
 
+	log := in.Log.Named(t.Name())
+
 	track, err := telemetry.Decode(t.FitPath)
 	if err != nil {
 		return fmt.Errorf("telemetry: %w", err)
@@ -154,7 +151,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 			in.SourcePath, t.FitPath)
 	}
 	if info.CreationTimeNaive {
-		fmt.Fprintf(os.Stderr, "telemetry: warning: %s's creation_time has no timezone marker -- assuming UTC\n", in.SourcePath)
+		log.Warnf("%s's creation_time has no timezone marker -- assuming UTC", in.SourcePath)
 	}
 
 	offset := time.Duration(t.OffsetSeconds * float64(time.Second))
@@ -187,8 +184,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 			sync.Start.Format(time.RFC3339), sync.End.Format(time.RFC3339), t.FitPath,
 			sync.CoverageStart.Format(time.RFC3339), sync.CoverageEnd.Format(time.RFC3339))
 	case telemetry.PartialOverlap:
-		fmt.Fprintf(os.Stderr,
-			"telemetry: warning: clip window [%s, %s] only partially overlaps %s's recorded coverage [%s, %s] -- emitting the overlapping part only\n",
+		log.Warnf("clip window [%s, %s] only partially overlaps %s's recorded coverage [%s, %s] -- emitting the overlapping part only",
 			sync.Start.Format(time.RFC3339), sync.End.Format(time.RFC3339), t.FitPath,
 			sync.CoverageStart.Format(time.RFC3339), sync.CoverageEnd.Format(time.RFC3339))
 	}
@@ -254,13 +250,15 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 		CreationTime: correctedCreationStr,
 	})
 
-	// Keep ffmpeg quiet on success unless --debug: "error" level prints only
-	// real errors, so a normal run doesn't dump the banner/stream-info that
-	// otherwise clutters the output (this mux uses a plain ExecRunner whose
-	// stderr goes straight to the terminal, unlike the vidio pipe path which
-	// captures it). --debug restores ffmpeg's full output.
+	// Keep ffmpeg quiet on success unless we are logging at debug: "error"
+	// level prints only real errors, so a normal run doesn't dump the
+	// banner/stream-info that otherwise clutters the output (this mux uses a
+	// plain ExecRunner whose stderr goes straight to the terminal, unlike the
+	// vidio pipe path which captures it). This is the subprocess's verbosity,
+	// not ours, but it answers to the same question the log level asks, so it
+	// is taken from there rather than from a second flag of its own.
 	runArgs := args
-	if !t.Debug {
+	if !log.Enabled(logging.LevelDebug) {
 		runArgs = append([]string{"-hide_banner", "-loglevel", "error"}, args...)
 	}
 	if err := t.Runner.Run(ctx, "ffmpeg", runArgs...); err != nil {

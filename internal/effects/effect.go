@@ -9,6 +9,8 @@ import (
 	"context"
 	"fmt"
 	"sort"
+
+	"videofx/internal/logging"
 )
 
 // Input carries everything an Effect needs to process a single video.
@@ -21,6 +23,17 @@ type Input struct {
 	// the effect should be. Each effect maps this onto its own native
 	// parameter range.
 	Strength float64
+	// Log is where the effect's warnings and diagnostics go, already
+	// configured with the run's --log-level/--debug. Effects should narrow it
+	// to their own name once, at the top of Apply:
+	//
+	//	log := in.Log.Named(t.Name())
+	//
+	// so the effect never writes its own "name: " prefix or "warning: " marker
+	// into a message. nil is fine and means logging.Default() -- the zero
+	// Input still logs somewhere sane, so tests that don't care can leave it
+	// unset and tests that do can set logging.New(&buf, ...).
+	Log *logging.Logger
 }
 
 // Effect is implemented by every video effect the CLI supports.

@@ -31,6 +31,7 @@ import (
 
 	"gocv.io/x/gocv"
 
+	"videofx/internal/logging"
 	"videofx/internal/vidio"
 )
 
@@ -40,12 +41,15 @@ func main() {
 	step := flag.Int("step", 10, "register every Nth frame pair")
 	width := flag.Int("width", 960, "analysis width for both clips")
 	flag.Parse()
+	// Only failures go through the logger; the measurements this tool exists
+	// to print are its product and stay on stdout.
+	log := logging.New(os.Stderr, logging.LevelInfo).Named("xreg")
 	if *aPath == "" || *bPath == "" {
-		fmt.Fprintln(os.Stderr, "xreg: -a and -b are required")
+		log.Errorf("-a and -b are required")
 		os.Exit(2)
 	}
 	if err := run(*aPath, *bPath, *step, *width); err != nil {
-		fmt.Fprintln(os.Stderr, "xreg:", err)
+		log.Errorf("%v", err)
 		os.Exit(1)
 	}
 }

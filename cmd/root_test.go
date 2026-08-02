@@ -12,6 +12,7 @@ import (
 
 	"videofx/internal/calibrate"
 	"videofx/internal/effects"
+	"videofx/internal/logging"
 )
 
 func TestWarnTelemetryNotLast(t *testing.T) {
@@ -25,19 +26,21 @@ func TestWarnTelemetryNotLast(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	warnTelemetryNotLast(&buf, []effects.Effect{gocv, tel})
+	log := logging.New(&buf, logging.LevelInfo).Named("videofx")
+
+	warnTelemetryNotLast(log, []effects.Effect{gocv, tel})
 	if buf.Len() != 0 {
 		t.Errorf("telemetry-last must not warn, got: %q", buf.String())
 	}
 
 	buf.Reset()
-	warnTelemetryNotLast(&buf, []effects.Effect{tel, gocv})
+	warnTelemetryNotLast(log, []effects.Effect{tel, gocv})
 	if !strings.Contains(buf.String(), "telemetry is not the last") {
 		t.Errorf("telemetry-not-last must warn, got: %q", buf.String())
 	}
 
 	buf.Reset()
-	warnTelemetryNotLast(&buf, []effects.Effect{gocv})
+	warnTelemetryNotLast(log, []effects.Effect{gocv})
 	if buf.Len() != 0 {
 		t.Errorf("no telemetry must not warn, got: %q", buf.String())
 	}
@@ -276,7 +279,7 @@ func TestWarnCRFIgnoredByGoCV(t *testing.T) {
 
 	t.Run("crf set + gocv present warns", func(t *testing.T) {
 		var buf bytes.Buffer
-		warnCRFIgnoredByGoCV(&buf, true, []effects.Effect{gocv})
+		warnCRFIgnoredByGoCV(logging.New(&buf, logging.LevelInfo).Named("videofx"), true, []effects.Effect{gocv})
 		if !strings.Contains(buf.String(), "--crf is ignored by gocv-stabilizer") {
 			t.Errorf("expected a warning, got: %q", buf.String())
 		}
@@ -287,7 +290,7 @@ func TestWarnCRFIgnoredByGoCV(t *testing.T) {
 
 	t.Run("crf not changed never warns", func(t *testing.T) {
 		var buf bytes.Buffer
-		warnCRFIgnoredByGoCV(&buf, false, []effects.Effect{gocv})
+		warnCRFIgnoredByGoCV(logging.New(&buf, logging.LevelInfo).Named("videofx"), false, []effects.Effect{gocv})
 		if buf.Len() != 0 {
 			t.Errorf("a default (unchanged) --crf must not warn, got: %q", buf.String())
 		}
@@ -295,7 +298,7 @@ func TestWarnCRFIgnoredByGoCV(t *testing.T) {
 
 	t.Run("crf set but only warp-stabilizer does not warn", func(t *testing.T) {
 		var buf bytes.Buffer
-		warnCRFIgnoredByGoCV(&buf, true, []effects.Effect{warp})
+		warnCRFIgnoredByGoCV(logging.New(&buf, logging.LevelInfo).Named("videofx"), true, []effects.Effect{warp})
 		if buf.Len() != 0 {
 			t.Errorf("warp-stabilizer uses --crf, so no warning, got: %q", buf.String())
 		}

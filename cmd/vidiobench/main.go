@@ -84,6 +84,7 @@ import (
 	"syscall"
 	"time"
 
+	"videofx/internal/logging"
 	"videofx/internal/stabilize"
 	"videofx/internal/vidio"
 )
@@ -113,9 +114,11 @@ func main() {
 	// ignoring a stray positional would mean benchmarking the default file
 	// while believing you measured the one you named on the command line —
 	// a wrong number that looks entirely plausible.
+	// Only notes and failures go through the logger; the timings this tool
+	// exists to print are its product and stay on stdout.
+	log := logging.New(os.Stderr, logging.LevelInfo).Named("vidiobench")
 	if flag.NArg() > 0 {
-		fmt.Fprintf(os.Stderr,
-			"vidiobench: unexpected positional argument %q; pass the input as -file=%s\n",
+		log.Errorf("unexpected positional argument %q; pass the input as -file=%s",
 			flag.Arg(0), flag.Arg(0))
 		os.Exit(2)
 	}
@@ -130,12 +133,12 @@ func main() {
 		err = runRoundtrip(ctx, *file, *out, *maxFrames)
 	case "stabilize":
 		if *maxFrames > 0 {
-			fmt.Fprintln(os.Stderr, "vidiobench: note: -max-frames is ignored by -mode=stabilize (it always measures a full pass)")
+			log.Infof("note: -max-frames is ignored by -mode=stabilize (it always measures a full pass)")
 		}
 		err = runStabilize(ctx, *file)
 	case "smooth":
 		if *maxFrames > 0 {
-			fmt.Fprintln(os.Stderr, "vidiobench: note: -max-frames is ignored by -mode=smooth (it always measures a full pass)")
+			log.Infof("note: -max-frames is ignored by -mode=smooth (it always measures a full pass)")
 		}
 		err = runSmooth(ctx, smoothParams{
 			file:            *file,
@@ -149,17 +152,17 @@ func main() {
 		})
 	case "rs":
 		if *maxFrames > 0 {
-			fmt.Fprintln(os.Stderr, "vidiobench: note: -max-frames is ignored by -mode=rs (it always measures a full pass)")
+			log.Infof("note: -max-frames is ignored by -mode=rs (it always measures a full pass)")
 		}
 		err = runRS(ctx, smoothParams{file: *file, sidecar: *sidecar, writeSidecar: *writeSidecar}, *predFile)
 	case "residual":
 		if *maxFrames > 0 {
-			fmt.Fprintln(os.Stderr, "vidiobench: note: -max-frames is ignored by -mode=residual (it always measures a full pass)")
+			log.Infof("note: -max-frames is ignored by -mode=residual (it always measures a full pass)")
 		}
 		err = runResidual(ctx, smoothParams{file: *file, sidecar: *sidecar, writeSidecar: *writeSidecar})
 	case "render":
 		if *maxFrames > 0 {
-			fmt.Fprintln(os.Stderr, "vidiobench: note: -max-frames is ignored by -mode=render (it always renders the full clip)")
+			log.Infof("note: -max-frames is ignored by -mode=render (it always renders the full clip)")
 		}
 		err = runRender(ctx, renderParams{
 			smoothParams: smoothParams{
@@ -183,7 +186,7 @@ func main() {
 		err = fmt.Errorf("unknown -mode %q (want analysis, roundtrip, stabilize, smooth, rs, residual, or render)", *mode)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "vidiobench:", err)
+		log.Errorf("%v", err)
 		os.Exit(1)
 	}
 }

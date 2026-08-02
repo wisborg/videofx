@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"videofx/internal/logging"
 	"videofx/internal/runner"
 	"videofx/internal/vidio"
 )
@@ -36,11 +37,6 @@ type Rotate struct {
 	// Degrees is the clockwise display rotation to ADD to the source's own,
 	// one of 90/180/270. Wired from --rotate.
 	Degrees int
-
-	// Debug shows the underlying ffmpeg command's full output (banner, stream
-	// info). Off by default -- the command runs at ffmpeg's "error" log level
-	// so a successful run is silent. Wired from --debug.
-	Debug bool
 }
 
 func (r *Rotate) Name() string { return "rotate" }
@@ -64,7 +60,7 @@ func (r *Rotate) Apply(ctx context.Context, in Input) error {
 	}
 
 	v := composedDisplayRotation(info.Rotation, r.Degrees)
-	args := rotateArgs(v, in.SourcePath, in.OutputPath, r.Debug)
+	args := rotateArgs(v, in.SourcePath, in.OutputPath, in.Log.Enabled(logging.LevelDebug))
 	if err := r.Runner.Run(ctx, "ffmpeg", args...); err != nil {
 		return fmt.Errorf("rotate: rotating %s: %w", in.OutputPath, err)
 	}

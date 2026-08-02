@@ -50,9 +50,16 @@ import (
 	"strings"
 	"time"
 
+	"videofx/internal/logging"
 	"videofx/internal/telemetry"
 	"videofx/internal/vidio"
 )
+
+// log is where fitdump's warnings and failures go. Its REPORT -- the counts,
+// windows, and samples that are the point of running it -- is the tool's
+// product and keeps going to stdout as plain fmt.Print, so it can be piped and
+// diffed without severity prefixes in the way.
+var log = logging.New(os.Stderr, logging.LevelInfo).Named("fitdump")
 
 func main() {
 	file := flag.String("file", "", "path to a Garmin FIT activity file (required)")
@@ -63,11 +70,11 @@ func main() {
 	flag.Parse()
 
 	if flag.NArg() > 0 {
-		fmt.Fprintf(os.Stderr, "fitdump: unexpected positional argument %q; pass the input as -file=%s\n", flag.Arg(0), flag.Arg(0))
+		log.Errorf("unexpected positional argument %q; pass the input as -file=%s", flag.Arg(0), flag.Arg(0))
 		os.Exit(2)
 	}
 	if *file == "" {
-		fmt.Fprintln(os.Stderr, "fitdump: -file is required")
+		log.Errorf("-file is required")
 		os.Exit(2)
 	}
 
@@ -81,7 +88,7 @@ func main() {
 		err = run(*file, *index)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "fitdump:", err)
+		log.Errorf("%v", err)
 		os.Exit(1)
 	}
 }
@@ -115,7 +122,7 @@ func dryRun(fitPath, videoPath string, offsetSeconds float64) error {
 		return fmt.Errorf("%s has no creation_time tag in its container metadata; dry-run needs it to anchor the telemetry window (see vidio.Info.HasCreationTime)", videoPath)
 	}
 	if info.CreationTimeNaive {
-		fmt.Fprintf(os.Stderr, "fitdump: warning: %s's creation_time tag has no timezone marker; treating it as UTC, which may be wrong -- see vidio.Info.CreationTimeNaive\n", videoPath)
+		log.Warnf("%s's creation_time tag has no timezone marker; treating it as UTC, which may be wrong -- see vidio.Info.CreationTimeNaive", videoPath)
 	}
 
 	offset := time.Duration(offsetSeconds * float64(time.Second))
@@ -201,7 +208,7 @@ func emitRun(fitPath, videoPath string, offsetSeconds float64, outPrefix string)
 		return fmt.Errorf("%s has no creation_time tag in its container metadata; emit needs it to anchor the telemetry window (see vidio.Info.HasCreationTime)", videoPath)
 	}
 	if info.CreationTimeNaive {
-		fmt.Fprintf(os.Stderr, "fitdump: warning: %s's creation_time tag has no timezone marker; treating it as UTC, which may be wrong -- see vidio.Info.CreationTimeNaive\n", videoPath)
+		log.Warnf("%s's creation_time tag has no timezone marker; treating it as UTC, which may be wrong -- see vidio.Info.CreationTimeNaive", videoPath)
 	}
 
 	offset := time.Duration(offsetSeconds * float64(time.Second))
@@ -213,7 +220,7 @@ func emitRun(fitPath, videoPath string, offsetSeconds float64, outPrefix string)
 		return fmt.Errorf("no FIT data at all in this clip's window (resolved %s .. %s against FIT coverage %s .. %s) -- refusing to emit sidecars with no telemetry in them; the offset is very likely wrong, or this is the wrong FIT file for this clip",
 			sync.Start.Format(dryRunTSFormat), sync.End.Format(dryRunTSFormat), sync.CoverageStart.Format(dryRunTSFormat), sync.CoverageEnd.Format(dryRunTSFormat))
 	case telemetry.PartialOverlap:
-		fmt.Fprintf(os.Stderr, "fitdump: warning: only part of this clip's window falls inside %s's coverage; the emitted sidecars will have gaps (or be entirely empty) outside FIT coverage\n", fitPath)
+		log.Warnf("only part of this clip's window falls inside %s's coverage; the emitted sidecars will have gaps (or be entirely empty) outside FIT coverage", fitPath)
 	}
 
 	// BuildClipPoints re-bases the lookup (done on the FIT/watch clock,

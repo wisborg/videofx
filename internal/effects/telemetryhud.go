@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"image"
 	"math"
-	"os"
 	"time"
 
 	"videofx/internal/hud"
@@ -111,6 +110,8 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		return fmt.Errorf("telemetry-hud: --fit is required (path to a Garmin FIT activity file)")
 	}
 
+	log := in.Log.Named(t.Name())
+
 	track, err := telemetry.Decode(t.FitPath)
 	if err != nil {
 		return fmt.Errorf("telemetry-hud: %w", err)
@@ -126,7 +127,7 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 			"copy of one -- that still has it)", in.SourcePath, t.FitPath)
 	}
 	if info.CreationTimeNaive {
-		fmt.Fprintf(os.Stderr, "telemetry-hud: warning: %s's creation_time has no timezone marker -- assuming UTC\n", in.SourcePath)
+		log.Warnf("%s's creation_time has no timezone marker -- assuming UTC", in.SourcePath)
 	}
 	if info.FPS <= 0 || info.Width <= 0 || info.Height <= 0 {
 		return fmt.Errorf("telemetry-hud: %s reported unusable dimensions/fps (%dx%d @ %v)", in.SourcePath, info.Width, info.Height, info.FPS)
@@ -144,9 +145,8 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 			sync.Start.Format(time.RFC3339), sync.End.Format(time.RFC3339), t.FitPath,
 			sync.CoverageStart.Format(time.RFC3339), sync.CoverageEnd.Format(time.RFC3339))
 	case telemetry.PartialOverlap:
-		fmt.Fprintf(os.Stderr,
-			"telemetry-hud: warning: clip window [%s, %s] only partially overlaps %s's coverage [%s, %s] -- "+
-				"gauges show placeholders outside it\n",
+		log.Warnf("clip window [%s, %s] only partially overlaps %s's coverage [%s, %s] -- "+
+			"gauges show placeholders outside it",
 			sync.Start.Format(time.RFC3339), sync.End.Format(time.RFC3339), t.FitPath,
 			sync.CoverageStart.Format(time.RFC3339), sync.CoverageEnd.Format(time.RFC3339))
 	}

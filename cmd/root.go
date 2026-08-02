@@ -4,7 +4,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"slices"
 	"strconv"
@@ -16,6 +15,7 @@ import (
 
 	"videofx/internal/cliutil"
 	"videofx/internal/effects"
+	"videofx/internal/logging"
 	"videofx/internal/runner"
 	"videofx/internal/stabilize"
 	"videofx/internal/telemetry"
@@ -31,6 +31,7 @@ var (
 	trimStart   float64
 	trimEnd     float64
 	debugMode   bool
+	logLevel    string
 	rotateDeg   int
 
 	preset        string
@@ -102,7 +103,9 @@ func NewRootCmd() *cobra.Command {
 	root.Flags().Float64Var(&trimEnd, "end", 0,
 		"only process up to this time (seconds) of each input; default 0 = to the end. See --start")
 	root.Flags().BoolVar(&debugMode, "debug", false,
-		"print extra diagnostic output that a successful run otherwise keeps to itself: the telemetry and rotate effects' underlying ffmpeg logs (banner, stream info), and gocv-stabilizer's lens calibration under --warp-model rotation. Warnings are not affected -- those always print")
+		"print extra diagnostic output that a successful run otherwise keeps to itself: the telemetry and rotate effects' underlying ffmpeg logs (banner, stream info), and gocv-stabilizer's lens calibration under --warp-model rotation. Shorthand for --log-level debug, and it wins if both are given")
+	root.Flags().StringVar(&logLevel, "log-level", "info",
+		"lowest severity to print: debug (everything, same as --debug), info (progress and warnings -- the default), warn (warnings only, no progress lines), or error (failures only). All of it goes to stderr")
 	root.Flags().IntVar(&rotateDeg, "rotate", 0,
 		"rotate effect only (--effect rotate): rotate the video this many degrees CLOCKWISE for display -- 90, 180, or 270. Lossless: it sets the display-rotation flag via stream copy (no re-encode) and composes with any rotation the source already has. Required (and must be 90/180/270) when --effect includes rotate")
 
@@ -290,10 +293,10 @@ func requireRotateDegrees(effectNames []string, degrees int) error {
 // just added, so "telemetry then stabilize" almost certainly isn't what the
 // user meant. It's a warning, not an error -- the ordering is the user's to
 // choose, and the GPX sidecar survives regardless.
-func warnTelemetryNotLast(w io.Writer, effs []effects.Effect) {
+func warnTelemetryNotLast(log *logging.Logger, effs []effects.Effect) {
 	for i, e := range effs {
 		if e.Name() == "telemetry" && i != len(effs)-1 {
-			fmt.Fprintln(w, "videofx: warning: telemetry is not the last effect in the chain; a later re-encoding effect will strip the muxed telemetry subtitle track and location tag from the video (the GPX sidecar is unaffected)")
+			log.Warnf("telemetry is not the last effect in the chain; a later re-encoding effect will strip the muxed telemetry subtitle track and location tag from the video (the GPX sidecar is unaffected)")
 			return
 		}
 	}
@@ -323,16 +326,31 @@ func validateQuality(quality int) error {
 // warp-stabilizer step and --quality for a gocv-stabilizer step at once.
 // crfChanged is cmd.Flags().Changed("crf") -- only an explicitly-set --crf
 // warns, never the default value. Split out from runRoot so it's testable.
-func warnCRFIgnoredByGoCV(w io.Writer, crfChanged bool, effs []effects.Effect) {
+func warnCRFIgnoredByGoCV(log *logging.Logger, crfChanged bool, effs []effects.Effect) {
 	if !crfChanged {
 		return
 	}
 	for _, e := range effs {
 		if e.Name() == "gocv-stabilizer" {
-			fmt.Fprintln(w, "videofx: warning: --crf is ignored by gocv-stabilizer (it encodes with hevc_videotoolbox, not libx264/x265); use --quality (1-100, higher = better) to control its quality")
+			log.Warnf("--crf is ignored by gocv-stabilizer (it encodes with hevc_videotoolbox, not libx264/x265); use --quality (1-100, higher = better) to control its quality")
 			return
 		}
 	}
+}
+
+// resolveLogLevel turns --log-level/--debug into the run's logging level.
+// --debug wins when both are given: it is the older and more specific request
+// ("show me everything"), and erroring on the combination would break existing
+// invocations for no benefit.
+func resolveLogLevel(level string, debug bool) (logging.Level, error) {
+	parsed, err := logging.ParseLevel(level)
+	if err != nil {
+		return parsed, fmt.Errorf("--log-level: %w", err)
+	}
+	if debug {
+		return logging.LevelDebug, nil
+	}
+	return parsed, nil
 }
 
 // validateHUDLayout rejects an unknown --hud-layout up front (the accepted set
@@ -525,7 +543,6 @@ func configureEffect(effect effects.Effect, flags *pflag.FlagSet) error {
 		gs.RollingShutterExplicit = flags.Changed("rolling-shutter")
 		gs.WarpModelExplicit = flags.Changed("warp-model")
 		gs.RSRatio = rsRatio
-		gs.Debug = debugMode
 		lens, err := buildForcedLens(lensModel, lensFocal)
 		if err != nil {
 			return err
@@ -549,7 +566,6 @@ func configureEffect(effect effects.Effect, flags *pflag.FlagSet) error {
 	}
 	if rot, ok := effect.(*effects.Rotate); ok {
 		rot.Degrees = rotateDeg
-		rot.Debug = debugMode
 	}
 	configureTelemetry(effect)
 	return nil
@@ -611,7 +627,6 @@ func configureTelemetry(effect effects.Effect) {
 		tel.SRTSidecar = srtSidecar
 		tel.GPX = gpx
 		tel.IncludeStryd = telemetryStryd
-		tel.Debug = debugMode
 	}
 }
 
@@ -639,6 +654,17 @@ func joinEffectNames() string {
 }
 
 func runRoot(cmd *cobra.Command, args []string) error {
+	// Built first so everything downstream -- validation warnings, per-file
+	// progress, the effects themselves -- shares one configured logger. It is
+	// also installed as the package default so the handful of call sites that
+	// have no logger threaded to them still honor --log-level/--debug.
+	level, err := resolveLogLevel(logLevel, debugMode)
+	if err != nil {
+		return err
+	}
+	log := logging.New(cmd.ErrOrStderr(), level).Named("videofx")
+	logging.SetDefault(log)
+
 	effs, err := resolveEffects(effectNames)
 	if err != nil {
 		return err
@@ -698,8 +724,8 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	warnTelemetryNotLast(cmd.ErrOrStderr(), effs)
-	warnCRFIgnoredByGoCV(cmd.ErrOrStderr(), cmd.Flags().Changed("crf"), effs)
+	warnTelemetryNotLast(log, effs)
+	warnCRFIgnoredByGoCV(log, cmd.Flags().Changed("crf"), effs)
 
 	if err := cliutil.ValidateInputFiles(args); err != nil {
 		return err
@@ -718,6 +744,7 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		Concurrency:  concurrency,
 		StartSeconds: trimStart,
 		EndSeconds:   trimEnd,
+		Log:          log,
 	}
 
 	// Stream progress as the batch runs rather than printing everything at
@@ -726,18 +753,23 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	// moment it finishes. Run serializes these callbacks, so `completed` is
 	// safe to bump without locking. At --concurrency > 1 they arrive in
 	// start/finish order, not the order the files were listed.
+	//
+	// These go through the logger at info level, which is what makes
+	// --log-level warn able to silence progress while keeping warnings. That
+	// also puts the OK line on stderr with everything else, where it used to
+	// go to stdout.
 	total := len(jobs)
 	completed := 0
 	cfg.OnStart = func(job video.Job) {
-		fmt.Fprintf(cmd.ErrOrStderr(), "processing %s ...\n", job.SourcePath)
+		log.Infof("processing %s ...", job.SourcePath)
 	}
 	cfg.OnResult = func(res video.Result) {
 		completed++
 		if res.Err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "[%d/%d] FAILED  %s: %v\n", completed, total, res.SourcePath, res.Err)
+			log.Errorf("[%d/%d] FAILED  %s: %v", completed, total, res.SourcePath, res.Err)
 			return
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "[%d/%d] OK      %s -> %s  (%s)\n",
+		log.Infof("[%d/%d] OK      %s -> %s  (%s)",
 			completed, total, res.SourcePath, res.OutputPath, formatJobDuration(res.Duration))
 	}
 
@@ -761,7 +793,10 @@ func runRoot(cmd *cobra.Command, args []string) error {
 func Execute() {
 	root := NewRootCmd()
 	if err := root.ExecuteContext(context.Background()); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		// The default logger, not runRoot's: this also has to report failures
+		// that happen before runRoot ever runs (flag parsing, unknown
+		// commands), and logging.Default() is always usable.
+		logging.Default().Errorf("%v", err)
 		os.Exit(1)
 	}
 }

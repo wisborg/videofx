@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"videofx/internal/logging"
 	"videofx/internal/stabilize"
 	"videofx/internal/vidio"
 )
@@ -431,6 +432,17 @@ func TestModelName(t *testing.T) {
 }
 
 
+// captureLog returns a logger writing into buf, at the level --debug would
+// have selected. The level IS the flag now, so these tests exercise the same
+// switch a real run does.
+func captureLog(buf *bytes.Buffer, debug bool) *logging.Logger {
+	level := logging.LevelInfo
+	if debug {
+		level = logging.LevelDebug
+	}
+	return logging.New(buf, level).Named("gocv-stabilizer")
+}
+
 // rotationSeries is a MotionSeries that looks like a rotation-model analysis,
 // with a lens whose reliability the caller chooses.
 func rotationSeries(reliableLens bool) *stabilize.MotionSeries {
@@ -495,8 +507,8 @@ func TestReportLens(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			g := &GoCVStabilizer{WarpModelExplicit: tc.explicit, Debug: tc.debug}
-			got := g.reportLens(&buf, "clip.mp4", tc.series)
+			g := &GoCVStabilizer{WarpModelExplicit: tc.explicit}
+			got := g.reportLens(captureLog(&buf, tc.debug), "clip.mp4", tc.series)
 			if got != tc.wantRotation {
 				t.Errorf("reportLens = %v, want %v", got, tc.wantRotation)
 			}
@@ -537,8 +549,8 @@ func TestReadoutRatioReporting(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			g := &GoCVStabilizer{Warn: &buf, RollingShutter: true, RollingShutterExplicit: tc.explicit, Debug: tc.debug}
-			rho, err := g.readoutRatio(flat, "clip.mp4")
+			g := &GoCVStabilizer{RollingShutter: true, RollingShutterExplicit: tc.explicit}
+			rho, err := g.readoutRatio(captureLog(&buf, tc.debug), flat, "clip.mp4")
 			if err != nil {
 				t.Fatalf("readoutRatio: %v", err)
 			}
