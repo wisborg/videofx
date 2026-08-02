@@ -128,21 +128,21 @@ func TestAttenuateRotation(t *testing.T) {
 
 func TestMinZoomForRotation(t *testing.T) {
 	lens := Lens{Kind: LensEquisolid, Focal: 500, CX: 480, CY: 360}
-	if z := minZoomForRotation(identityQuat, lens, 960, 720); z != 1.0 {
+	if z := minZoomForRotation(identityQuat, lens, 960, 720, Vec3{}); z != 1.0 {
 		t.Errorf("identity correction needs zoom %g, want 1.0", z)
 	}
 	prev := 1.0
 	for _, ang := range []float64{0.01, 0.02, 0.04} {
-		z := minZoomForRotation(quatExp(Vec3{0, ang, 0}), lens, 960, 720)
+		z := minZoomForRotation(quatExp(Vec3{0, ang, 0}), lens, 960, 720, Vec3{})
 		if z <= prev {
 			t.Errorf("zoom for a %g rad correction is %g, not more than %g for the smaller one", ang, z, prev)
 		}
 		// And it must actually be sufficient, with nothing to spare worth
 		// speaking of -- this is the containment guarantee the crop rests on.
-		if !rotationFitsAtZoom(quatExp(Vec3{0, ang, 0}), lens, 960, 720, z) {
+		if !rotationFitsAtZoom(quatExp(Vec3{0, ang, 0}), lens, 960, 720, z, Vec3{}) {
 			t.Errorf("computed zoom %g does not actually fit a %g rad correction", z, ang)
 		}
-		if rotationFitsAtZoom(quatExp(Vec3{0, ang, 0}), lens, 960, 720, z*0.99) {
+		if rotationFitsAtZoom(quatExp(Vec3{0, ang, 0}), lens, 960, 720, z*0.99, Vec3{}) {
 			t.Errorf("zoom %g for a %g rad correction is more than needed", z, ang)
 		}
 		prev = z
@@ -163,12 +163,12 @@ func TestPlanRotationZoomEnvelopeCoversEveryFrame(t *testing.T) {
 		}
 		corr[i] = quatExp(Vec3{0, ang, 0})
 	}
-	plan := PlanRotationZoom(corr, lens, 960, 720, 0, 15)
+	plan := PlanRotationZoom(corr, lens, 960, 720, 0, 15, nil)
 	if len(plan.Zooms) != len(corr) {
 		t.Fatalf("got %d zooms for %d corrections", len(plan.Zooms), len(corr))
 	}
 	for i := range corr {
-		if !rotationFitsAtZoom(plan.Corrections[i], lens, 960, 720, plan.Zooms[i]) {
+		if !rotationFitsAtZoom(plan.Corrections[i], lens, 960, 720, plan.Zooms[i], Vec3{}) {
 			t.Fatalf("frame %d exposes a border at its planned zoom %g", i, plan.Zooms[i])
 		}
 	}
@@ -190,7 +190,7 @@ func TestPlanRotationZoomHonorsMaxZoom(t *testing.T) {
 		corr[i] = quatExp(Vec3{0, 0.08, 0})
 	}
 	const cap = 1.05
-	plan := PlanRotationZoom(corr, lens, 960, 720, cap, 0)
+	plan := PlanRotationZoom(corr, lens, 960, 720, cap, 0, nil)
 	if plan.ClampedFrames == 0 {
 		t.Fatal("expected the cap to bind")
 	}
@@ -198,7 +198,7 @@ func TestPlanRotationZoomHonorsMaxZoom(t *testing.T) {
 		if plan.Zooms[i] > cap+1e-9 {
 			t.Errorf("frame %d rendered at zoom %g, above the cap %g", i, plan.Zooms[i], cap)
 		}
-		if !rotationFitsAtZoom(plan.Corrections[i], lens, 960, 720, plan.Zooms[i]) {
+		if !rotationFitsAtZoom(plan.Corrections[i], lens, 960, 720, plan.Zooms[i], Vec3{}) {
 			t.Errorf("frame %d exposes a border despite being clamped", i)
 		}
 	}
@@ -220,5 +220,38 @@ func TestBuildRotationCorrectionsNeedsAReliableLens(t *testing.T) {
 	s.Lens = nil
 	if got := BuildRotationCorrections(s, 20, 3); got != nil {
 		t.Error("expected no corrections when there is no lens at all")
+	}
+}
+
+func TestBuildRSRotations(t *testing.T) {
+	a := quatExp(Vec3{0.02, 0, 0})
+	b := quatExp(Vec3{0.04, 0, 0})
+	s := testRotSeries([]Quat{a, b})
+	const rho = 0.5
+
+	got := BuildRSRotations(s, rho)
+	if len(got) != 3 {
+		t.Fatalf("got %d entries for 2 transitions, want 3 (one per frame)", len(got))
+	}
+	// Frame 0 has only the transition after it; frame 1 sits between both and
+	// takes their mean; frame 2 has only the one before it.
+	for i, want := range []float64{0.02 * rho, 0.03 * rho, 0.04 * rho} {
+		if math.Abs(got[i].X-want) > 1e-9 {
+			t.Errorf("frame %d: got %g, want %g", i, got[i].X, want)
+		}
+	}
+
+	if BuildRSRotations(s, 0) != nil {
+		t.Error("a zero readout ratio should disable rectification entirely")
+	}
+	// A failed transition must leave its frames unrectified rather than be
+	// given a guessed velocity.
+	s.Transitions[0].OK = false
+	got = BuildRSRotations(s, rho)
+	if got[0] != (Vec3{}) {
+		t.Errorf("frame with no usable neighbour got %v, want the zero vector", got[0])
+	}
+	if math.Abs(got[1].X-0.04*rho) > 1e-9 {
+		t.Errorf("frame 1 should fall back to its one good neighbour, got %v", got[1])
 	}
 }

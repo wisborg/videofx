@@ -142,6 +142,13 @@ type RenderOptions struct {
 	// identical to before.
 	Mesh bool
 
+	// RSRatio is the rolling-shutter readout ratio for the ROTATION path (the
+	// 2D path takes a prebuilt RS instead -- see the RS field). 0 disables the
+	// rectification. Kept as the raw ratio rather than a prebuilt correction
+	// because the rotation path's rectification depends on the per-frame
+	// angular velocity, which lives in the series the renderer already has.
+	RSRatio float64
+
 	// Rotation enables the WarpModelRotation render path: stabilize by
 	// rotating the camera's rays under the clip's calibrated lens rather than
 	// by transforming the picture in 2D. Requires a series analyzed with
@@ -344,6 +351,7 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 	var sphere *sphereWarpState
 	var rotCorr []Quat
 	var rotZooms []float64
+	var rotRS []Vec3
 	if opts.Rotation && series.hasRotations() {
 		if corr := BuildRotationCorrections(series, result.Options.Sigma, result.Options.RadiusMultiple); len(corr) > 0 {
 			// The lens was calibrated in analysis-resolution pixels; the render
@@ -359,7 +367,12 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 			if opts.ZoomTransitionSeconds > 0 {
 				sigmaFrames = opts.ZoomTransitionSeconds * info.FPS
 			}
-			plan := PlanRotationZoom(corr, lens, w, h, maxZoomFactor, sigmaFrames)
+			// Rolling shutter, if a readout ratio was supplied. Unlike the 2D
+			// path there is nothing to compose an affine into here: each row
+			// simply saw a different camera orientation, which this model can
+			// state directly (see BuildRSRotations).
+			rotRS = BuildRSRotations(series, opts.RSRatio)
+			plan := PlanRotationZoom(corr, lens, w, h, maxZoomFactor, sigmaFrames, rotRS)
 			rotCorr = plan.Corrections
 			rotZooms = plan.Zooms
 			sphere = newSphereWarpState(lens, w, h)
@@ -429,10 +442,10 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 	// rectification; see RSZoomMargin for why it is not per-frame.
 	rsRect := opts.RS
 	if sphere != nil {
-		// The rolling-shutter rectification is an affine composed into the 2D
-		// warp; there is no 2D warp on this path. Correcting it here would mean
-		// composing a shear into the spherical map, which is a separate piece
-		// of work -- see the rotation model's notes.
+		// The 2D rectifiers are an affine composed into a 2D warp, and there is
+		// no 2D warp on this path. The rotation path does its own rectification
+		// from opts.RSRatio, above, which is a better fit to the physics; these
+		// would double-correct it.
 		rsRect = nil
 	}
 	if ff != nil {
@@ -512,7 +525,11 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 			if frames < len(rotZooms) {
 				rz = rotZooms[frames]
 			}
-			if err := sphere.render(src, q, rz, &dst); err != nil {
+			var rs Vec3
+			if frames < len(rotRS) {
+				rs = rotRS[frames]
+			}
+			if err := sphere.render(src, q, rz, rs, &dst); err != nil {
 				_ = enc.Close()
 				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
 			}

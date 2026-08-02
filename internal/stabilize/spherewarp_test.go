@@ -113,7 +113,7 @@ func TestSphereWarpIdentityIsAPassThrough(t *testing.T) {
 	dst := gocv.NewMatWithSize(h, w, gocv.MatTypeCV8UC1)
 	defer dst.Close()
 
-	if err := st.render(src, identityQuat, 1.0, &dst); err != nil {
+	if err := st.render(src, identityQuat, 1.0, Vec3{}, &dst); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	var worst int
@@ -205,5 +205,86 @@ func TestSphereWarpMatchesTheExactMap(t *testing.T) {
 	}
 	if worst > 0.05 {
 		t.Errorf("grid approximation is off by up to %.4f px from the exact map", worst)
+	}
+}
+
+// TestSphereBackwardMapInvertsRollingShutter is the rectification's
+// correctness proof, and it is an exact inverse rather than an approximation
+// check.
+//
+// The forward direction is what the sensor does: a ray the nominal camera saw
+// is recorded at whichever row was being read out when it was exposed, so the
+// pixel it lands on satisfies an implicit equation in its own row. This test
+// runs that forward direction analytically -- pick a source pixel, work out the
+// ray the nominal camera must have seen for the sensor to have put it there --
+// and then requires the backward map to hand that source pixel back.
+func TestSphereBackwardMapInvertsRollingShutter(t *testing.T) {
+	const w, h = 3840.0, 2880.0
+	lens := Lens{Kind: LensEquisolid, Focal: 0.56 * w, CX: w / 2, CY: h / 2}
+	// A large readout rotation: ~0.02 rad/frame of camera motion at rho 0.3.
+	rsRot := Vec3{0.006, -0.004, 0.002}
+
+	for _, src := range []point2{
+		{X: w / 2, Y: h / 2}, // centre row: exposed at the nominal instant
+		{X: 100, Y: 100},
+		{X: w - 100, Y: h - 100},
+		{X: w / 2, Y: 0},
+		{X: w / 2, Y: h},
+	} {
+		// What the nominal camera saw, given the sensor placed it at src: the
+		// row's exposure rotation, undone.
+		t0 := (src.Y - lens.CY) / h
+		dCentre := quatExp(Vec3{-rsRot.X * t0, -rsRot.Y * t0, -rsRot.Z * t0}).Matrix().
+			Apply(lens.Ray(src.X, src.Y))
+		// Where an un-rectified render would place that ray.
+		ox, oy, ok := lens.Project(dCentre)
+		if !ok {
+			t.Fatalf("projecting %v failed", src)
+		}
+		gotX, gotY, ok := sphereBackwardMap(lens, identityQuat.Matrix(), 1.0, rsRot, h, ox, oy)
+		if !ok {
+			t.Fatalf("backward map failed for %v", src)
+		}
+		if d := math.Hypot(gotX-src.X, gotY-src.Y); d > 0.01 {
+			t.Errorf("rectified map for %v landed %.4f px away (%.3f, %.3f)", src, d, gotX, gotY)
+		}
+	}
+}
+
+// TestSphereBackwardMapNoRSIsUnchanged pins that leaving the rectification off
+// takes the fast path and produces exactly the pre-rectification map -- so
+// enabling this feature cannot have perturbed anyone who does not use it.
+func TestSphereBackwardMapNoRSIsUnchanged(t *testing.T) {
+	const w, h = 1920.0, 1440.0
+	lens := Lens{Kind: LensEquisolid, Focal: 0.56 * w, CX: w / 2, CY: h / 2}
+	inv := quatExp(Vec3{0.01, -0.02, 0.005}).Matrix().Transpose()
+	for _, p := range []point2{{X: 0, Y: 0}, {X: 640, Y: 480}, {X: w, Y: h}} {
+		gotX, gotY, ok := sphereBackwardMap(lens, inv, 1.1, Vec3{}, h, p.X, p.Y)
+		if !ok {
+			t.Fatalf("map failed at %v", p)
+		}
+		x := lens.CX + (p.X-lens.CX)/1.1
+		y := lens.CY + (p.Y-lens.CY)/1.1
+		wantX, wantY, _ := lens.Project(inv.Apply(lens.Ray(x, y)))
+		if gotX != wantX || gotY != wantY {
+			t.Errorf("at %v: got (%v, %v), want exactly (%v, %v)", p, gotX, gotY, wantX, wantY)
+		}
+	}
+}
+
+// TestRotationZoomAccountsForRollingShutter checks the rectification is inside
+// the containment test rather than covered by a bolted-on margin: it pulls
+// content in from past the frame edge, so a frame that fitted without it must
+// need at least as much crop with it.
+func TestRotationZoomAccountsForRollingShutter(t *testing.T) {
+	lens := Lens{Kind: LensEquisolid, Focal: 500, CX: 480, CY: 360}
+	q := quatExp(Vec3{0, 0.01, 0})
+	plain := minZoomForRotation(q, lens, 960, 720, Vec3{})
+	withRS := minZoomForRotation(q, lens, 960, 720, Vec3{0.01, 0.008, 0})
+	if withRS < plain {
+		t.Errorf("rectified frame asked for LESS crop (%g) than unrectified (%g)", withRS, plain)
+	}
+	if !rotationFitsAtZoom(q, lens, 960, 720, withRS, Vec3{0.01, 0.008, 0}) {
+		t.Error("the planned zoom does not actually contain the rectified frame")
 	}
 }

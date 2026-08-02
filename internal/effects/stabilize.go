@@ -290,13 +290,20 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 	// frame to remove it. The other half -- un-skewing the pixels -- is folded
 	// into the render transform below.
 	var rsRect []stabilize.RSRectifier
+	var rho float64
 	if g.RollingShutter {
-		rho, err := g.readoutRatio(series, in.SourcePath)
+		var err error
+		rho, err = g.readoutRatio(series, in.SourcePath)
 		if err != nil {
 			return fmt.Errorf("gocv-stabilizer: %w", err)
 		}
 		if rho > 0 {
 			rsRect = stabilize.BuildRSRectifiers(series, rho)
+			// DebiasRollingShutter corrects the SIMILARITY estimates, which the
+			// rotation path does not use, so it is applied unconditionally: on
+			// the rotation path it changes nothing that is read, and skipping it
+			// would make the 2D fallback silently different depending on which
+			// model was asked for.
 			series = stabilize.DebiasRollingShutter(series, rho)
 		}
 	}
@@ -343,11 +350,12 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 		default:
 			fmt.Fprintf(os.Stderr, "gocv-stabilizer: %s: %s\n", in.SourcePath, series.Lens)
 		}
-		if renderOpts.Rotation && g.RollingShutter {
-			// The rectification is an affine folded into the 2D warp, and the
-			// rotation path has no 2D warp to fold it into -- see Render. Saying
-			// nothing would leave --rolling-shutter looking like it worked.
-			fmt.Fprintf(os.Stderr, "gocv-stabilizer: warning: %s: --rolling-shutter is not applied under the rotation model (its rectification composes into a 2D warp, which this model does not use) -- pass --warp-model similarity or mesh to use it\n", in.SourcePath)
+		if renderOpts.Rotation {
+			// The rotation path rectifies from the ratio directly rather than
+			// from prebuilt 2D rectifiers: its correction needs the per-frame
+			// angular velocity, which Render reads out of the series itself.
+			renderOpts.RSRatio = rho
+			renderOpts.RS = nil
 		}
 	}
 	if meshMode {

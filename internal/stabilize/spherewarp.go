@@ -83,18 +83,70 @@ func (s *sphereWarpState) Close() {
 	s.fullMapY.Close()
 }
 
-// render warps src by the corrective rotation q at the given zoom, writing the
-// result to dst.
+// rsSolveIterations is how many fixed-point steps sphereBackwardMap takes to
+// find the source row when a rolling-shutter rectification is in play.
 //
-// The map built here is BACKWARD (for each output pixel, where in the source to
-// sample it from), which is what Remap wants and also why the correction is
-// applied as its inverse: q carries the source frame's rays onto the smoothed
-// orientation, so recovering the source ray from an output ray means undoing it.
-func (s *sphereWarpState) render(src gocv.Mat, q Quat, zoom float64, dst *gocv.Mat) error {
+// Two is ample. A row's rectification depends on the row it lands on, so the
+// backward map is implicit -- but the dependence is weak: the iteration's
+// contraction factor is |rsRot| * focal / height, about 0.005 on this
+// project's footage and still under 0.15 for a violent whip pan, so each step
+// cuts the error by two orders of magnitude or more.
+const rsSolveIterations = 2
+
+// sphereBackwardMap is THE map this model warps by: given an output pixel, it
+// returns the source pixel to sample from. The renderer and the crop planner
+// both go through it, so the containment the zoom guarantees is a statement
+// about the map actually rendered rather than about a lookalike.
+//
+// rsRot is the rotation the camera sweeps through during one full sensor
+// readout (see BuildRSRotations); the zero vector means no rolling-shutter
+// rectification, and takes a fast path that leaves the non-RS map bit-identical
+// to what it was before rectification existed.
+//
+// The correction is applied as q's INVERSE because q carries the source frame's
+// rays onto the smoothed orientation, so recovering the source ray from an
+// output ray means undoing it.
+func sphereBackwardMap(lens Lens, inv Mat3, zoom float64, rsRot Vec3, height, outX, outY float64) (x, y float64, ok bool) {
+	// Zoom first: the output canvas covers a smaller part of the image plane,
+	// which for these radial models is exactly a longer focal length rather
+	// than a resample of an already-warped picture.
+	px := lens.CX + (outX-lens.CX)/zoom
+	py := lens.CY + (outY-lens.CY)/zoom
+	d := inv.Apply(lens.Ray(px, py))
+
+	sx, sy, ok := lens.Project(d)
+	if !ok {
+		return 0, 0, false
+	}
+	if rsRot == (Vec3{}) {
+		return sx, sy, true
+	}
+	// d is the ray as the camera saw it at the frame's nominal instant. The
+	// pixel actually recording it sits on whichever row was being read out when
+	// it was exposed, and that row saw the camera rotated by rsRot scaled by how
+	// far through the readout it is -- so solve for the row that is consistent
+	// with its own exposure time.
+	for i := 0; i < rsSolveIterations; i++ {
+		t := (sy - lens.CY) / height
+		obs := quatExp(Vec3{rsRot.X * t, rsRot.Y * t, rsRot.Z * t}).Matrix().Apply(d)
+		nx, ny, nok := lens.Project(obs)
+		if !nok {
+			return 0, 0, false
+		}
+		sx, sy = nx, ny
+	}
+	return sx, sy, true
+}
+
+// render warps src by the corrective rotation q at the given zoom, writing the
+// result to dst. rsRot is this frame's rolling-shutter readout rotation (see
+// sphereBackwardMap); the zero vector disables rectification.
+func (s *sphereWarpState) render(src gocv.Mat, q Quat, zoom float64, rsRot Vec3, dst *gocv.Mat) error {
 	inv := q.Matrix().Transpose()
 	if zoom <= 0 {
 		zoom = 1
 	}
+	fh := float64(s.h)
 
 	// Grid sample positions follow Resize's own half-pixel convention -- after
 	// upsampling to the extended canvas, grid element (r,c) lands exactly at
@@ -107,12 +159,7 @@ func (s *sphereWarpState) render(src gocv.Mat, q Quat, zoom float64, dst *gocv.M
 		outY := (float64(r)+0.5)*cell - 0.5 - cell
 		for c := 0; c < s.cols; c++ {
 			outX := (float64(c)+0.5)*cell - 0.5 - cell
-			// Zoom first: the output canvas covers a smaller part of the image
-			// plane, which for these radial models is exactly a longer focal
-			// length rather than a resample of an already-warped picture.
-			x := s.lens.CX + (outX-s.lens.CX)/zoom
-			y := s.lens.CY + (outY-s.lens.CY)/zoom
-			px, py, ok := s.lens.Project(inv.Apply(s.lens.Ray(x, y)))
+			px, py, ok := sphereBackwardMap(s.lens, inv, zoom, rsRot, fh, outX, outY)
 			if !ok {
 				// No source ray images to this output pixel. Point it outside
 				// the frame and let Remap's border mode deal with it; the zoom

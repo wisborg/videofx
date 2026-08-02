@@ -216,18 +216,12 @@ const rotationBoundarySamples = 48
 
 // rotationFitsAtZoom reports whether output frame content warped by correction
 // q, at the given zoom, samples entirely from inside the w x h source frame.
-func rotationFitsAtZoom(q Quat, lens Lens, w, h int, zoom float64) bool {
+func rotationFitsAtZoom(q Quat, lens Lens, w, h int, zoom float64, rsRot Vec3) bool {
 	inv := q.Matrix().Transpose()
 	fw, fh := float64(w), float64(h)
 	const eps = 1e-6
 	for _, p := range boundaryPoints(fw, fh, rotationBoundarySamples) {
-		// Zooming in means the output canvas covers a smaller region of the
-		// image plane: scale the output coordinate toward the centre before
-		// un-projecting it. For these radial models that is exactly a longer
-		// focal length, i.e. a true optical zoom, not a resample of a warp.
-		x := lens.CX + (p.X-lens.CX)/zoom
-		y := lens.CY + (p.Y-lens.CY)/zoom
-		sx, sy, ok := lens.Project(inv.Apply(lens.Ray(x, y)))
+		sx, sy, ok := sphereBackwardMap(lens, inv, zoom, rsRot, fh, p.X, p.Y)
 		if !ok || sx < -eps || sx > fw+eps || sy < -eps || sy > fh+eps {
 			return false
 		}
@@ -253,17 +247,17 @@ func boundaryPoints(w, h float64, n int) []point2 {
 
 // minZoomForRotation is minZoomForCorrection's spherical counterpart: the
 // smallest zoom at which correction q exposes no border.
-func minZoomForRotation(q Quat, lens Lens, w, h int) float64 {
-	if rotationFitsAtZoom(q, lens, w, h, 1.0) {
+func minZoomForRotation(q Quat, lens Lens, w, h int, rsRot Vec3) float64 {
+	if rotationFitsAtZoom(q, lens, w, h, 1.0, rsRot) {
 		return 1.0
 	}
-	if !rotationFitsAtZoom(q, lens, w, h, maxZoomSearchBound) {
+	if !rotationFitsAtZoom(q, lens, w, h, maxZoomSearchBound, rsRot) {
 		return maxZoomSearchBound
 	}
 	lo, hi := 1.0, maxZoomSearchBound
 	for i := 0; i < 40; i++ {
 		mid := (lo + hi) / 2
-		if rotationFitsAtZoom(q, lens, w, h, mid) {
+		if rotationFitsAtZoom(q, lens, w, h, mid, rsRot) {
 			hi = mid
 		} else {
 			lo = mid
@@ -275,14 +269,14 @@ func minZoomForRotation(q Quat, lens Lens, w, h int) float64 {
 // scaleBackRotationToZoom weakens a correction just enough to fit at
 // targetZoom, mirroring scaleBackToZoom: a frame that would need more crop than
 // allowed is stabilized less, never shown with a hole in it.
-func scaleBackRotationToZoom(q Quat, lens Lens, w, h int, targetZoom float64) (Quat, float64) {
-	if rotationFitsAtZoom(q, lens, w, h, targetZoom) {
+func scaleBackRotationToZoom(q Quat, lens Lens, w, h int, targetZoom float64, rsRot Vec3) (Quat, float64) {
+	if rotationFitsAtZoom(q, lens, w, h, targetZoom, rsRot) {
 		return q, 1.0
 	}
 	lo, hi := 0.0, 1.0
 	for i := 0; i < 30; i++ {
 		mid := (lo + hi) / 2
-		if rotationFitsAtZoom(attenuateRotation(q, mid), lens, w, h, targetZoom) {
+		if rotationFitsAtZoom(attenuateRotation(q, mid), lens, w, h, targetZoom, rsRot) {
 			lo = mid
 		} else {
 			hi = mid
@@ -309,11 +303,21 @@ type RotationZoom struct {
 // time-varying mode produces (calm stretches keep their own small crop, the
 // zoom eases up only where the shake demands it); 0 collapses to a single
 // clip-wide zoom equal to the worst frame's requirement.
-func PlanRotationZoom(corrections []Quat, lens Lens, w, h int, maxZoom, sigmaFrames float64) RotationZoom {
+func PlanRotationZoom(corrections []Quat, lens Lens, w, h int, maxZoom, sigmaFrames float64, rsRot []Vec3) RotationZoom {
 	n := len(corrections)
+	// The rectification pulls content in from beyond the frame edge, so it must
+	// be part of the containment test rather than covered by a margin bolted on
+	// afterwards -- the crop is then exactly what the rendered map needs, per
+	// frame, instead of a clip-wide guess.
+	rsAt := func(i int) Vec3 {
+		if i < len(rsRot) {
+			return rsRot[i]
+		}
+		return Vec3{}
+	}
 	raw := make([]float64, n)
 	for i, q := range corrections {
-		raw[i] = minZoomForRotation(q, lens, w, h)
+		raw[i] = minZoomForRotation(q, lens, w, h, rsAt(i))
 	}
 
 	var env []float64
@@ -335,7 +339,7 @@ func PlanRotationZoom(corrections []Quat, lens Lens, w, h int, maxZoom, sigmaFra
 		res.PeakRequired = math.Max(res.PeakRequired, raw[i])
 		if maxZoom > 0 && env[i] > maxZoom {
 			env[i] = maxZoom
-			scaled, alpha := scaleBackRotationToZoom(q, lens, w, h, maxZoom)
+			scaled, alpha := scaleBackRotationToZoom(q, lens, w, h, maxZoom, rsAt(i))
 			res.Corrections[i] = scaled
 			if alpha < 1 {
 				res.ClampedFrames++
@@ -367,4 +371,67 @@ func smoothUpperEnvelope(raw []float64, sigmaFrames float64) []float64 {
 		}
 	}
 	return env
+}
+
+// BuildRSRotations returns, per FRAME, the rotation vector the camera sweeps
+// through during one full sensor readout: omega * rho, where omega is the
+// camera's angular velocity in radians per frame period and rho the readout
+// ratio. len(result) == len(series.Transitions)+1, matching BuildRSRectifiers.
+//
+// This is the rotation model's counterpart to BuildRSRectifiers, and it is a
+// better fit to what a rolling shutter actually does. The 2D path has to
+// approximate the effect as a shear plus an anisotropic scale of the picture,
+// because that is the most a 2D transform can express. Here there is nothing to
+// approximate: a rolling shutter means each row was exposed at a different
+// instant and therefore saw a different camera ORIENTATION, which is exactly
+// the quantity this model already works in. Row u's orientation differs from
+// the frame's nominal one by a rotation of rsRot * ((u - cy) / height) -- a
+// straight interpolation along the readout.
+//
+// The velocity is the mean of the two transitions adjacent to the frame, which
+// centres the estimate on the frame rather than leaning half a period to one
+// side, exactly as BuildRSRectifiers does. A frame with no usable neighbour is
+// left unrectified (a zero vector) rather than given a guessed velocity.
+//
+// The same ~0.7 effective-gain ceiling documented on the 2D path applies, and
+// for the same reason: the only velocity available is the frame-INTEGRATED
+// rotation, a box-filtered sample of the instantaneous one. Deconvolving that
+// is a filter that blows up near Nyquist, which is a trade this package has
+// already lost once; --rs-ratio remains the escape hatch for anyone who wants
+// more removal at the cost of over-correcting the low frequencies.
+func BuildRSRotations(series *MotionSeries, rho float64) []Vec3 {
+	n := len(series.Transitions)
+	if n == 0 || rho == 0 {
+		return nil
+	}
+	// step(i) is transition i's rotation as a rotation vector -- the camera's
+	// angular displacement over one frame period, in radians.
+	step := func(i int) (Vec3, bool) {
+		if i < 0 || i >= n {
+			return Vec3{}, false
+		}
+		tr := series.Transitions[i]
+		if !tr.OK || tr.Rotation3 == nil {
+			return Vec3{}, false
+		}
+		return tr.Rotation3.Log(), true
+	}
+	out := make([]Vec3, n+1)
+	for k := 0; k <= n; k++ {
+		before, bok := step(k - 1)
+		after, aok := step(k)
+		var w Vec3
+		switch {
+		case bok && aok:
+			w = Vec3{(before.X + after.X) / 2, (before.Y + after.Y) / 2, (before.Z + after.Z) / 2}
+		case bok:
+			w = before
+		case aok:
+			w = after
+		default:
+			continue // no usable motion for this frame: leave it unrectified
+		}
+		out[k] = Vec3{w.X * rho, w.Y * rho, w.Z * rho}
+	}
+	return out
 }

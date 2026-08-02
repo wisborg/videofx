@@ -107,8 +107,8 @@ Flags:
 - `--sidecar` — gocv-stabilizer only: path to cache the (expensive, multi-minute on a long 4K60 clip) motion-analysis pass so it can be reused across renders — if the file exists it's read instead of re-analyzing; otherwise a fresh analysis is written there. Useful for iterating on `--edge-mode`/`--sigma`/`--max-zoom` without re-analyzing every time. **Not safe to share across a concurrent multi-file batch** (`--concurrency` > 1 with more than one input) — use it only when processing a single input file.
 - `--analysis-width` — gocv-stabilizer only: width in pixels at which motion is estimated (`0` = default `960`; height derived). Larger localizes features more finely but is slower. **Experimental**: on the test footage it did not measurably reduce residual shake — the residual there is real low-frequency motion the smoother keeps, not estimation noise — so whether a higher width yields visibly cleaner warps is an eyeball call. The chosen width is baked into a `--sidecar`'s cached analysis, so change `--analysis-width` and `--sidecar` together (or delete the sidecar) to re-analyze.
 - `--warp-model` — gocv-stabilizer only: the per-frame motion model.
-  - `rotation` (**default**) models the camera's actual lens geometry and fits a **3-DOF rotation of its viewing rays**, instead of transforming the picture in 2D at all. It calibrates the lens from the clip's own motion, integrates the per-frame rotations into an orientation trajectory, low-passes that trajectory on SO(3), and re-projects each frame through the smoothed orientation. **It is the biggest measured shake reduction this project has: `4.40` residual on the very-shaken test clip against `7.41` for the previous best (`mesh`) and `6.49` for Adobe Premiere's Warp Stabilizer — while cropping less than either.** See [Why the lens matters](#why-the-lens-matters) for the measurement that motivated it. It **self-disables** with a warning on any clip whose motion doesn't determine a lens (falling back to `similarity`, byte-identically), **so there is no footage on which it does worse** — which is why it is the default. `--lens`/`--lens-focal` force a calibration for clips too gentle to measure their own. Note `--rolling-shutter` does **not** apply under this model (its rectification composes into a 2D warp this model doesn't use) — it warns, and you can pass `--warp-model similarity` if you need it.
-  - `similarity` fits one 4-DOF transform (pan/rotate/scale) per frame. The previous default, still the fallback whenever a lens can't be calibrated, and what `--rolling-shutter` needs.
+  - `rotation` (**default**) models the camera's actual lens geometry and fits a **3-DOF rotation of its viewing rays**, instead of transforming the picture in 2D at all. It calibrates the lens from the clip's own motion, integrates the per-frame rotations into an orientation trajectory, low-passes that trajectory on SO(3), and re-projects each frame through the smoothed orientation. **It is the biggest measured shake reduction this project has: `4.40` residual on the very-shaken test clip against `7.41` for the previous best (`mesh`) and `6.49` for Adobe Premiere's Warp Stabilizer — while cropping less than either.** See [Why the lens matters](#why-the-lens-matters) for the measurement that motivated it. It **self-disables** with a warning on any clip whose motion doesn't determine a lens (falling back to `similarity`, byte-identically), **so there is no footage on which it does worse** — which is why it is the default. `--lens`/`--lens-focal` force a calibration for clips too gentle to measure their own. `--rolling-shutter` works under this model, and works *better* here than on the 2D path — see below.
+  - `similarity` fits one 4-DOF transform (pan/rotate/scale) per frame. The previous default, and still the fallback whenever a lens can't be calibrated.
   - `mesh` (**EXPERIMENTAL**) adds a MeshFlow-style correction on top of the similarity: it median-votes each frame's local feature motions onto a grid of vertices (`--mesh-grid`), smooths each vertex's path, and warps the frame with the resulting mesh — targeting the rolling-shutter/parallax jitter a single global transform leaves behind. The **median voting is the variance control** the `homography` model lacked, and because it corrects only the *residual* beyond the similarity, it's a no-op on rigid/gentle footage (no regression there). On the very-shaken test clip it measurably beats similarity. The correction inevitably exposes a border (a spatially-varying warp bends the frame), which is **auto-cropped** to a clean frame sized to the 95th-percentile frame; `--mesh-strength` dials the whole correction down to trade shake removal for less crop/distortion. Defaults: grid `1` (a near-global 2×2 mesh — coarser stopped buying shake reduction while cropping least) at strength `0.3`. Tuning is ongoing.
   - `homography` (**EXPERIMENTAL, not recommended**): fits one 8-DOF homography per frame. It *registers* frames ~42% better than a similarity, but as a per-frame stabilizer the 8-DOF fit's variance **injected more jitter than it removed** (residual `12.15` vs `10.81`) — kept only as scaffolding; use `mesh` instead.
   
@@ -726,6 +726,46 @@ configurations are only comparable at matched crop.
 less than the `similarity` model **at essentially matched crop** (18.7% vs 17.1%) — so
 the win is the model, not the zoom. The p90, which covers the high-acceleration frames
 where models differ most, improves further: `9.71` against Premiere's `16.61`.
+
+### Rolling shutter under the rotation model
+
+`--rolling-shutter` composes into this model too, and the physics comes out
+cleaner. On the 2D path the effect has to be *approximated* as a shear plus an
+anisotropic scale of the picture, because that is the most a 2D transform can
+express. Here there is nothing to approximate: a rolling shutter means each row
+was exposed at a different instant and therefore saw a different camera
+**orientation**, which is the quantity this model already works in. Row `u`'s
+orientation simply differs from the frame's nominal one by a rotation
+interpolated along the readout.
+
+That makes the backward map *implicit* — a row's rectification depends on the
+row it lands on — so it is solved by a two-step fixed point, which converges
+hard (the contraction factor is ~0.005 on this footage). The crop it needs goes
+through the same per-frame containment test as everything else rather than a
+clip-wide margin bolted on afterwards.
+
+**Measured on `test_very_shaken.mp4`** — the gate here is *not* the residual
+metric, which is a translation metric and near-blind to shear, but how much
+rolling shutter is left in the render (`vidiobench -mode=rs -pred-file=<raw>`):
+
+| rotation render | residual median | p90 | crop | RS left (pooled) |
+|---|---:|---:|---:|---:|
+| without `--rolling-shutter` | 4.40 | 9.71 | 18.66% | 0.412 |
+| **with `--rolling-shutter`** | **4.25** | **9.30** | **18.58%** | **0.208** |
+
+Half the rolling shutter removed (horizontal `0.223`→`0.083`, vertical
+`0.472`→`0.248`), for **no crop and a slightly better residual**. That last part
+is worth noting because it does *not* happen on the 2D path, where correcting
+rolling shutter makes the residual metric slightly worse: there, the similarity
+misreads the shear as camera roll and applies a spurious counter-rotation that
+accidentally cancels the shear's signature in a re-fit, so correcting properly
+removes the compensation along with the error. The rotation model never makes
+that mistake, so there is no compensating error to lose.
+
+The same ~0.7 effective-gain ceiling documented for the 2D path still applies:
+the only velocity available is the frame-*integrated* rotation, a box-filtered
+sample of the instantaneous one, and deconvolving that is a filter that blows up
+near Nyquist. `--rs-ratio` remains the escape hatch.
 
 **Where it does not help.** The win scales with how much *rotational* shake there is and
 how *wide* the lens is. On gentle footage (`test_small.mp4`) the clip's motion does not
