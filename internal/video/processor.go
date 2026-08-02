@@ -299,9 +299,13 @@ func processOne(ctx context.Context, job Job, cfg ProcessorConfig) Result {
 			Log:        jobLog,
 		}); applyErr != nil {
 			// Name the failing effect: in a chain "gocv-stabilizer: ..." is
-			// far more useful than a bare error. Best-effort remove this
-			// step's partial output so a failed run leaves nothing broken
-			// next to the original (intermediates go with the temp dir).
+			// far more useful than a bare error. This is the ONLY place that
+			// attribution is added -- effects deliberately do not prefix their
+			// own errors, because a hand-written "telemetry: " is a copy of
+			// eff.Name() that can drift from it, and because every effect
+			// doing it too produced "telemetry: telemetry: ...". Best-effort
+			// remove this step's partial output so a failed run leaves nothing
+			// broken next to the original (intermediates go with the temp dir).
 			res.Err = fmt.Errorf("%s: %w", eff.Name(), applyErr)
 			_ = os.Remove(out)
 			return res

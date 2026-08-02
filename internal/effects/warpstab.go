@@ -150,7 +150,7 @@ func (w *WarpStabilizer) Apply(ctx context.Context, in Input) error {
 
 	tmpDir, err := os.MkdirTemp("", "videofx-vidstab-*")
 	if err != nil {
-		return fmt.Errorf("warp-stabilizer: creating temp dir: %w", err)
+		return fmt.Errorf("creating temp dir: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -179,7 +179,7 @@ func (w *WarpStabilizer) Apply(ctx context.Context, in Input) error {
 	detectArgs = append(detectArgs, threadArgs...)
 	detectArgs = append(detectArgs, "-vf", detectFilter, "-f", "null", "-")
 	if err := w.Runner.Run(ctx, ffmpegBin, detectArgs...); err != nil {
-		return fmt.Errorf("warp-stabilizer: detect pass (using %s): %w", ffmpegBin, err)
+		return fmt.Errorf("detect pass (using %s): %w", ffmpegBin, err)
 	}
 
 	// Pass 2: apply smoothing using the transform log, render output.
@@ -217,7 +217,7 @@ func (w *WarpStabilizer) Apply(ctx context.Context, in Input) error {
 		in.OutputPath,
 	)
 	if err := w.Runner.Run(ctx, ffmpegBin, transformArgs...); err != nil {
-		return fmt.Errorf("warp-stabilizer: transform pass (using %s): %w", ffmpegBin, err)
+		return fmt.Errorf("transform pass (using %s): %w", ffmpegBin, err)
 	}
 
 	return nil

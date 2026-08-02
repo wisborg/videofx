@@ -260,7 +260,7 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 		edgeMode = stabilize.EdgeModeAdaptive
 	}
 	if _, err := stabilize.ParseEdgeMode(string(edgeMode)); err != nil {
-		return fmt.Errorf("gocv-stabilizer: %w", err)
+		return err
 	}
 
 	trackOpts := g.TrackOptions
@@ -298,11 +298,11 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 
 	series, err := g.loadOrAnalyze(ctx, log, in.SourcePath, trackOpts)
 	if err != nil {
-		return fmt.Errorf("gocv-stabilizer: analyzing %s: %w", in.SourcePath, err)
+		return fmt.Errorf("analyzing %s: %w", in.SourcePath, err)
 	}
 
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("gocv-stabilizer: %w", err)
+		return err
 	}
 
 	// Rolling shutter, if asked for. This happens before Smooth because half
@@ -317,7 +317,7 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 		var err error
 		rho, err = g.readoutRatio(log, series)
 		if err != nil {
-			return fmt.Errorf("gocv-stabilizer: %w", err)
+			return err
 		}
 		if rho > 0 {
 			rsRect = stabilize.BuildRSRectifiers(series, rho)
@@ -392,7 +392,7 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 	}
 
 	if _, err := stabilize.Render(ctx, in.SourcePath, series, result, renderOpts, in.OutputPath); err != nil {
-		return fmt.Errorf("gocv-stabilizer: rendering %s: %w", in.SourcePath, err)
+		return fmt.Errorf("rendering %s: %w", in.SourcePath, err)
 	}
 	return nil
 }

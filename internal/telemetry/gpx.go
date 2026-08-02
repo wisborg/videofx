@@ -121,18 +121,18 @@ func WriteGPX(w io.Writer, points []ClipPoint, opts GPXOptions) error {
 	}
 
 	if _, err := io.WriteString(w, xml.Header); err != nil {
-		return fmt.Errorf("telemetry: writing GPX header: %w", err)
+		return fmt.Errorf("writing GPX header: %w", err)
 	}
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
 	if err := enc.Encode(root); err != nil {
-		return fmt.Errorf("telemetry: encoding GPX: %w", err)
+		return fmt.Errorf("encoding GPX: %w", err)
 	}
 	// xml.Encoder.Encode does not itself emit a trailing newline; add one
 	// so the file behaves like every other text file this codebase writes
 	// (diff-friendly, POSIX-text-file-clean).
 	if _, err := io.WriteString(w, "\n"); err != nil {
-		return fmt.Errorf("telemetry: writing GPX trailing newline: %w", err)
+		return fmt.Errorf("writing GPX trailing newline: %w", err)
 	}
 	return nil
 }

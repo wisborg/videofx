@@ -90,7 +90,7 @@ func WriteSRT(w io.Writer, points []ClipPoint, opts SRTOptions) error {
 		_, err := fmt.Fprintf(w, "%d\n%s --> %s\n%s\n\n",
 			i+1, srtTimestamp(p.PTS), srtTimestamp(end), body)
 		if err != nil {
-			return fmt.Errorf("telemetry: writing SRT cue %d: %w", i+1, err)
+			return fmt.Errorf("writing SRT cue %d: %w", i+1, err)
 		}
 	}
 	return nil

@@ -107,7 +107,7 @@ func (t *TelemetryHUD) ValidateStrength(_ float64) error { return nil }
 
 func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	if t.FitPath == "" {
-		return fmt.Errorf("telemetry-hud: --fit is required (path to a Garmin FIT activity file)")
+		return fmt.Errorf("--fit is required (path to a Garmin FIT activity file)")
 	}
 
 	// Same rationale as Telemetry.Apply: the FIT file is a field, not
@@ -116,15 +116,15 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 
 	track, err := telemetry.Decode(t.FitPath)
 	if err != nil {
-		return fmt.Errorf("telemetry-hud: %w", err)
+		return err
 	}
 
 	info, err := vidio.Probe(ctx, in.SourcePath)
 	if err != nil {
-		return fmt.Errorf("telemetry-hud: probing %s: %w", in.SourcePath, err)
+		return fmt.Errorf("probing %s: %w", in.SourcePath, err)
 	}
 	if !info.HasCreationTime {
-		return fmt.Errorf("telemetry-hud: %s carries no creation_time, so it cannot be time-synced against %s "+
+		return fmt.Errorf("%s carries no creation_time, so it cannot be time-synced against %s "+
 			"(the stabilizers preserve creation_time onto their output, so run this against a clip -- or a stabilized "+
 			"copy of one -- that still has it)", in.SourcePath, t.FitPath)
 	}
@@ -132,7 +132,7 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		log.Warnf("creation_time has no timezone marker -- assuming UTC")
 	}
 	if info.FPS <= 0 || info.Width <= 0 || info.Height <= 0 {
-		return fmt.Errorf("telemetry-hud: %s reported unusable dimensions/fps (%dx%d @ %v)", in.SourcePath, info.Width, info.Height, info.FPS)
+		return fmt.Errorf("%s reported unusable dimensions/fps (%dx%d @ %v)", in.SourcePath, info.Width, info.Height, info.FPS)
 	}
 
 	offset := time.Duration(t.OffsetSeconds * float64(time.Second))
@@ -142,7 +142,7 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	sync := telemetry.Resolve(track, info.CreationTime, offset, duration)
 	switch sync.Overlap {
 	case telemetry.NoOverlap:
-		return fmt.Errorf("telemetry-hud: clip window [%s, %s] does not overlap %s's recorded coverage [%s, %s] -- "+
+		return fmt.Errorf("clip window [%s, %s] does not overlap %s's recorded coverage [%s, %s] -- "+
 			"wrong FIT file, or wrong --offset?",
 			sync.Start.Format(time.RFC3339), sync.End.Format(time.RFC3339), t.FitPath,
 			sync.CoverageStart.Format(time.RFC3339), sync.CoverageEnd.Format(time.RFC3339))
@@ -158,7 +158,7 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		frameCount = int(info.Duration * info.FPS)
 	}
 	if frameCount <= 0 {
-		return fmt.Errorf("telemetry-hud: could not determine %s's frame count", in.SourcePath)
+		return fmt.Errorf("could not determine %s's frame count", in.SourcePath)
 	}
 
 	// Work in DISPLAY dimensions: a rotated clip (e.g. a phone-shot vertical
@@ -204,7 +204,7 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		Quality:    t.Quality,
 	})
 	if err != nil {
-		return fmt.Errorf("telemetry-hud: %w", err)
+		return err
 	}
 
 	// Render the HUD's static layer (route outline, elevation profile, ticks,
@@ -222,7 +222,7 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		if i%256 == 0 {
 			if err := ctx.Err(); err != nil {
 				_ = enc.Close()
-				return fmt.Errorf("telemetry-hud: %w", err)
+				return err
 			}
 		}
 		// Video clock == watch clock after the offset correction, so the
@@ -247,12 +247,12 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		})
 		if err := enc.WriteFrame(img); err != nil {
 			_ = enc.Close()
-			return fmt.Errorf("telemetry-hud: rendering frame %d: %w", i, err)
+			return fmt.Errorf("rendering frame %d: %w", i, err)
 		}
 	}
 
 	if err := enc.Close(); err != nil {
-		return fmt.Errorf("telemetry-hud: %w", err)
+		return err
 	}
 	return nil
 }

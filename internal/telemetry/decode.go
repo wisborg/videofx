@@ -29,7 +29,7 @@ import (
 func Decode(path string) (*Track, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("telemetry: opening %s: %w", path, err)
+		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
 	defer f.Close()
 
@@ -38,7 +38,7 @@ func Decode(path string) (*Track, error) {
 
 	dec := decoder.New(f, decoder.WithMesgListener(lis), decoder.WithBroadcastOnly())
 	if _, err := dec.Decode(); err != nil {
-		return nil, fmt.Errorf("telemetry: decoding %s: %w", path, err)
+		return nil, fmt.Errorf("decoding %s: %w", path, err)
 	}
 
 	act, ok := lis.File().(*filedef.Activity)
@@ -48,7 +48,7 @@ func Decode(path string) (*Track, error) {
 		// (the kind a watch/head unit records a run/ride into), so any
 		// other file type is reported rather than silently producing an
 		// empty Track.
-		return nil, fmt.Errorf("telemetry: %s is not a FIT Activity file (decoded as %T)", path, lis.File())
+		return nil, fmt.Errorf("%s is not a FIT Activity file (decoded as %T)", path, lis.File())
 	}
 
 	devFields := indexFieldDescriptions(act.FieldDescriptions)

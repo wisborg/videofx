@@ -51,18 +51,18 @@ func (r *Rotate) ValidateStrength(_ float64) error { return nil }
 
 func (r *Rotate) Apply(ctx context.Context, in Input) error {
 	if r.Degrees != 90 && r.Degrees != 180 && r.Degrees != 270 {
-		return fmt.Errorf("rotate: --rotate must be 90, 180, or 270 (got %d)", r.Degrees)
+		return fmt.Errorf("--rotate must be 90, 180, or 270 (got %d)", r.Degrees)
 	}
 
 	info, err := vidio.Probe(ctx, in.SourcePath)
 	if err != nil {
-		return fmt.Errorf("rotate: probing %s: %w", in.SourcePath, err)
+		return fmt.Errorf("probing %s: %w", in.SourcePath, err)
 	}
 
 	v := composedDisplayRotation(info.Rotation, r.Degrees)
 	args := rotateArgs(v, in.SourcePath, in.OutputPath, in.Log.Enabled(logging.LevelDebug))
 	if err := r.Runner.Run(ctx, "ffmpeg", args...); err != nil {
-		return fmt.Errorf("rotate: rotating %s: %w", in.OutputPath, err)
+		return fmt.Errorf("rotating %s: %w", in.OutputPath, err)
 	}
 	return nil
 }

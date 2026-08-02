@@ -129,7 +129,7 @@ func (t *Telemetry) ValidateStrength(strength float64) error {
 // dispatch and effects.AvailabilityChecker's own doc comment.
 func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 	if t.FitPath == "" {
-		return fmt.Errorf("telemetry: --fit is required (path to a Garmin FIT activity file)")
+		return fmt.Errorf("--fit is required (path to a Garmin FIT activity file)")
 	}
 
 	// The FIT file is the other half of every message this effect emits, and
@@ -139,15 +139,15 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 
 	track, err := telemetry.Decode(t.FitPath)
 	if err != nil {
-		return fmt.Errorf("telemetry: %w", err)
+		return err
 	}
 
 	info, err := vidio.Probe(ctx, in.SourcePath)
 	if err != nil {
-		return fmt.Errorf("telemetry: probing %s: %w", in.SourcePath, err)
+		return fmt.Errorf("probing %s: %w", in.SourcePath, err)
 	}
 	if !info.HasCreationTime {
-		return fmt.Errorf("telemetry: %s carries no creation_time, so it cannot be time-synced against %s -- "+
+		return fmt.Errorf("%s carries no creation_time, so it cannot be time-synced against %s -- "+
 			"this is exactly the metadata warp-stabilizer/gocv-stabilizer now preserve onto their own output, "+
 			"so re-run against a clip (or a stabilized copy of one) that still has it; "+
 			"a future --start-time flag could let you supply the clip's start time by hand instead",
@@ -182,7 +182,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 	sync := telemetry.Resolve(track, info.CreationTime, offset, duration)
 	switch sync.Overlap {
 	case telemetry.NoOverlap:
-		return fmt.Errorf("telemetry: clip window [%s, %s] does not overlap %s's recorded coverage [%s, %s] at all -- "+
+		return fmt.Errorf("clip window [%s, %s] does not overlap %s's recorded coverage [%s, %s] at all -- "+
 			"wrong FIT file, or wrong --offset?",
 			sync.Start.Format(time.RFC3339), sync.End.Format(time.RFC3339), t.FitPath,
 			sync.CoverageStart.Format(time.RFC3339), sync.CoverageEnd.Format(time.RFC3339))
@@ -200,7 +200,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 	if t.GPX {
 		gpxPath := gpxSidecarPath(in.OutputPath)
 		if err := writeGPXFile(gpxPath, points, fields); err != nil {
-			return fmt.Errorf("telemetry: %w", err)
+			return err
 		}
 	}
 
@@ -213,7 +213,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 	// separate .srt, matching DJI's own MP4+SRT file-pair workflow.
 	if wantSRT && t.SRTSidecar {
 		if err := writeSRTFile(srtSidecarPath(in.OutputPath), points, fields, srtFormat); err != nil {
-			return fmt.Errorf("telemetry: %w", err)
+			return err
 		}
 	}
 
@@ -221,13 +221,13 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 	if embedSubtitle {
 		tmpDir, err := os.MkdirTemp("", "videofx-telemetry-*")
 		if err != nil {
-			return fmt.Errorf("telemetry: creating temp dir: %w", err)
+			return fmt.Errorf("creating temp dir: %w", err)
 		}
 		defer os.RemoveAll(tmpDir)
 
 		srtPath = filepath.Join(tmpDir, "telemetry.srt")
 		if err := writeSRTFile(srtPath, points, fields, srtFormat); err != nil {
-			return fmt.Errorf("telemetry: %w", err)
+			return err
 		}
 	}
 
@@ -265,7 +265,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 		runArgs = append([]string{"-hide_banner", "-loglevel", "error"}, args...)
 	}
 	if err := t.Runner.Run(ctx, "ffmpeg", runArgs...); err != nil {
-		return fmt.Errorf("telemetry: muxing %s: %w", in.OutputPath, err)
+		return fmt.Errorf("muxing %s: %w", in.OutputPath, err)
 	}
 
 	// Hide the subtitle track (unless asked to show it): embedded telemetry
@@ -274,7 +274,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 	// ffmpeg can't clear the track-enabled flag itself, so patch it here.
 	if embedSubtitle && !t.ShowSubtitle {
 		if err := hideSubtitleTrack(in.OutputPath); err != nil {
-			return fmt.Errorf("telemetry: hiding subtitle track in %s: %w", in.OutputPath, err)
+			return fmt.Errorf("hiding subtitle track in %s: %w", in.OutputPath, err)
 		}
 	}
 

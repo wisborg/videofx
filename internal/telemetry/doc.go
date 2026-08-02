@@ -25,6 +25,15 @@
 // output file — that is Phase 4, built on top of what this package
 // produces.
 //
+// Errors from this package are deliberately NOT prefixed with "telemetry: ",
+// unlike internal/vidio's and internal/stabilize's. This package's name
+// collides with the name of the effect built on it (effects.Telemetry), and
+// both layers appear in every error the CLI surfaces for that effect, so the
+// prefix produced "telemetry: telemetry: opening x.fit: ...". The effect's
+// attribution comes from video.processOne wrapping with Effect.Name(), and
+// these messages already name the file they are about, so nothing was lost by
+// dropping it.
+//
 // FIT's wire format marks an absent field with a type-specific sentinel
 // (e.g. 0xFFFF for a uint16, a specific all-ones bit pattern for a
 // float64) rather than zero — a GPS fix that hasn't happened yet (before
