@@ -46,6 +46,24 @@ type MotionSeries struct {
 	// Transition spans a consecutive pair of frames.
 	FrameCount int `json:"frameCount"`
 
+	// SourceFrames is how many frames the container claimed to hold when
+	// this series was analyzed, or 0 when it did not say. It exists to be
+	// compared against FrameCount: a decode that stops early because the
+	// source is truncated does not fail, it succeeds and returns fewer
+	// frames (measured: ffmpeg emits 186 of 300 frames from a truncated
+	// MP4, prints a decoding error, and exits 0), so the count is the only
+	// evidence that anything went wrong.
+	//
+	// It is advisory and must not be treated as ground truth: containers
+	// with variable frame rates, and some that simply lie, report a count
+	// that legitimately differs from what decodes. Callers warn on a
+	// mismatch; nothing here fails on one.
+	//
+	// Persisted deliberately, so that reusing a sidecar built from a short
+	// analysis keeps reporting the problem instead of laundering it into a
+	// cache that looks authoritative.
+	SourceFrames int `json:"sourceFrames,omitempty"`
+
 	// Options is the configuration Analyze was run with, so a later
 	// phase (or a human comparing two sidecars) can see exactly what
 	// tracking/RANSAC settings produced these numbers.
@@ -132,7 +150,7 @@ func (s *MotionSeries) hasMesh() bool {
 // stale one is simply overwritten rather than migrated.
 var sidecarMagic = [6]byte{'V', 'F', 'X', 'M', 'O', 'T'}
 
-const sidecarVersion uint8 = 3
+const sidecarVersion uint8 = 4
 
 // maxSidecarHeaderLen caps the declared JSON header length ReadSidecar will
 // allocate for. The header holds a fixed set of scalar fields plus an Options
@@ -163,6 +181,7 @@ type sidecarHeader struct {
 	AnalysisHeight int     `json:"analysisHeight"`
 	FPS            float64 `json:"fps"`
 	FrameCount     int     `json:"frameCount"`
+	SourceFrames   int     `json:"sourceFrames,omitempty"`
 	Options        Options `json:"options"`
 	MeshCols       int     `json:"meshCols,omitempty"`
 	MeshRows       int     `json:"meshRows,omitempty"`
@@ -190,6 +209,7 @@ func WriteSidecar(path string, series *MotionSeries) error {
 		AnalysisHeight: series.AnalysisHeight,
 		FPS:            series.FPS,
 		FrameCount:     series.FrameCount,
+		SourceFrames:   series.SourceFrames,
 		Options:        series.Options,
 		MeshCols:       meshCols,
 		MeshRows:       meshRows,
@@ -362,6 +382,7 @@ func ReadSidecar(path string) (*MotionSeries, error) {
 		AnalysisHeight: h.AnalysisHeight,
 		FPS:            h.FPS,
 		FrameCount:     h.FrameCount,
+		SourceFrames:   h.SourceFrames,
 		Options:        h.Options,
 		Lens:           h.Lens,
 	}

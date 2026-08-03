@@ -391,8 +391,20 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 		renderOpts.MeshZoomMargin = 0.04
 	}
 
-	if _, err := stabilize.Render(ctx, in.SourcePath, series, result, renderOpts, in.OutputPath); err != nil {
+	stats, err := stabilize.Render(ctx, in.SourcePath, series, result, renderOpts, in.OutputPath)
+	if err != nil {
 		return fmt.Errorf("rendering %s: %w", in.SourcePath, err)
+	}
+	// Unlike the analysis-side warning above, this one is not inferred from
+	// container metadata: these frames arrived and there was no correction to
+	// apply to them. Whatever the cause -- a short analysis, a reused sidecar,
+	// a source that grew between the two passes -- that stretch of the output
+	// is unstabilized, and the run would otherwise report success without
+	// mentioning it.
+	if stats.UncorrectedFrames > 0 {
+		log.Warnf(
+			"%d of %d rendered frames had no correction and were passed through unstabilized -- the analysis covered %d frames; delete the sidecar (or re-run without --sidecar) to re-analyze the whole clip",
+			stats.UncorrectedFrames, stats.FramesRendered, series.FrameCount)
 	}
 	return nil
 }
@@ -507,6 +519,7 @@ func (g *GoCVStabilizer) loadOrAnalyze(ctx context.Context, log *logging.Logger,
 					"sidecar was analyzed with --warp-model %s, but this run asked for %s -- rendering with %s, since the model is baked into the analysis; delete the sidecar to re-analyze",
 					modelName(series.Options.WarpModel), modelName(opts.WarpModel), modelName(series.Options.WarpModel))
 			}
+			warnIfShortAnalysis(log, sourcePath, series)
 			return series, nil
 		}
 	}
@@ -515,6 +528,7 @@ func (g *GoCVStabilizer) loadOrAnalyze(ctx context.Context, log *logging.Logger,
 	if err != nil {
 		return nil, err
 	}
+	warnIfShortAnalysis(log, sourcePath, series)
 
 	if g.SidecarPath != "" {
 		if err := stabilize.WriteSidecar(g.SidecarPath, series); err != nil {
@@ -523,6 +537,39 @@ func (g *GoCVStabilizer) loadOrAnalyze(ctx context.Context, log *logging.Logger,
 	}
 
 	return series, nil
+}
+
+// warnIfShortAnalysis reports an analysis that decoded materially fewer frames
+// than the container said the source holds.
+//
+// This is the cheapest point at which a truncated or corrupt source can be
+// noticed, and noticing it here matters because the alternative is not an
+// error: ffmpeg decodes what it can of a damaged file, writes a complaint to
+// stderr, and exits 0. Nothing downstream fails. The clip simply stops being
+// stabilized partway through, and with --sidecar the short analysis is cached
+// as though it were the whole story.
+//
+// It is advisory in both directions and deliberately says "may". NBFrames is
+// container metadata: absent for some sources, wrong for variable-frame-rate
+// ones. A mismatch is evidence, not proof, which is why this warns rather than
+// failing -- and why it is called on the sidecar path too. A cache built from a
+// short analysis should keep saying so on every reuse, not only on the run that
+// created it.
+func warnIfShortAnalysis(log *logging.Logger, sourcePath string, series *stabilize.MotionSeries) {
+	if series.SourceFrames <= 0 || series.FrameCount >= series.SourceFrames {
+		return
+	}
+	// A frame or two of disagreement is ordinary container bookkeeping and not
+	// worth a warning; a shortfall big enough to leave a visible stretch of the
+	// clip unstabilized is.
+	const tolerance = 2
+	missing := series.SourceFrames - series.FrameCount
+	if missing <= tolerance {
+		return
+	}
+	log.Warnf(
+		"analysis decoded %d frames but the container advertises %d (%d short) -- the source may be truncated or corrupt; expect the output to be short by about as much, and any frames that do decode past the analysis to be passed through unstabilized",
+		series.FrameCount, series.SourceFrames, missing)
 }
 
 // mapStrengthToSigma converts the Effect interface's normalized 0.0-1.0

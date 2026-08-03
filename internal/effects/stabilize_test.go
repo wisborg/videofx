@@ -577,3 +577,58 @@ func TestReadoutRatioReporting(t *testing.T) {
 		})
 	}
 }
+
+// TestWarnIfShortAnalysis pins when the truncated-source warning fires.
+//
+// Both directions matter. A warning that never fires is the defect this was
+// written to fix; a warning that fires on healthy clips gets tuned out, which
+// leaves the same defect with extra noise. The tolerance case is the one that
+// decides which of those this becomes -- container frame counts disagree with
+// what decodes by a frame or two routinely, and warning on that would mean
+// warning on ordinary footage.
+func TestWarnIfShortAnalysis(t *testing.T) {
+	tests := []struct {
+		name         string
+		sourceFrames int
+		frameCount   int
+		wantWarn     bool
+	}{
+		{"container did not say", 0, 100, false},
+		{"exact agreement", 300, 300, false},
+		{"decoded more than advertised", 300, 305, false},
+		{"one frame short is bookkeeping", 300, 299, false},
+		{"two frames short is bookkeeping", 300, 298, false},
+		{"three frames short warns", 300, 297, true},
+		{"truncated source", 300, 186, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			series := &stabilize.MotionSeries{
+				SourceFrames: tc.sourceFrames,
+				FrameCount:   tc.frameCount,
+			}
+			warnIfShortAnalysis(captureLog(&buf, false), "clip.mp4", series)
+
+			got := strings.Contains(buf.String(), "WARN")
+			if got != tc.wantWarn {
+				t.Errorf("warned = %v, want %v (log: %q)", got, tc.wantWarn, buf.String())
+			}
+			if !tc.wantWarn {
+				return
+			}
+			// The counts are the whole value of the message: they are what
+			// tells someone whether a clip lost three frames or half of
+			// itself. A warning that fired without them would be noise.
+			for _, want := range []string{
+				strconv.Itoa(tc.frameCount),
+				strconv.Itoa(tc.sourceFrames),
+				strconv.Itoa(tc.sourceFrames - tc.frameCount),
+			} {
+				if !strings.Contains(buf.String(), want) {
+					t.Errorf("warning omits %q: %q", want, buf.String())
+				}
+			}
+		})
+	}
+}

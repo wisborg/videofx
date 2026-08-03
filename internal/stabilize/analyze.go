@@ -63,6 +63,7 @@ func Analyze(ctx context.Context, path string, opts Options) (*MotionSeries, err
 		AnalysisWidth:  size.Width,
 		AnalysisHeight: size.Height,
 		FPS:            info.FPS,
+		SourceFrames:   info.NBFrames,
 		Options:        opts,
 	}
 

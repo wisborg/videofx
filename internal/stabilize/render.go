@@ -215,6 +215,25 @@ type RenderStats struct {
 	// or duplicate frames.
 	FramesRendered int
 
+	// UncorrectedFrames counts frames that decoded past the end of the
+	// correction series and were therefore rendered with
+	// identityCorrection -- i.e. passed through unstabilized.
+	//
+	// Any non-zero value means the render and the analysis disagreed about
+	// how long the clip is, and the tail of the output is not stabilized.
+	// Unlike a frame-count comparison against container metadata, this is
+	// not an estimate: the frames arrived, and there was nothing to apply
+	// to them. The usual cause is a sidecar built from a shorter analysis
+	// of the same source, which is exactly the case identityCorrection's
+	// doc comment describes.
+	//
+	// Render does not fail on this -- an unstabilized tail is still a
+	// watchable clip, and refusing to produce one helps nobody -- but the
+	// caller is expected to say so out loud. Silence was the actual defect
+	// here: the fallback behaviour was always deliberate, and always
+	// invisible.
+	UncorrectedFrames int
+
 	// Zoom is the zoom fraction actually rendered with: 0.12 means 12%.
 	// For EdgeModeFlowFill this is always 0 (no cropping -- borders are
 	// filled instead of hidden by zooming).
@@ -517,6 +536,13 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 		}
 
 		if sphere != nil {
+			// Counted against rotCorr, not corrections: on this path the 2D
+			// series is not what gets applied, and on a short clip the two
+			// can legitimately differ in length, so counting the wrong one
+			// would report an unstabilized tail on every healthy render.
+			if frames >= len(rotCorr) {
+				stats.UncorrectedFrames++
+			}
 			q := identityQuat
 			if frames < len(rotCorr) {
 				q = rotCorr[frames]
@@ -539,6 +565,12 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 			}
 			frames++
 			continue
+		}
+
+		// Every remaining path warps by corr, so a frame past the end of
+		// corrections is a frame passed through unstabilized.
+		if frames >= len(corrections) {
+			stats.UncorrectedFrames++
 		}
 
 		switch {

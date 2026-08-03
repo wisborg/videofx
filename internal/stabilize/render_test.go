@@ -160,3 +160,109 @@ func countFramesFfprobe(ctx context.Context, path string) (int, error) {
 	}
 	return n, nil
 }
+
+// TestRender_CountsFramesWithNoCorrection covers the case Render was always
+// built to survive but never reported: more frames decode than the analysis
+// produced corrections for.
+//
+// identityCorrection's doc comment describes this as a defensively-handled
+// mismatch, and passing those frames through unwarped is the right call -- an
+// unstabilized tail is still a watchable clip. What was missing is any trace
+// that it happened. A source truncated after analysis, or a sidecar built from
+// a shorter analysis of the same file, produced an output whose back end was
+// silently unstabilized and a run that exited 0 with nothing to say.
+//
+// The count is deliberately asserted exactly, not merely as "> 0": an
+// off-by-one here would misreport how much of the clip is affected, which is
+// the only number the warning gives a user to act on.
+func TestRender_CountsFramesWithNoCorrection(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+
+	const (
+		wantFrames  = 8
+		haveCorr    = 5 // as if the analysis had stopped three frames early
+		wantMissing = wantFrames - haveCorr
+	)
+	dir := t.TempDir()
+	src := generateTinyTestSource(t, dir, wantFrames)
+
+	ctx := context.Background()
+	info, err := vidio.Probe(ctx, src)
+	if err != nil {
+		t.Fatalf("probing synthetic source: %v", err)
+	}
+
+	series := &MotionSeries{
+		SourcePath:     src,
+		SourceWidth:    info.Width,
+		SourceHeight:   info.Height,
+		AnalysisWidth:  info.Width,
+		AnalysisHeight: info.Height,
+		FPS:            info.FPS,
+		FrameCount:     haveCorr,
+	}
+	corrections := make([]Correction, haveCorr)
+	for i := range corrections {
+		corrections[i] = Correction{DX: 1.5, DY: -1.0, Rotation: 0.01, Scale: 1}
+	}
+	result := &SmoothResult{Corrections: corrections}
+
+	out := filepath.Join(dir, "short.mp4")
+	stats, err := Render(ctx, src, series, result, DefaultRenderOptions(), out)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	// Every frame must still be rendered: the point of the fallback is that a
+	// short analysis costs stabilization, not footage.
+	if stats.FramesRendered != wantFrames {
+		t.Errorf("FramesRendered = %d, want %d", stats.FramesRendered, wantFrames)
+	}
+	if stats.UncorrectedFrames != wantMissing {
+		t.Errorf("UncorrectedFrames = %d, want %d", stats.UncorrectedFrames, wantMissing)
+	}
+}
+
+// TestRender_FullCorrectionsReportNoneUncorrected is the other half of the
+// pair: a healthy render must report zero, or the warning built on this
+// counter would fire on every ordinary run and be tuned out immediately.
+func TestRender_FullCorrectionsReportNoneUncorrected(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+
+	const wantFrames = 8
+	dir := t.TempDir()
+	src := generateTinyTestSource(t, dir, wantFrames)
+
+	ctx := context.Background()
+	info, err := vidio.Probe(ctx, src)
+	if err != nil {
+		t.Fatalf("probing synthetic source: %v", err)
+	}
+
+	series := &MotionSeries{
+		SourcePath:     src,
+		SourceWidth:    info.Width,
+		SourceHeight:   info.Height,
+		AnalysisWidth:  info.Width,
+		AnalysisHeight: info.Height,
+		FPS:            info.FPS,
+		FrameCount:     wantFrames,
+	}
+	corrections := make([]Correction, wantFrames)
+	for i := range corrections {
+		corrections[i] = Correction{DX: 1.5, DY: -1.0, Rotation: 0.01, Scale: 1}
+	}
+
+	out := filepath.Join(dir, "full.mp4")
+	stats, err := Render(ctx, src, series, &SmoothResult{Corrections: corrections}, DefaultRenderOptions(), out)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if stats.UncorrectedFrames != 0 {
+		t.Errorf("UncorrectedFrames = %d on a fully-corrected render, want 0", stats.UncorrectedFrames)
+	}
+}
