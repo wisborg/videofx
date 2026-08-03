@@ -13,6 +13,7 @@ import (
 	"videofx/internal/calibrate"
 	"videofx/internal/effects"
 	"videofx/internal/logging"
+	"videofx/internal/stabilize"
 )
 
 func TestWarnTelemetryNotLast(t *testing.T) {
@@ -707,5 +708,234 @@ func TestConfigureEffect_RollingShutterDefault(t *testing.T) {
 		if gs.RollingShutterExplicit != tc.explicit {
 			t.Errorf("value %v/explicit %v: RollingShutterExplicit = %v", tc.value, tc.explicit, gs.RollingShutterExplicit)
 		}
+	}
+}
+
+// TestConfigureEffect_GoCVAllFields pins every field configureEffect sets on a
+// GoCVStabilizer.
+//
+// This is a wiring layer, and wiring layers fail silently: delete
+// `gs.Sigma = sigma` and --sigma stops doing anything, while the run still
+// produces a valid video and exits 0. The existing tests covered four of the
+// fifteen fields, so eleven flags could have been disconnected without a test
+// noticing -- including --warp-model and --lens, which select the whole
+// stabilization model.
+//
+// Every value below is deliberately distinct from the zero value AND from the
+// package default, so an assignment that never happened cannot coincidentally
+// match. That is the only property that makes a test like this worth writing.
+func TestConfigureEffect_GoCVAllFields(t *testing.T) {
+	origs := struct {
+		edgeMode                  string
+		fixedZoom, maxZoom, sigma float64
+		sidecarPath               string
+		analysisWidth, quality    int
+		zoomTransition            float64
+		warpModel                 string
+		meshGrid                  int
+		lensModel                 string
+		lensFocal, meshStrength   float64
+		rollingShutter            bool
+		rsRatio                   float64
+	}{
+		edgeMode, fixedZoom, maxZoom, sigma, sidecarPath, analysisWidth, quality,
+		zoomTransition, warpModel, meshGrid, lensModel, lensFocal, meshStrength,
+		rollingShutter, rsRatio,
+	}
+	t.Cleanup(func() {
+		edgeMode, fixedZoom, maxZoom, sigma = origs.edgeMode, origs.fixedZoom, origs.maxZoom, origs.sigma
+		sidecarPath, analysisWidth, quality = origs.sidecarPath, origs.analysisWidth, origs.quality
+		zoomTransition, warpModel, meshGrid = origs.zoomTransition, origs.warpModel, origs.meshGrid
+		lensModel, lensFocal, meshStrength = origs.lensModel, origs.lensFocal, origs.meshStrength
+		rollingShutter, rsRatio = origs.rollingShutter, origs.rsRatio
+	})
+
+	edgeMode = "flow-fill"
+	fixedZoom = 0.17
+	maxZoom = 0.42
+	sigma = 23
+	sidecarPath = "/tmp/some.sidecar"
+	analysisWidth = 1280
+	quality = 61
+	zoomTransition = 0.77
+	warpModel = "mesh"
+	meshGrid = 3
+	lensModel = "equisolid"
+	lensFocal = 538
+	meshStrength = 0.37
+	rollingShutter = true
+	rsRatio = 0.31
+
+	// flags.Changed drives the two "did the user say so explicitly" fields, so
+	// the set has to carry the flags and have them marked as changed.
+	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	flags.Bool("rolling-shutter", true, "")
+	flags.String("warp-model", "similarity", "")
+	if err := flags.Set("rolling-shutter", "false"); err != nil {
+		t.Fatal(err)
+	}
+	if err := flags.Set("warp-model", "mesh"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start from a POISONED struct rather than the zero value. A zero-valued
+	// target makes any field whose expected value happens to be the zero value
+	// undetectable -- a deleted assignment and a correct one look identical.
+	// Every field below therefore starts at something no assertion expects, so
+	// a missing assignment leaves evidence.
+	gs := &effects.GoCVStabilizer{
+		EdgeMode:               stabilize.EdgeModeFixed,
+		FixedZoom:              -1,
+		MaxZoom:                -1,
+		Sigma:                  -1,
+		SidecarPath:            "POISON",
+		AnalysisWidth:          -1,
+		Quality:                -1,
+		ZoomTransition:         -1,
+		WarpModel:              "POISON",
+		MeshGrid:               -1,
+		MeshStrength:           -1,
+		RollingShutter:         false,
+		RollingShutterExplicit: false,
+		WarpModelExplicit:      false,
+		RSRatio:                -1,
+		Lens:                   &stabilize.Lens{Focal: -1},
+	}
+	if err := configureEffect(gs, flags); err != nil {
+		t.Fatalf("configureEffect: %v", err)
+	}
+
+	checks := []struct {
+		field string
+		got   interface{}
+		want  interface{}
+	}{
+		{"EdgeMode", gs.EdgeMode, stabilize.EdgeModeFlowFill},
+		{"FixedZoom", gs.FixedZoom, 0.17},
+		{"MaxZoom", gs.MaxZoom, 0.42},
+		{"Sigma", gs.Sigma, 23.0},
+		{"SidecarPath", gs.SidecarPath, "/tmp/some.sidecar"},
+		{"AnalysisWidth", gs.AnalysisWidth, 1280},
+		{"Quality", gs.Quality, 61},
+		{"ZoomTransition", gs.ZoomTransition, 0.77},
+		{"WarpModel", gs.WarpModel, "mesh"},
+		{"MeshGrid", gs.MeshGrid, 3},
+		{"MeshStrength", gs.MeshStrength, 0.37},
+		{"RollingShutter", gs.RollingShutter, true},
+		{"RollingShutterExplicit", gs.RollingShutterExplicit, true},
+		{"WarpModelExplicit", gs.WarpModelExplicit, true},
+		{"RSRatio", gs.RSRatio, 0.31},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %v, want %v", c.field, c.got, c.want)
+		}
+	}
+
+	// Lens is a pointer, so it needs its own comparison.
+	if gs.Lens == nil {
+		t.Fatal("Lens = nil, want the lens built from --lens/--lens-focal")
+	}
+	if gs.Lens.Focal != 538 {
+		t.Errorf("Lens.Focal = %v, want 538", gs.Lens.Focal)
+	}
+}
+
+// TestConfigureEffect_GoCVExplicitFlagsAreFalseWhenUnset is the other half of
+// the pair. RollingShutterExplicit and WarpModelExplicit exist to distinguish
+// "the user asked for this" from "this is the default", which is how the effect
+// decides whether to warn about a fallback -- so a version that hardcoded true
+// would be as wrong as one that hardcoded false, and only asserting both
+// directions catches it.
+func TestConfigureEffect_GoCVExplicitFlagsAreFalseWhenUnset(t *testing.T) {
+	origEdge := edgeMode
+	t.Cleanup(func() { edgeMode = origEdge })
+	edgeMode = "adaptive"
+
+	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	flags.Bool("rolling-shutter", true, "")
+	flags.String("warp-model", "similarity", "")
+	// Deliberately not Set: the user did not pass either flag.
+
+	gs := &effects.GoCVStabilizer{}
+	if err := configureEffect(gs, flags); err != nil {
+		t.Fatalf("configureEffect: %v", err)
+	}
+	if gs.RollingShutterExplicit {
+		t.Error("RollingShutterExplicit = true, want false when --rolling-shutter was not passed")
+	}
+	if gs.WarpModelExplicit {
+		t.Error("WarpModelExplicit = true, want false when --warp-model was not passed")
+	}
+}
+
+// TestConfigureEffect_GoCVRejectsBadEdgeMode pins that a typo'd --edge-mode is
+// an error rather than a silent fallback to the default.
+func TestConfigureEffect_GoCVRejectsBadEdgeMode(t *testing.T) {
+	origEdge := edgeMode
+	t.Cleanup(func() { edgeMode = origEdge })
+	edgeMode = "adaptiv" // typo
+
+	gs := &effects.GoCVStabilizer{}
+	err := configureEffect(gs, pflag.NewFlagSet("test", pflag.ContinueOnError))
+	if err == nil {
+		t.Fatal("expected an error for an unknown --edge-mode")
+	}
+	if gs.EdgeMode == stabilize.EdgeModeAdaptive {
+		t.Error("a rejected edge mode must not be silently replaced with the default")
+	}
+}
+
+func TestBuildForcedLens(t *testing.T) {
+	tests := []struct {
+		name      string
+		model     string
+		focal     float64
+		wantNil   bool
+		wantErr   bool
+		wantFocal float64
+	}{
+		{name: "neither given means calibrate from the clip", wantNil: true},
+		{name: "model without focal", model: "equisolid", wantErr: true},
+		{name: "focal without model", focal: 538, wantErr: true},
+		{name: "negative focal", model: "equisolid", focal: -1, wantErr: true},
+		{name: "unknown model", model: "not-a-lens", focal: 538, wantErr: true},
+		{name: "both given", model: "equisolid", focal: 538, wantFocal: 538},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := buildForcedLens(tc.model, tc.focal)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("buildForcedLens(%q, %v) = %+v, want an error", tc.model, tc.focal, got)
+				}
+				if got != nil {
+					t.Errorf("a rejected lens must be nil, got %+v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildForcedLens(%q, %v): %v", tc.model, tc.focal, err)
+			}
+			if tc.wantNil {
+				if got != nil {
+					t.Errorf("got %+v, want nil so the clip calibrates its own lens", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("got nil, want a lens")
+			}
+			if got.Focal != tc.wantFocal {
+				t.Errorf("Focal = %v, want %v", got.Focal, tc.wantFocal)
+			}
+			// The principal point is deliberately left unset -- Analyze fills
+			// it with the frame centre, and neither path fits an off-centre
+			// one. A future change that guessed a value here would be making
+			// up a number nobody measured.
+			if got.CX != 0 || got.CY != 0 {
+				t.Errorf("principal point = (%v,%v), want (0,0) left for Analyze to fill", got.CX, got.CY)
+			}
+		})
 	}
 }
