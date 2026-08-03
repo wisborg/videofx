@@ -9,8 +9,8 @@
 // measures the crop difference. Registering a stabilized output back against
 // its own raw source recovers the per-frame scale it applied; the median of
 // that scale IS its zoom factor. It works on any stabilizer's output, including
-// ones this project did not produce, which is how Adobe Premiere's 29.7% crop
-// was established as the reference point for the rotation model's 18.7%.
+// ones this project did not produce, so an outside render can be held to the
+// same matched-crop standard as an internal one.
 //
 // Cross-clip registration needs a scale/rotation-invariant matcher, not
 // the pipeline's LK tracker: the two frames differ by the whole

@@ -92,7 +92,7 @@ func TestStabilizationSimProbe(t *testing.T) {
 		})
 		fmt.Printf("%-8.0f %7.3f  %7.3f       %7.3f  %7.3f\n", sigma, simMed, simP90, rotMed, rotP90)
 	}
-	fmt.Printf("\nmeasured references (analysis px): raw 16.22, Premiere 6.49\n")
+	fmt.Printf("\nmeasured references (analysis px): raw 16.22, similarity render 9.95\n")
 }
 
 // simulateMetric fits the residual metric's similarity between consecutive
