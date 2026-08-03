@@ -858,16 +858,6 @@ command (`muxArgs`) it drives through the same `runner.Runner` abstraction
 real ffmpeg. It uses `internal/vidio` only for `Probe` (to read the source's
 `creation_time`/duration), never its decode/encode pipeline.
 
-## A note on go.mod
-
-This sandbox's network egress allowlist doesn't include the Go module proxy
-or `gopkg.in`, so `go.mod` contains a couple of `replace` directives routing
-transitive dependencies of Cobra (`gopkg.in/yaml.v3`, `gopkg.in/check.v1`) to
-their GitHub source mirrors so `go mod tidy`/`go build` could run here. These
-are almost certainly unnecessary in a normal development environment with
-standard network access — feel free to remove them and re-run `go mod tidy`
-there if you'd rather have the canonical module paths.
-
 ## License
 
 videofx is licensed under the **Apache License, Version 2.0**. See [LICENSE](LICENSE)
