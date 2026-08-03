@@ -299,7 +299,7 @@ separate `.srt` beside it. `--srt-format dji` produces that layout (one cue per
 second carrying the wall-clock time and GPS position in DJI's bracketed form):
 
 ```
-<font size="28">FrameCnt: 1, DiffTime: 1000ms 2026-07-04 21:05:53.000 [latitude: -27.964186] [longitude: 153.426998] [rel_alt: 0.000 abs_alt: -0.600] </font>
+<font size="28">FrameCnt: 1, DiffTime: 1000ms 2026-07-04 21:05:53.000 [latitude: -27.469800] [longitude: 153.025100] [rel_alt: 0.000 abs_alt: -0.600] </font>
 ```
 
 **Recommended — write it as a sidecar** so it never shows during playback:

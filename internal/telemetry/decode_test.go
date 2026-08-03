@@ -30,7 +30,7 @@ const realFITEnv = "VFX_REAL_FIT"
 // TestDecode_RealFile pins Decode's output against numbers verified by hand (a
 // one-off smoke-test program) against one specific real recording before this
 // package was written: record count, coverage window, and one mid-file
-// sample's GPS/HR/distance/developer-field data.
+// sample's GPS/distance/developer-field data.
 //
 // The expectations below describe THAT recording and no other, so pointing
 // VFX_REAL_FIT at a different activity will fail rather than pass -- this is a
@@ -40,6 +40,18 @@ const realFITEnv = "VFX_REAL_FIT"
 // uses and which need no environment at all; what only a real device file can
 // prove is that Decode still copes with what Garmin actually writes
 // (developer-field registrations, sentinel handling, message ordering).
+//
+// On the timestamps and coordinates below being real, which reviewers keep
+// raising: they are deliberate and they are fine. The recording is of a public
+// event the author ran, so the route and the date are not private information,
+// and pinning them is what makes this a regression test rather than a shape
+// check. Physiological values are a different matter and are deliberately NOT
+// pinned -- heart rate, cadence and the Stryd power fields assert only that
+// they decoded and resolved, never what they read. That line is the whole rule:
+// this test pins structure and mechanism, not body measurements. Do not "fix"
+// it by adding the values back, and do not replace the coordinates with
+// synthetic ones -- fabricated values would prove nothing about a real device
+// file, which is the only reason this test exists.
 func TestDecode_RealFile(t *testing.T) {
 	realTestFIT := os.Getenv(realFITEnv)
 	if realTestFIT == "" {
@@ -78,7 +90,8 @@ func TestDecode_RealFile(t *testing.T) {
 	// order in this file, so this index lines up in the sorted slice
 	// too). Numbers per the hand-verified smoke test: ts=22:49:38Z,
 	// lat=-28.031178, lon=153.434342, distance=22.138km, speed=2.77m/s,
-	// alt=3.8m, hr=141, cadence=87, temp=29C.
+	// alt=3.8m, temp=29C. Heart rate and cadence are checked for presence
+	// only -- see this test's doc comment.
 	const midIdx = 8202
 	if midIdx >= track.Len() {
 		t.Fatalf("track has only %d samples, want at least %d", track.Len(), midIdx+1)
@@ -107,11 +120,15 @@ func TestDecode_RealFile(t *testing.T) {
 	if !mid.HasElevation || math.Abs(mid.Elevation-3.8) > 0.1 {
 		t.Errorf("mid-sample Elevation = %v (present=%v), want ~3.8", mid.Elevation, mid.HasElevation)
 	}
-	if !mid.HasHeartRate || mid.HeartRate != 141 {
-		t.Errorf("mid-sample HeartRate = %v (present=%v), want 141", mid.HeartRate, mid.HasHeartRate)
+	// Presence, not value: what matters for Decode is that the field was
+	// read and not mistaken for a sentinel, and HasHeartRate/HasCadence
+	// prove exactly that. The reading itself is a body measurement and is
+	// none of the repository's business.
+	if !mid.HasHeartRate {
+		t.Error("mid-sample: expected HasHeartRate true")
 	}
-	if !mid.HasCadence || mid.Cadence != 87 {
-		t.Errorf("mid-sample Cadence = %v (present=%v), want 87", mid.Cadence, mid.HasCadence)
+	if !mid.HasCadence {
+		t.Error("mid-sample: expected HasCadence true")
 	}
 	if !mid.HasTemperature || mid.Temperature != 29 {
 		t.Errorf("mid-sample Temperature = %v (present=%v), want 29", mid.Temperature, mid.HasTemperature)
@@ -119,24 +136,22 @@ func TestDecode_RealFile(t *testing.T) {
 
 	// Developer (Stryd) fields: the smoke test found 10 present on this
 	// record, with names resolved from the file's own FieldDescription
-	// messages (not hardcoded), including at least Power, Form Power
-	// and Leg Spring Stiffness.
+	// messages (not hardcoded), including at least Power, Form Power and
+	// Leg Spring Stiffness.
+	//
+	// The assertion is that those names RESOLVE -- that is the mechanism
+	// under test, and the one thing a generated fixture cannot vouch for,
+	// since resolution depends on FieldDescription messages a real Stryd
+	// wrote. The wattages they resolve to are body measurements, so they
+	// are deliberately not pinned; a key present in the map already proves
+	// indexFieldDescriptions and resolveDevField did their job, because an
+	// unresolved field lands under "<devIdx>.<num>" instead.
 	if got := len(mid.DevFields); got != 10 {
 		t.Errorf("mid-sample len(DevFields) = %d, want 10", got)
 	}
-	wantDev := map[string]float64{
-		"Power":                256,
-		"Form Power":           76,
-		"Leg Spring Stiffness": 9.25,
-	}
-	for name, want := range wantDev {
-		got, ok := mid.DevFields[name]
-		if !ok {
+	for _, name := range []string{"Power", "Form Power", "Leg Spring Stiffness"} {
+		if _, ok := mid.DevFields[name]; !ok {
 			t.Errorf("mid-sample DevFields[%q] missing (resolved names: %v)", name, devFieldNames(mid.DevFields))
-			continue
-		}
-		if math.Abs(got-want) > 0.01 {
-			t.Errorf("mid-sample DevFields[%q] = %v, want %v", name, got, want)
 		}
 	}
 
