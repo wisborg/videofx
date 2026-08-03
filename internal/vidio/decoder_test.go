@@ -2,7 +2,11 @@ package vidio
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"io"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -31,19 +35,6 @@ func TestFrameSize_MatType(t *testing.T) {
 	}
 	if got := (FrameSize{Channels: 3}).MatType(); got != gocv.MatTypeCV8UC3 {
 		t.Errorf("3-channel FrameSize.MatType() = %v, want MatTypeCV8UC3", got)
-	}
-}
-
-func TestEscapeFilterPath(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{`/plain/path.mp4`, `/plain/path.mp4`},
-		{`C:\videos\clip.mp4`, `C\:\\videos\\clip.mp4`},
-		{`it's a 'test'.mp4`, `it\'s a \'test\'.mp4`},
-	}
-	for _, c := range cases {
-		if got := escapeFilterPath(c.in); got != c.want {
-			t.Errorf("escapeFilterPath(%q) = %q, want %q", c.in, got, c.want)
-		}
 	}
 }
 
@@ -179,4 +170,118 @@ func containsPair(args []string, flag, value string) bool {
 		}
 	}
 	return false
+}
+
+// TestAnalysisDimensions_Arithmetic pins the scale=W:-2 arithmetic without
+// needing ffmpeg. The rotated cases are the reason this function exists in its
+// current form: `movie=`, which the old ffprobe-based implementation used, does
+// not apply a display matrix, so it measured a 3840x2160 rotation=90 clip as
+// 960x540 while the decoder emitted 960x1706 -- three times the bytes per
+// frame, desyncing every frame boundary after the first.
+func TestAnalysisDimensions_Arithmetic(t *testing.T) {
+	cases := []struct {
+		name           string
+		w, h, rotation int
+		width          int
+		wantW, wantH   int
+	}{
+		{"16:9 exact", 3840, 2160, 0, 960, 960, 540},
+		{"4:3 exact", 3840, 2880, 0, 960, 960, 720},
+		{"rounds down to even", 1000, 334, 0, 640, 640, 214},
+		{"rounds up to even", 642, 362, 0, 960, 960, 542},
+		{"portrait source", 1080, 1920, 0, 960, 960, 1706},
+		{"rotation 90 swaps", 3840, 2160, 90, 960, 960, 1706},
+		{"rotation 270 swaps", 3840, 2160, 270, 960, 960, 1706},
+		{"rotation 180 does not swap", 3840, 2160, 180, 960, 960, 540},
+		// A source wide enough to round to zero rows would make every frame
+		// zero bytes and spin the read loop; scale will not emit one either.
+		{"never zero height", 100000, 10, 0, 100, 100, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			info := Info{Width: tc.w, Height: tc.h, Rotation: tc.rotation}
+			gotW, gotH, err := analysisDimensions(info, tc.width)
+			if err != nil {
+				t.Fatalf("analysisDimensions: %v", err)
+			}
+			if gotW != tc.wantW || gotH != tc.wantH {
+				t.Errorf("analysisDimensions(%dx%d rot=%d, w=%d) = %dx%d, want %dx%d",
+					tc.w, tc.h, tc.rotation, tc.width, gotW, gotH, tc.wantW, tc.wantH)
+			}
+			if gotH%2 != 0 {
+				t.Errorf("height %d is odd; scale=%d:-2 always emits an even height", gotH, tc.width)
+			}
+		})
+	}
+}
+
+func TestAnalysisDimensions_RejectsUnusableInput(t *testing.T) {
+	if _, _, err := analysisDimensions(Info{Width: 0, Height: 0}, 960); err == nil {
+		t.Error("expected an error when the probe reported no dimensions")
+	}
+	if _, _, err := analysisDimensions(Info{Width: 1920, Height: 1080}, 0); err == nil {
+		t.Error("expected an error for a non-positive analysis width")
+	}
+}
+
+// TestAnalysisDimensions_MatchesFFmpeg is the check that matters: the computed
+// size must equal what ffmpeg actually emits, because the two disagreeing by a
+// single row corrupts every frame after the first.
+//
+// It compares against a real decode rather than against ffprobe's view of the
+// filtergraph. That distinction is the whole bug this replaced: the old
+// implementation agreed perfectly with `-f lavfi -i movie=...` and was wrong
+// anyway, because that is not the pipeline the decoder runs.
+func TestAnalysisDimensions_MatchesFFmpeg(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Even coded dimensions (libx264 + yuv420p requires them) chosen so the
+	// derived height needs rounding in both directions.
+	sources := []struct{ w, h int }{
+		{320, 240}, {322, 182}, {200, 134}, {240, 426},
+	}
+	for _, src := range sources {
+		name := fmt.Sprintf("%dx%d", src.w, src.h)
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(dir, name+".mp4")
+			gen := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+				"-f", "lavfi", "-i", fmt.Sprintf("testsrc=size=%dx%d:rate=10", src.w, src.h),
+				"-frames:v", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-y", path)
+			if out, err := gen.CombinedOutput(); err != nil {
+				t.Fatalf("generating %s: %v\n%s", name, err, out)
+			}
+			info, err := Probe(ctx, path)
+			if err != nil {
+				t.Fatalf("probing %s: %v", name, err)
+			}
+
+			for _, width := range []int{96, 160, 224} {
+				gotW, gotH, err := analysisDimensions(info, width)
+				if err != nil {
+					t.Fatalf("analysisDimensions at width %d: %v", width, err)
+				}
+				// Decode one frame through the same filter the analysis
+				// decoder uses and derive the height from the byte count --
+				// the quantity that actually has to agree.
+				dec := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+					"-i", path, "-an", "-sn",
+					"-vf", fmt.Sprintf("scale=%d:-2,format=gray", width),
+					"-f", "rawvideo", "-pix_fmt", "gray", "-frames:v", "1", "-")
+				raw, err := dec.Output()
+				if err != nil {
+					t.Fatalf("decoding %s at width %d: %v", name, width, err)
+				}
+				if len(raw)%gotW != 0 {
+					t.Fatalf("%s at width %d: %d bytes is not a whole number of %d-pixel rows", name, width, len(raw), gotW)
+				}
+				if wantH := len(raw) / gotW; gotH != wantH {
+					t.Errorf("%s at width %d: computed height %d, ffmpeg emitted %d", name, width, gotH, wantH)
+				}
+			}
+		})
+	}
 }

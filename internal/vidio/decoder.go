@@ -5,9 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os/exec"
-	"strconv"
-	"strings"
 	"sync"
 
 	"gocv.io/x/gocv"
@@ -127,7 +126,11 @@ func OpenAnalysisDecoder(ctx context.Context, path string, width int) (*Decoder,
 	if w <= 0 {
 		w = AnalysisWidth
 	}
-	aw, ah, err := analysisDimensions(ctx, path, w)
+	info, err := Probe(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("vidio: opening decoder for %s: %w", path, err)
+	}
+	aw, ah, err := analysisDimensions(info, w)
 	if err != nil {
 		return nil, fmt.Errorf("vidio: opening decoder for %s: %w", path, err)
 	}
@@ -152,7 +155,20 @@ func openRenderDecoder(ctx context.Context, path string) (*Decoder, error) {
 		"-pix_fmt", "bgr24",
 		"-",
 	}
-	return startDecoder(ctx, path, args, FrameSize{Width: info.Width, Height: info.Height, Channels: 3})
+	// DISPLAY dimensions, not coded ones: ffmpeg applies the stream's display
+	// matrix on the way into the filtergraph, so a 3840x2160 clip tagged
+	// rotation=90 arrives here as 2160x3840 frames.
+	//
+	// Getting this wrong did not fail loudly, because a rotation swaps the two
+	// dimensions and leaves the byte count identical -- there is no short read
+	// for NextFrame to catch. The frames were simply reinterpreted with the
+	// wrong row length, which shears every one of them, and the render encoded
+	// that at the wrong aspect ratio without a single error.
+	//
+	// Everything downstream follows from this size (stabilize.Render takes its
+	// w/h from the decoder's FrameSize, and the encoder from those), so
+	// correcting it here is what makes the whole path handle a portrait clip.
+	return startDecoder(ctx, path, args, FrameSize{Width: info.DisplayWidth(), Height: info.DisplayHeight(), Channels: 3})
 }
 
 // analysisArgs builds the ffmpeg argument list for a ProfileAnalysis
@@ -290,54 +306,48 @@ func (d *Decoder) Close() error {
 	return d.closeErr
 }
 
-// analysisDimensions asks ffprobe what width/height a `scale=width:-2`
-// filter will actually produce for path, rather than reimplementing
-// libswscale's rounding rules for the derived dimension. Getting this
-// wrong by even one row would desync every frame boundary after the first
-// in the raw byte stream, corrupting all subsequent frames without ever
-// producing a decode error — cheap insurance against a silent,
-// hard-to-diagnose failure mode.
-func analysisDimensions(ctx context.Context, path string, width int) (aw, ah int, err error) {
-	filter := fmt.Sprintf("movie=%s,scale=%d:-2,format=gray", escapeFilterPath(path), width)
-	cmd := exec.CommandContext(ctx, "ffprobe",
-		"-v", "error",
-		"-f", "lavfi",
-		"-i", filter,
-		"-select_streams", "v:0",
-		"-show_entries", "stream=width,height",
-		"-of", "csv=s=x:p=0",
-	)
-	out, err := cmd.Output()
-	if err != nil {
-		return 0, 0, fmt.Errorf("probing analysis dimensions for %s: %w", path, err)
+// analysisDimensions computes the frame size `scale=width:-2` will emit for a
+// source with info's dimensions. Getting it wrong by even one row desyncs every
+// frame boundary after the first in the raw byte stream, so this has to agree
+// with libswscale exactly.
+//
+// It used to ask ffprobe, through `-f lavfi -i movie=<path>,scale=...`, on the
+// principle that measuring beats reimplementing. Two things were wrong with
+// that, and they pull in the same direction:
+//
+// The filtergraph interpolated the caller's path into a string whose separators
+// it did not fully escape, so an ordinary filename containing a comma (`my run,
+// take 2.mp4`) failed the probe outright, and a crafted one could inject filters
+// into the graph -- including a second `movie=` source pointing anywhere ffprobe
+// can read.
+//
+// More seriously, it was measuring the wrong pipeline. `movie=` does not apply a
+// stream's display matrix; `ffmpeg -i`, which is how the decoder actually reads
+// the file, auto-rotates. For a 3840x2160 clip tagged rotation=90 the probe
+// reported 960x540 while the decoder emitted 960x1706 -- a 3x error in bytes per
+// frame, which desynced immediately and failed the analysis of every portrait
+// clip. The measurement was faithful; it was faithful to a pipeline nobody ran.
+//
+// Computing from the DISPLAY dimensions fixes both: the rotation is accounted
+// for by construction, and there is no filter string left to escape. The
+// arithmetic is the whole of scale's `-2`: derive the height that preserves
+// aspect ratio, then round to the nearest multiple of 2.
+func analysisDimensions(info Info, width int) (aw, ah int, err error) {
+	dw, dh := info.DisplayWidth(), info.DisplayHeight()
+	if dw <= 0 || dh <= 0 {
+		return 0, 0, fmt.Errorf("computing analysis dimensions: probe reported no display dimensions (%dx%d)", dw, dh)
+	}
+	if width <= 0 {
+		return 0, 0, fmt.Errorf("computing analysis dimensions: analysis width %d is not positive", width)
 	}
 
-	dims := strings.TrimSpace(string(out))
-	w, h, found := strings.Cut(dims, "x")
-	if !found {
-		return 0, 0, fmt.Errorf("probing analysis dimensions for %s: unexpected ffprobe output %q", path, dims)
+	exact := float64(width) * float64(dh) / float64(dw)
+	ah = int(math.Round(exact/2)) * 2
+	if ah < 2 {
+		// An extremely wide source can round to zero rows, which would make
+		// every frame zero bytes and the read loop spin. scale itself will
+		// not emit a zero-height frame either.
+		ah = 2
 	}
-	aw, err = strconv.Atoi(w)
-	if err != nil {
-		return 0, 0, fmt.Errorf("probing analysis dimensions for %s: %w", path, err)
-	}
-	ah, err = strconv.Atoi(h)
-	if err != nil {
-		return 0, 0, fmt.Errorf("probing analysis dimensions for %s: %w", path, err)
-	}
-	return aw, ah, nil
-}
-
-// escapeFilterPath escapes a path for safe use as an ffmpeg filtergraph
-// argument, where '\', ':', and single quotes are special characters.
-// Mirrors the identically-named helper in internal/effects/warpstab.go;
-// duplicated rather than shared because effects and vidio are
-// independent, and Phase 1 is additive-only with respect to internal/effects.
-func escapeFilterPath(p string) string {
-	r := strings.NewReplacer(
-		`\`, `\\`,
-		`:`, `\:`,
-		`'`, `\'`,
-	)
-	return r.Replace(p)
+	return width, ah, nil
 }
