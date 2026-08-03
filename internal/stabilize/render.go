@@ -416,6 +416,24 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 	if err != nil {
 		return RenderStats{}, fmt.Errorf("stabilize: rendering %s: %w", sourcePath, err)
 	}
+	// Every error path out of this function has to close the encoder, or its
+	// ffmpeg is left blocked on an open stdin pipe -- holding a write handle
+	// on an output file the caller has already deleted -- until the whole
+	// process exits. One deferred close discharges that obligation for all of
+	// them at once, including the ones that do not exist yet.
+	//
+	// It replaces eight identical `_ = enc.Close()` calls, one before each
+	// error return. Eight was already enough for one to have been missed: the
+	// dec.Close() check at the end of this function returned without closing
+	// the encoder, which is precisely the leak this shape makes impossible
+	// rather than merely fixed.
+	//
+	// The successful path still calls Close explicitly, below, because there
+	// its error matters -- that is where ffmpeg finalizes the container, and a
+	// failure there means the output is not a valid file. Encoder.Close is
+	// idempotent via closeOnce and returns the same result each time, so the
+	// two calls do not conflict.
+	defer func() { _ = enc.Close() }()
 
 	var ff *flowFillState
 	if opts.EdgeMode == EdgeModeFlowFill {
@@ -494,7 +512,6 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 	for {
 		ok, err := dec.NextFrame(&src)
 		if err != nil {
-			_ = enc.Close()
 			return stats, fmt.Errorf("stabilize: rendering %s: reading frame %d: %w", sourcePath, frames, err)
 		}
 		if !ok {
@@ -556,11 +573,9 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 				rs = rotRS[frames]
 			}
 			if err := sphere.render(src, q, rz, rs, &dst); err != nil {
-				_ = enc.Close()
 				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
 			}
 			if err := enc.WriteFrame(dst); err != nil {
-				_ = enc.Close()
 				return stats, fmt.Errorf("stabilize: rendering %s: writing frame %d: %w", sourcePath, frames, err)
 			}
 			frames++
@@ -576,7 +591,6 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 		switch {
 		case ff != nil:
 			if err := ff.render(src, transform, &dst); err != nil {
-				_ = enc.Close()
 				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
 			}
 		case perspCorr != nil:
@@ -589,7 +603,6 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 			}
 			full := total.toMatrix3().mul(p.conjugateBy(scaleBasis))
 			if err := warpFramePerspective(src, &dst, full, w, h); err != nil {
-				_ = enc.Close()
 				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
 			}
 		case mesh != nil:
@@ -600,18 +613,15 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 				mc = meshCorr[frames]
 			}
 			if err := mesh.render(src, mc, total, &dst); err != nil {
-				_ = enc.Close()
 				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
 			}
 		default:
 			if err := warpFrameAffine(src, &dst, total, w, h); err != nil {
-				_ = enc.Close()
 				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
 			}
 		}
 
 		if err := enc.WriteFrame(dst); err != nil {
-			_ = enc.Close()
 			return stats, fmt.Errorf("stabilize: rendering %s: writing frame %d: %w", sourcePath, frames, err)
 		}
 		frames++
