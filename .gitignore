@@ -9,3 +9,8 @@
 # gigabytes of 4K clips, plus the FIT activity file the telemetry effects are
 # tested against. Far too large for the repo; keep it locally.
 /test_videos/
+
+# Local agent definitions. Kept out of the repo because they carry the private
+# measurement history, including the comparison against a named commercial
+# stabilizer that was deliberately stripped from the published text.
+/.claude/agents/
