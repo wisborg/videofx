@@ -867,3 +867,65 @@ their GitHub source mirrors so `go mod tidy`/`go build` could run here. These
 are almost certainly unnecessary in a normal development environment with
 standard network access — feel free to remove them and re-run `go mod tidy`
 there if you'd rather have the canonical module paths.
+
+## License
+
+videofx is licensed under the **Apache License, Version 2.0**. See [LICENSE](LICENSE)
+for the full text and [NOTICE](NOTICE) for the third-party attributions this
+section summarises.
+
+### Third-party dependencies
+
+Every Go dependency is permissively licensed; none imposes copyleft obligations
+on this project.
+
+| Dependency | License |
+| --- | --- |
+| `gocv.io/x/gocv` | Apache-2.0 |
+| `github.com/spf13/cobra` | Apache-2.0 |
+| `github.com/inconshreveable/mousetrap` | Apache-2.0 |
+| `golang.org/x/image` (incl. the Go Mono font) | BSD-3-Clause (+ patent grant) |
+| `github.com/muktihari/fit` | BSD-3-Clause |
+| `github.com/spf13/pflag` | BSD-3-Clause |
+| `github.com/fogleman/gg` | MIT |
+| `github.com/golang/freetype` | FreeType License (FTL), elected over its GPLv2+ option |
+| OpenCV 4 (linked via cgo) | Apache-2.0 |
+
+Portions of this software are copyright (C) 2010 The FreeType Project
+(www.freetype.org). All rights reserved. This credit is required by the
+FreeType License.
+
+### FFmpeg is an external program, not a dependency
+
+videofx never links FFmpeg. Both `ffmpeg` and `ffprobe` are executed as
+separate processes through their documented command-line interfaces
+(`internal/runner`, `internal/vidio`, `internal/calibrate`), and no FFmpeg code
+is included in or distributed with this project — you supply your own build.
+FFmpeg's licensing therefore does not propagate to videofx.
+
+Note that a typical FFmpeg build *is* GPL-licensed: `--enable-gpl` is required
+for libx264, libx265, and libvidstab. The optional `warp-stabilizer` effect
+needs libvidstab (vid.stab, GPLv2+), and `videofx calibrate` needs libvmaf
+(BSD+Patent); both are reached only as filters inside your own FFmpeg binary.
+
+### If you distribute compiled binaries
+
+Prefer distributing **source**, and let users build against their own
+Homebrew install as the [Build](#build) section describes. A binary built on a
+typical macOS setup links OpenCV's `libopencv_videoio`, which in turn links
+Homebrew's FFmpeg shared libraries — and Homebrew builds FFmpeg with
+`--enable-gpl --enable-version3`. Such a binary is a work linked against
+GPLv3 libraries, so redistributing it would carry GPLv3 obligations even
+though videofx's own source does not. (Apache-2.0 is GPLv3-compatible, so this
+is permitted — it is simply an obligation worth avoiding.) Building against an
+OpenCV without FFmpeg support, or shipping source only, sidesteps this
+entirely.
+
+### Garmin FIT
+
+The FIT protocol and file format are proprietary to Garmin and subject to
+Garmin's FIT Protocol License. videofx reads FIT files through an independent
+third-party Go implementation and includes no part of Garmin's FIT SDK; no FIT
+files from the official SDK are distributed with this repository (the test
+fixtures are generated). This project is not affiliated with or endorsed by
+Garmin.

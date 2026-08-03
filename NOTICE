@@ -1,0 +1,102 @@
+videofx
+Copyright 2026 Jesper Wisborg Krogh
+
+This product includes software developed by third parties, as listed below.
+Each component remains under its own license; the terms below are reproduced
+in satisfaction of those licenses' attribution requirements.
+
+
+-------------------------------------------------------------------------------
+FreeType  (github.com/golang/freetype)
+-------------------------------------------------------------------------------
+
+Portions of this software are copyright (C) 2010 The FreeType Project
+(www.freetype.org).  All rights reserved.
+
+The freetype-go package is used under the FreeType License (FTL), one of the
+two licenses that package offers; this project does not exercise the GNU
+General Public License option.
+
+
+-------------------------------------------------------------------------------
+Apache License 2.0 components
+-------------------------------------------------------------------------------
+
+The following are licensed under the Apache License, Version 2.0, the same
+license as this project.  A copy is in the LICENSE file at the root of this
+repository.
+
+  OpenCV                     Copyright (C) 2000-2025 OpenCV contributors,
+                             Intel Corporation, Willow Garage Inc., NVIDIA
+                             Corporation, Advanced Micro Devices Inc.,
+                             OpenCV Foundation, Itseez Inc., Xperience AI,
+                             OpenCV AI, and others.  Linked via cgo.
+  GoCV (gocv.io/x/gocv)      Copyright (c) The Hybrid Group and friends
+  Cobra (github.com/spf13/cobra)
+                             Copyright (c) 2013-2023 Steve Francia and the
+                             Cobra contributors
+  mousetrap (github.com/inconshreveable/mousetrap)
+                             Copyright 2022 Alan Shreve (@inconshreveable)
+
+
+-------------------------------------------------------------------------------
+BSD 3-Clause components
+-------------------------------------------------------------------------------
+
+  golang.org/x/image         Copyright 2009 The Go Authors.  Includes the Go
+                             Mono typeface (Go font family), whose TrueType
+                             data is compiled into this program's telemetry
+                             HUD.  The Go fonts are copyright Bigelow &
+                             Holmes Inc.  An additional patent grant applies;
+                             see the PATENTS file in that module.
+  github.com/muktihari/fit   Copyright (c) 2023, Hikmatulloh Hari Mukti
+  github.com/spf13/pflag     Copyright (c) 2012 Alex Ogier;
+                             Copyright (c) 2012 The Go Authors.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the conditions of the BSD 3-Clause
+License are met, including retention of the above copyright notices, this
+list of conditions, and the disclaimer of warranties.  Neither the names of
+the copyright holders nor the names of their contributors may be used to
+endorse or promote products derived from this software without specific
+prior written permission.
+
+
+-------------------------------------------------------------------------------
+MIT components
+-------------------------------------------------------------------------------
+
+  github.com/fogleman/gg     Copyright (C) 2016 Michael Fogleman
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, subject to the inclusion of the above
+copyright notice and this permission notice in all copies or substantial
+portions of the Software.  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY
+OF ANY KIND.
+
+
+-------------------------------------------------------------------------------
+External programs (not distributed with this software)
+-------------------------------------------------------------------------------
+
+videofx executes FFmpeg's `ffmpeg` and `ffprobe` as separate programs, via the
+operating system's process interface and their documented command-line
+interfaces.  No FFmpeg source or object code is included in, linked into, or
+distributed with videofx; the user supplies their own build.  FFmpeg is
+licensed under the LGPL 2.1 or later, and, depending on how it was configured,
+possibly the GPL 2 or later -- notably, builds configured with --enable-gpl
+(as are required for libx264, libx265, and libvidstab) are GPL-licensed.
+FFmpeg is a trademark of Fabrice Bellard, originator of the FFmpeg project.
+
+The optional `warp-stabilizer` effect additionally requires an FFmpeg build
+that includes libvidstab (vid.stab, Copyright (C) Georg Martius, licensed
+under the GPL version 2 or later), and `videofx calibrate` requires one that
+includes libvmaf (Netflix VMAF, licensed under the BSD+Patent license).  Both
+are reached only as filters inside the user's own FFmpeg binary.
+
+The FIT protocol and FIT file format are proprietary to Garmin and are subject
+to Garmin's FIT Protocol License.  This project reads FIT files using an
+independent third-party Go implementation (github.com/muktihari/fit) and
+neither includes nor distributes any part of Garmin's FIT SDK.  This project
+is not affiliated with or endorsed by Garmin.
