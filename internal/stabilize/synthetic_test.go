@@ -31,13 +31,26 @@ const syntheticFrameSize = 240
 // not a hand-built correspondence list that would only test the fitting
 // math and not the tracking that feeds it.
 func newSyntheticFrame(seed int64) gocv.Mat {
-	frame := gocv.NewMatWithSizeFromScalar(gocv.NewScalar(96, 0, 0, 0), syntheticFrameSize, syntheticFrameSize, gocv.MatTypeCV8UC1)
+	return newSyntheticFrameSized(seed, syntheticFrameSize, syntheticFrameSize)
+}
+
+// newSyntheticFrameSized is newSyntheticFrame at an explicit width and height,
+// for tests that need a non-square frame (a lens calibration is a function of
+// the frame's aspect, so a square frame would not exercise it the way real
+// footage does). The circle count scales with area to keep feature density --
+// and so the tracking behaviour every caller depends on -- the same at any size.
+func newSyntheticFrameSized(seed int64, w, h int) gocv.Mat {
+	frame := gocv.NewMatWithSizeFromScalar(gocv.NewScalar(96, 0, 0, 0), h, w, gocv.MatTypeCV8UC1)
 
 	rng := rand.New(rand.NewSource(seed))
 	const margin = 30 // keep circles off the very edge, so a small warp doesn't just clip them
-	for i := 0; i < 60; i++ {
-		cx := margin + rng.Intn(syntheticFrameSize-2*margin)
-		cy := margin + rng.Intn(syntheticFrameSize-2*margin)
+	circles := 60 * (w * h) / (syntheticFrameSize * syntheticFrameSize)
+	if circles < 60 {
+		circles = 60
+	}
+	for i := 0; i < circles; i++ {
+		cx := margin + rng.Intn(w-2*margin)
+		cy := margin + rng.Intn(h-2*margin)
 		radius := 3 + rng.Intn(9)
 		intensity := 40 + rng.Intn(180)
 		gray := uint8(intensity)
