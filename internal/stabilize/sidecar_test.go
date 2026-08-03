@@ -1,10 +1,12 @@
 package stabilize
 
 import (
+	"encoding/binary"
 	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -179,6 +181,49 @@ func TestReadSidecar_TruncatedIsError(t *testing.T) {
 	}
 	if _, err := ReadSidecar(path); err == nil {
 		t.Error("expected an error reading a truncated sidecar")
+	}
+}
+
+func TestReadSidecar_AbsurdHeaderLengthIsRejectedWithoutAllocating(t *testing.T) {
+	// A corrupt header-length field must be rejected on its face. The value
+	// below is the failure this guards: 0xFFFFFFFF bytes is a 4 GiB
+	// allocation, requested before a single byte of the header has been read
+	// and while nothing yet suggests the file is anything but valid.
+	//
+	// The test asserts the error rather than the allocation because it cannot
+	// portably assert "did not allocate 4 GiB" -- but on a machine that would
+	// have swapped or OOMed, the difference between this passing and failing
+	// is the difference between an error message and a dead process.
+	original := &MotionSeries{
+		SourcePath: "clip.mp4", SourceWidth: 100, SourceHeight: 100,
+		AnalysisWidth: 100, AnalysisHeight: 100, FrameCount: 2, Options: DefaultOptions(),
+		Transitions: []Transition{{Scale: 1, OK: true}},
+	}
+	path := filepath.Join(t.TempDir(), "bigheader.bin")
+	if err := WriteSidecar(path, original); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The header length is the uint32 straight after the 6-byte magic and
+	// the 1-byte version.
+	const headerLenOffset = 7
+	binary.LittleEndian.PutUint32(data[headerLenOffset:], math.MaxUint32)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = ReadSidecar(path)
+	if err == nil {
+		t.Fatal("expected an error on a sidecar declaring a 4 GiB header")
+	}
+	// The point is that it was rejected for being absurd, not that the read
+	// happened to run out of file -- io.ReadFull would also fail here, but
+	// only after the allocation this guard exists to prevent.
+	if !strings.Contains(err.Error(), "corrupt") {
+		t.Errorf("error = %q, want it to name the file as corrupt", err)
 	}
 }
 

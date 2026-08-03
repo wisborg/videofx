@@ -134,6 +134,13 @@ var sidecarMagic = [6]byte{'V', 'F', 'X', 'M', 'O', 'T'}
 
 const sidecarVersion uint8 = 3
 
+// maxSidecarHeaderLen caps the declared JSON header length ReadSidecar will
+// allocate for. The header holds a fixed set of scalar fields plus an Options
+// struct and an optional lens calibration, so it does not grow with clip
+// length; 1 MiB is orders of magnitude above anything WriteSidecar emits and
+// exists only to keep a corrupt length field from becoming a huge allocation.
+const maxSidecarHeaderLen = 1 << 20
+
 // per-frame flag bits in the binary body.
 const (
 	sidecarFlagOK          = 1 << 0
@@ -326,6 +333,17 @@ func ReadSidecar(path string) (*MotionSeries, error) {
 	var headerLen uint32
 	if err := binary.Read(r, binary.LittleEndian, &headerLen); err != nil {
 		return nil, fmt.Errorf("stabilize: reading sidecar %s header length: %w", path, err)
+	}
+	// The header is a small JSON object -- a few hundred bytes, and bounded
+	// by the fixed set of fields in sidecarHeader however long the clip is.
+	// headerLen comes off disk, so a corrupt or truncated sidecar can name
+	// any 32-bit length; without this check a garbled four bytes turn into a
+	// 4 GB allocation before anything has had a chance to notice the file is
+	// nonsense. The cap is deliberately far above any header this writer
+	// produces, so it rejects corruption without constraining the format.
+	if headerLen > maxSidecarHeaderLen {
+		return nil, fmt.Errorf("stabilize: sidecar %s declares a %d-byte header (max %d) -- the file is corrupt; delete it to re-analyze",
+			path, headerLen, maxSidecarHeaderLen)
 	}
 	headerJSON := make([]byte, headerLen)
 	if _, err := io.ReadFull(r, headerJSON); err != nil {

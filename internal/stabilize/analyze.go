@@ -45,7 +45,15 @@ func Analyze(ctx context.Context, path string, opts Options) (*MotionSeries, err
 	if err != nil {
 		return nil, fmt.Errorf("stabilize: analyzing %s: %w", path, err)
 	}
-	defer dec.Close()
+	// Close is deferred for the error paths (all of which already return an
+	// error of their own) and called explicitly, with its result checked, on
+	// each success path below. Decoder.Close is idempotent, so the second
+	// call is free. The explicit call is the point: Close is the ONLY place
+	// the decoder's ffmpeg exit status surfaces, because NextFrame reports a
+	// short read that lands on a frame boundary as an ordinary end of stream.
+	// Discarding it here would let a decoder that died partway through be
+	// recorded as a complete analysis -- and, with --sidecar, cached as one.
+	defer func() { _ = dec.Close() }()
 
 	size := dec.FrameSize()
 	series := &MotionSeries{
@@ -77,7 +85,13 @@ func Analyze(ctx context.Context, path string, opts Options) (*MotionSeries, err
 		// Zero (or unreadable) frames: a MotionSeries with FrameCount 0
 		// and no transitions is a valid, if useless, result — not an
 		// error, since an empty/near-empty source is a legitimate input
-		// for a benchmark or test fixture.
+		// for a benchmark or test fixture. That reasoning only holds if
+		// the decoder itself was healthy, though: zero frames because
+		// ffmpeg failed to start or died immediately is a failure, and
+		// Close is what tells the two apart.
+		if cerr := dec.Close(); cerr != nil {
+			return nil, fmt.Errorf("stabilize: analyzing %s: %w", path, cerr)
+		}
 		return series, nil
 	}
 	series.FrameCount = 1
@@ -187,6 +201,10 @@ func Analyze(ctx context.Context, path string, opts Options) (*MotionSeries, err
 				series.Transitions[idx].Rotation3 = &q
 			}
 		}
+	}
+
+	if cerr := dec.Close(); cerr != nil {
+		return nil, fmt.Errorf("stabilize: analyzing %s: %w", path, cerr)
 	}
 
 	return series, nil
