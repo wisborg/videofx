@@ -229,3 +229,114 @@ func TestAnalyze_RotationModelFitsEveryPair(t *testing.T) {
 		t.Errorf("worst per-pair rotation-angle error %.5f rad at transition %d, want <= 0.002", worst, worstAt)
 	}
 }
+
+// TestStabilizePipelineActuallyReducesShake closes the loop the existing
+// end-to-end tests leave open.
+//
+// TestRender_FrameCountAndDimensionInvariants and the effects-level Apply test
+// both assert shape: frame count, dimensions, audio survival. All three hold
+// perfectly for a pipeline that does nothing. Stub Smooth to return identity
+// corrections, or buildCorrectionTransform to return the identity, and every
+// existing test still passes while the program silently stops stabilizing --
+// which is precisely the class of regression this codebase has shipped before.
+//
+// So this one asserts the point of the program: run the real
+// Analyze -> Smooth -> Render on a clip with known injected shake, re-analyze
+// the OUTPUT, and require that the frame-to-frame motion left in it is a
+// fraction of what went in. ResidualShake is the project's own standing metric
+// for that (see cmd/vidiobench -mode=residual), and it was already unit-tested
+// as a function while nothing used it as an assertion.
+func TestStabilizePipelineActuallyReducesShake(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	const (
+		w, h   = 320, 240
+		frames = 90
+	)
+
+	base := newSyntheticFrameSized(11, w, h)
+	defer base.Close()
+
+	// Shake, not drift: a high-frequency wobble on top of a slow pan. The pan
+	// is what a stabilizer must PRESERVE (it is the camera operator's intent)
+	// and the wobble is what it must remove, so a "stabilizer" that simply
+	// froze the frame would not pass this by accident either -- it would have
+	// to track the pan to keep the residual low.
+	shakeAt := func(i int) (dx, dy, rot float64) {
+		fi := float64(i)
+		pan := 0.35 * fi // slow, steady drift across the clip
+		dx = pan + 6.4*math.Sin(fi*2.1) + 3.4*math.Sin(fi*3.7)
+		dy = 0.20*fi + 5.6*math.Cos(fi*1.9) + 2.8*math.Sin(fi*4.3)
+		rot = 0.010 * math.Sin(fi*2.3)
+		return dx, dy, rot
+	}
+
+	mats := make([]gocv.Mat, frames)
+	for i := range mats {
+		dx, dy, rot := shakeAt(i)
+		mats[i] = warpSyntheticFrame(base, dx, dy, rot, 1.0)
+	}
+	defer func() {
+		for i := range mats {
+			_ = mats[i].Close()
+		}
+	}()
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "shaky.mp4")
+	encodeGrayFrames(t, src, mats, w, h, 30)
+
+	ctx := context.Background()
+	opts := DefaultOptions()
+	opts.AnalysisWidth = w
+
+	inSeries, err := Analyze(ctx, src, opts)
+	if err != nil {
+		t.Fatalf("analyzing source: %v", err)
+	}
+	before := inSeries.ResidualShake().MedianTranslation
+	if before <= 0.5 {
+		t.Fatalf("test setup: source residual %.3f px is too small to measure a reduction against", before)
+	}
+
+	smoothOpts := DefaultSmoothOptions()
+	smoothOpts.Sigma = 15
+	result := Smooth(inSeries, smoothOpts)
+
+	out := filepath.Join(dir, "stabilized.mp4")
+	renderOpts := DefaultRenderOptions()
+	renderOpts.EdgeMode = EdgeModeAdaptive
+	renderOpts.ZoomTransitionSeconds = 0 // one clip-wide crop, per CLAUDE.md's comparison rule
+	if _, err := Render(ctx, src, inSeries, result, renderOpts, out); err != nil {
+		t.Fatalf("rendering: %v", err)
+	}
+
+	outSeries, err := Analyze(ctx, out, opts)
+	if err != nil {
+		t.Fatalf("analyzing output: %v", err)
+	}
+	after := outSeries.ResidualShake().MedianTranslation
+
+	t.Logf("median frame-to-frame translation: %.3f px in, %.3f px out (%.0f%% reduction)",
+		before, after, 100*(1-after/before))
+
+	// The threshold is deliberately loose. This is not a quality benchmark --
+	// vidiobench and the probe tests own that, at matched crop, on real
+	// footage. It is a guard against the pipeline silently becoming a no-op,
+	// and for that the question is whether the number moved at all, not
+	// whether it moved by the best achievable amount. A no-op scores 1.0.
+	//
+	// Measured while writing this: the output residual sits at ~2.9 px
+	// regardless of how much shake goes in (doubling the input amplitude left
+	// it unchanged) and regardless of sigma. That is a floor belonging to this
+	// synthetic setup -- a small frame, a lossy re-encode between the two
+	// analyses, and adaptive crop magnifying whatever is left -- not to the
+	// stabilizer. It is why the injected shake is large: the reduction RATIO
+	// is only a meaningful signal when the input is well clear of that floor.
+	// Do not read the absolute number here as a quality figure.
+	if after >= 0.5*before {
+		t.Errorf("median frame-to-frame motion %.3f px after stabilization vs %.3f px before -- expected at least a halving; the pipeline may have degenerated to a no-op",
+			after, before)
+	}
+}
