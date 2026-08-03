@@ -74,6 +74,25 @@ make build
 
 (`go build -o videofx .` alone will fail to find `opencv@4` — see Requirements.)
 
+### Tests
+
+```
+make test
+```
+
+The suite needs **no sample media**: every test that needs a video generates a
+tiny one with ffmpeg, and every test that needs a Garmin FIT activity generates
+a synthetic one (`internal/fittest`). A fresh clone runs the whole suite.
+
+Filenames like `test_videos/test_small.mp4` appear throughout the performance
+and stabilization sections below. Those are **local benchmark clips, not part of
+this repository** — several gigabytes of 4K action-cam footage, kept on the
+machine that measures with them. They are named so every measurement says what
+it was measured on; nothing in the build or the test suite needs them. The
+developer tools (`cmd/vidiobench`, `cmd/xreg`) and the `VFX_VIDEO`-gated
+diagnostic probes in `internal/stabilize` do, and you would point those at your
+own footage.
+
 ## Usage
 
 ```
@@ -264,7 +283,7 @@ overlapping part only — it never silently truncates without saying so.
 Example:
 
 ```
-videofx run.mp4 --effect telemetry --fit "2026-07-05 063256 Run.fit" --offset 0 --srt-format readable --show-subtitle --gpx
+videofx run.mp4 --effect telemetry --fit "run.fit" --offset 0 --srt-format readable --show-subtitle --gpx
 ```
 
 produces `run - telemetry.mp4` (stream-copied video + audio + a visible
@@ -540,8 +559,8 @@ Other levers, roughly in order of impact:
 
 `telemetry` does no decode/encode at all — the entire cost is one ffmpeg
 mux (stream-copy in, stream-copy out). Measured end to end on
-`test_videos/test_small.mp4` (4K60 HEVC, ~16.2s, 972 frames) against the
-real `test_videos/2026-07-05 063256 Run.fit` sample: **under 2 seconds**
+`test_videos/test_small.mp4` (4K60 HEVC, ~16.2s, 972 frames) against a
+~4.5-hour recorded run (16,404 one-second records): **under 2 seconds**
 total (ffmpeg's own reported mux speed was 100x+ realtime — 0.13-0.15s of
 actual ffmpeg time; the rest is process startup, the FIT decode, and
 writing the GPX/SRT sidecars), versus the many seconds to minutes a

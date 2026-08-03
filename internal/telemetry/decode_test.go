@@ -11,23 +11,42 @@ import (
 	"github.com/muktihari/fit/proto"
 )
 
-// realTestFIT is the repo's real Garmin FIT sample, used to pin Decode's
-// behavior against known-good numbers measured by hand against this
-// exact file (see the Phase 1 spec this package was built against). The
-// path is relative to this package's directory (go test's working
-// directory), two levels up to the repo root.
-const realTestFIT = "../../test_videos/2026-07-05 063256 Run.fit"
+// realFITEnv names the environment variable pointing at a real Garmin
+// recording for TestDecode_RealFile:
+//
+//	VFX_REAL_FIT="$PWD/test_videos/activity.fit" go test ./internal/telemetry/
+//
+// Use an ABSOLUTE path: go test runs each package with its own directory as
+// the working directory, so a repo-relative one resolves against
+// internal/telemetry and silently fails to open.
+//
+// It is an env var rather than a checked-in path because a FIT file from a
+// watch is personal data -- where someone was, minute by minute, and what
+// their heart was doing -- so this project's own reference recording is not
+// distributed, and hard-coding its filename would only advertise a file nobody
+// else has. Same convention as internal/stabilize's VFX_VIDEO-gated probes.
+const realFITEnv = "VFX_REAL_FIT"
 
-// TestDecode_RealFile pins Decode's output against numbers verified by
-// hand (a one-off smoke-test program) against the real FIT file before
-// this package was written: record count, coverage window, and one
-// mid-file sample's GPS/HR/distance/developer-field data. It is
-// guarded with t.Skip rather than t.Fatal on a missing file so the rest
-// of the suite still runs in an environment that doesn't have the
-// (large, real-world) sample checked out.
+// TestDecode_RealFile pins Decode's output against numbers verified by hand (a
+// one-off smoke-test program) against one specific real recording before this
+// package was written: record count, coverage window, and one mid-file
+// sample's GPS/HR/distance/developer-field data.
+//
+// The expectations below describe THAT recording and no other, so pointing
+// VFX_REAL_FIT at a different activity will fail rather than pass -- this is a
+// regression pin for the author's reference file, not a general "can we read
+// any FIT?" test. Everyday coverage of the decode path comes from
+// internal/fittest's generated activities, which every other test in the tree
+// uses and which need no environment at all; what only a real device file can
+// prove is that Decode still copes with what Garmin actually writes
+// (developer-field registrations, sentinel handling, message ordering).
 func TestDecode_RealFile(t *testing.T) {
+	realTestFIT := os.Getenv(realFITEnv)
+	if realTestFIT == "" {
+		t.Skipf("%s not set; see this test's doc comment", realFITEnv)
+	}
 	if _, err := os.Stat(realTestFIT); err != nil {
-		t.Skipf("real test FIT not available: %v", err)
+		t.Fatalf("%s=%q is not readable: %v", realFITEnv, realTestFIT, err)
 	}
 
 	track, err := Decode(realTestFIT)

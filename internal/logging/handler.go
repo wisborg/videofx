@@ -138,7 +138,7 @@ func appendAttr(b *strings.Builder, group string, a slog.Attr) {
 }
 
 // needsQuote reports whether a field value would be ambiguous unquoted. Video
-// paths routinely contain spaces ("2026-07-05 063256 Run.fit"), which is the
+// paths routinely contain spaces ("2026-07-05 Morning Run.fit"), which is the
 // case this exists for; the empty string is quoted so a missing value reads as
 // "" rather than as nothing at all.
 func needsQuote(s string) bool {

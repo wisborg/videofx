@@ -9,27 +9,49 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"videofx/internal/fittest"
 	"videofx/internal/logging"
 	"videofx/internal/telemetry"
 )
 
-// realFITPath resolves the repo's real Garmin FIT sample, mirroring
-// internal/telemetry/decode_test.go's own realTestFIT constant (same
-// path, two directories up from this package). Its Coverage() spans
-// 2026-07-04T20:32:56Z..2026-07-05T01:06:19Z (see decode_test.go), which
-// brackets test_small.mp4's real creation_time (2026-07-04T21:05:53Z) --
-// the synthetic-source tests below reuse that same creation_time so a
-// real Decode of this file resolves to FullOverlap without needing the
-// (130MB) real video checked out too. Skips the test (not Fatal) when the
-// file isn't present, same rationale as decode_test.go.
-func realFITPath(t *testing.T) string {
+// fitFixture caches the generated activity across the tests in this package.
+// Encoding 16404 records is quick but not free, and every test below wants the
+// same bytes; only the (cheap) write into each test's own temp dir repeats.
+var (
+	fitFixtureOnce  sync.Once
+	fitFixtureBytes []byte
+	fitFixtureErr   error
+)
+
+// testFITPath writes a synthetic Garmin FIT activity (see internal/fittest)
+// into the test's temp directory and returns its path.
+//
+// These tests used to point at a real recorded activity kept outside the
+// repository, and therefore skipped for everyone except its author -- passing
+// while asserting nothing on a fresh clone or in CI. The fixture covers
+// 2026-07-04T20:32:56Z..2026-07-05T01:06:19Z, which brackets the
+// 2026-07-04T21:05:53Z creation_time the synthetic clips below are stamped
+// with, so a Resolve against it lands on FullOverlap exactly as before. It is
+// generated rather than checked in: see the fittest package doc.
+//
+// t.Fatal, not t.Skip: there is no environment where this can legitimately be
+// unavailable, so failing to build it is a bug, not a reason to quietly do
+// less work.
+func testFITPath(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join("..", "..", "test_videos", "2026-07-05 063256 Run.fit")
-	if _, err := os.Stat(path); err != nil {
-		t.Skipf("real test FIT not available: %v", err)
+	fitFixtureOnce.Do(func() {
+		fitFixtureBytes, fitFixtureErr = fittest.Build(fittest.DefaultOptions())
+	})
+	if fitFixtureErr != nil {
+		t.Fatalf("building the synthetic FIT fixture: %v", fitFixtureErr)
+	}
+	path := filepath.Join(t.TempDir(), "activity.fit")
+	if err := os.WriteFile(path, fitFixtureBytes, 0o644); err != nil {
+		t.Fatalf("writing the synthetic FIT fixture: %v", err)
 	}
 	return path
 }
@@ -124,7 +146,7 @@ func TestTelemetry_Apply_MissingFitPath(t *testing.T) {
 // must fail clearly rather than silently skipping the sync.
 func TestTelemetry_Apply_MissingCreationTime(t *testing.T) {
 	requireFFmpeg(t)
-	fitPath := realFITPath(t)
+	fitPath := testFITPath(t)
 
 	dir := t.TempDir()
 	src := generateSyntheticSource(t, dir, "no_creation_time.mp4", "")
@@ -149,20 +171,19 @@ func TestTelemetry_Apply_MissingCreationTime(t *testing.T) {
 
 // TestTelemetry_Apply_EndToEndSynthetic exercises the full pipeline
 // (real telemetry.Decode + vidio.Probe + Resolve + BuildClipPoints +
-// WriteGPX/WriteSRT) against a tiny synthetic source stamped with the
-// real FIT sample's own creation_time, with a fake Runner standing in
+// WriteGPX/WriteSRT) against a tiny synthetic source stamped with a
+// creation_time inside the fixture's coverage, with a fake Runner standing in
 // for ffmpeg's mux so the test stays fast and needs no video-comparison
 // assertions of its own -- muxArgs' shape is covered directly by
 // TestMuxArgs_* below.
 func TestTelemetry_Apply_EndToEndSynthetic(t *testing.T) {
 	requireFFmpeg(t)
-	fitPath := realFITPath(t)
+	fitPath := testFITPath(t)
 
 	dir := t.TempDir()
-	// 2026-07-04T21:05:53Z is test_small.mp4's own real creation_time
-	// (see the README/e2e run) and falls inside realTestFIT's coverage
-	// (2026-07-04T20:32:56Z..2026-07-05T01:06:19Z per decode_test.go), so
-	// this resolves to FullOverlap.
+	// 2026-07-04T21:05:53Z falls inside the fixture's coverage
+	// (2026-07-04T20:32:56Z..2026-07-05T01:06:19Z, see testFITPath), so this
+	// resolves to FullOverlap.
 	src := generateSyntheticSource(t, dir, "with_creation_time.mp4", "2026-07-04T21:05:53Z")
 
 	fr := &fakeRunner{}
@@ -208,7 +229,7 @@ func TestTelemetry_Apply_EndToEndSynthetic(t *testing.T) {
 // either way -- the sidecar is a separate deliverable, not part of the video.
 func TestTelemetry_Apply_GPXOptIn(t *testing.T) {
 	requireFFmpeg(t)
-	fitPath := realFITPath(t)
+	fitPath := testFITPath(t)
 
 	for _, want := range []bool{false, true} {
 		name := "gpx_off"
@@ -511,7 +532,7 @@ func TestMuxArgs_ArgOrder_OutputIsLast(t *testing.T) {
 // string containing the right substrings.
 func TestTelemetry_Apply_EndToEndSynthetic_GPXIsWellFormed(t *testing.T) {
 	requireFFmpeg(t)
-	fitPath := realFITPath(t)
+	fitPath := testFITPath(t)
 
 	dir := t.TempDir()
 	src := generateSyntheticSource(t, dir, "wellformed.mp4", "2026-07-04T21:05:53Z")
@@ -552,7 +573,7 @@ func TestSrtSidecarPath(t *testing.T) {
 // Telemetry Overlay reads the sidecar.
 func TestTelemetry_Apply_SRTSidecar(t *testing.T) {
 	requireFFmpeg(t)
-	fitPath := realFITPath(t)
+	fitPath := testFITPath(t)
 
 	dir := t.TempDir()
 	src := generateSyntheticSource(t, dir, "src.mp4", "2026-07-04T21:05:53Z")
@@ -589,7 +610,7 @@ func TestTelemetry_Apply_SRTSidecar(t *testing.T) {
 // logging at debug level removes that prefix to restore ffmpeg's full output.
 func TestTelemetry_Apply_QuietByDefault(t *testing.T) {
 	requireFFmpeg(t)
-	fitPath := realFITPath(t)
+	fitPath := testFITPath(t)
 	dir := t.TempDir()
 	src := generateSyntheticSource(t, dir, "src.mp4", "2026-07-04T21:05:53Z")
 
@@ -626,12 +647,11 @@ func TestTelemetry_Apply_QuietByDefault(t *testing.T) {
 // --offset that nobody caught.
 func TestTelemetry_Apply_PartialOverlapWarns(t *testing.T) {
 	requireFFmpeg(t)
-	fitPath := realFITPath(t)
+	fitPath := testFITPath(t)
 	dir := t.TempDir()
 
-	// The real FIT sample's coverage ends at 2026-07-05T01:06:19Z (see
-	// realFITPath); a 2-second clip starting one second before that runs off
-	// the end of it.
+	// The fixture's coverage ends at 2026-07-05T01:06:19Z (see testFITPath);
+	// a 2-second clip starting one second before that runs off the end of it.
 	src := generateSyntheticSource(t, dir, "src.mp4", "2026-07-05T01:06:18Z")
 
 	var buf bytes.Buffer
@@ -658,7 +678,11 @@ func TestTelemetry_Apply_PartialOverlapWarns(t *testing.T) {
 	if !strings.Contains(out, "file=src.mp4") {
 		t.Errorf("warning does not name the clip it is about: %q", out)
 	}
-	if !strings.Contains(out, `fit="`+fitPath+`"`) {
+	// Not `fit="..."`: the handler only quotes a value that needs it, and a
+	// temp path has no spaces. Asserting the quoting here would be testing the
+	// fixture's filename, not the effect -- internal/logging pins the quoting
+	// rule itself.
+	if !strings.Contains(out, "fit="+fitPath) {
 		t.Errorf("warning does not name the FIT file it is about: %q", out)
 	}
 }

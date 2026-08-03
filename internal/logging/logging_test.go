@@ -188,7 +188,7 @@ func TestFieldValuesAreQuotedWhenAmbiguous(t *testing.T) {
 		want  string
 	}{
 		{"clip.mp4", "file=clip.mp4"},
-		{"2026-07-05 063256 Run.fit", `file="2026-07-05 063256 Run.fit"`},
+		{"2026-07-05 Morning Run.fit", `file="2026-07-05 Morning Run.fit"`},
 		{"", `file=""`},
 		{`say "hi"`, `file="say \"hi\""`},
 		{"a=b", `file="a=b"`},

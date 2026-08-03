@@ -33,10 +33,10 @@
 //
 // Usage:
 //
-//	go run ./cmd/fitdump -file="test_videos/2026-07-05 063256 Run.fit"
+//	go run ./cmd/fitdump -file=activity.fit
 //	go run ./cmd/fitdump -file=activity.fit -index=100
-//	go run ./cmd/fitdump -file="test_videos/2026-07-05 063256 Run.fit" -video=test_videos/test_small.mp4 -offset=0
-//	go run ./cmd/fitdump -file="test_videos/2026-07-05 063256 Run.fit" -video=test_videos/test_small.mp4 -offset=0 -emit=/tmp/clip
+//	go run ./cmd/fitdump -file=activity.fit -video=clip.mp4 -offset=0
+//	go run ./cmd/fitdump -file=activity.fit -video=clip.mp4 -offset=0 -emit=/tmp/clip
 package main
 
 import (
