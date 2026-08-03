@@ -682,9 +682,9 @@ func TestConfigureEffect_RollingShutterDefault(t *testing.T) {
 		value    bool
 		explicit bool
 	}{
-		{true, false},  // the default, not named
-		{true, true},   // named explicitly
-		{false, true},  // turned off (which is necessarily explicit)
+		{true, false}, // the default, not named
+		{true, true},  // named explicitly
+		{false, true}, // turned off (which is necessarily explicit)
 	} {
 		// NewRootCmd binds every flag to its package variable and writes the
 		// default into it, so the flag set must be built BEFORE the value under

@@ -30,13 +30,15 @@ import (
 //  1. per-point registration error per model. Nearly useless on its own: it is
 //     floored by LK tracking noise (~1.8 px here) that no model can remove, so
 //     a large structural difference shows up as a small one.
+//
 //  2. spatial cross-validation -- fit on one half of the frame, score on the
 //     other. A model that can only fit the average extrapolates badly.
+//
 //  3. the half-vs-half fit disagreement itself, which is the quantity that
 //     actually turns into shake.
 //
-//	VFX_VIDEO=/abs/path/test_very_shaken.mp4 \
-//	  go test ./internal/stabilize/ -run LensProbe -v
+//     VFX_VIDEO=/abs/path/test_very_shaken.mp4 \
+//     go test ./internal/stabilize/ -run LensProbe -v
 func TestLensProbe(t *testing.T) {
 	videoPath := os.Getenv("VFX_VIDEO")
 	if videoPath == "" {

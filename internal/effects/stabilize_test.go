@@ -431,7 +431,6 @@ func TestModelName(t *testing.T) {
 	}
 }
 
-
 // warnTag is how a warning identifies itself in the rendered line: the level
 // column, not anything in the message text.
 const warnTag = "WARN "
@@ -481,31 +480,31 @@ func TestReportLens(t *testing.T) {
 		wantOutput   string // substring; "" means nothing must be printed
 	}{
 		{
-			name: "calibrated, default flags: engages silently",
+			name:   "calibrated, default flags: engages silently",
 			series: rotationSeries(true), wantRotation: true,
 		},
 		{
-			name: "calibrated, --debug: reports the lens",
+			name:   "calibrated, --debug: reports the lens",
 			series: rotationSeries(true), debug: true, wantRotation: true,
 			wantOutput: "equisolid lens",
 		},
 		{
-			name: "no lens, model not named: silent, no warning",
+			name:   "no lens, model not named: silent, no warning",
 			series: rotationSeries(false),
 		},
 		{
-			name: "no lens, model not named, --debug: says so quietly",
+			name:   "no lens, model not named, --debug: says so quietly",
 			series: rotationSeries(false), debug: true,
 			wantOutput: "no lens measurable",
 		},
 		{
-			name: "no lens, --warp-model rotation named: warns",
+			name:   "no lens, --warp-model rotation named: warns",
 			series: rotationSeries(false), explicit: true,
 			wantOutput: warnTag,
 		},
 		{
-			name: "sidecar analyzed under another model: silent (loadOrAnalyze already said so)",
-			series: &stabilize.MotionSeries{Options: stabilize.Options{WarpModel: stabilize.WarpModelSimilarity}},
+			name:     "sidecar analyzed under another model: silent (loadOrAnalyze already said so)",
+			series:   &stabilize.MotionSeries{Options: stabilize.Options{WarpModel: stabilize.WarpModelSimilarity}},
 			explicit: true,
 		},
 	}
