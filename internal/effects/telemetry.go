@@ -111,6 +111,25 @@ type Telemetry struct {
 	// by default, matching telemetry.FieldOptions.Stryd's own documented
 	// default and rationale.
 	IncludeStryd bool
+
+	// OmitLocation suppresses the global location metadata tags that are
+	// otherwise written whenever any point in the clip's window has a GPS fix
+	// (see muxConfig.HasLocation). Wired from --location, which defaults to
+	// TRUE, so the flag reads as an opt-out and no existing invocation
+	// changes.
+	//
+	// It is phrased as "omit" rather than "location" so that the ZERO VALUE
+	// keeps the tag. Every other emission this effect produces is opt-in, but
+	// this one has always been unconditional, and a `Location bool` field
+	// would silently stop writing it for every caller that constructs a
+	// Telemetry directly -- a behaviour change disguised as a new flag.
+	//
+	// Why the opt-out exists: the tag is read by YouTube, Photos, Immich and
+	// QuickTime, and a run that starts at someone's front door puts a home
+	// address in the file's metadata. It matters more than it looks, because
+	// selecting telemetry-hud auto-appends this effect (see cmd's
+	// impliedEffects), so "burn a HUD onto this clip" stamps the tag too.
+	OmitLocation bool
 }
 
 func (t *Telemetry) Name() string         { return "telemetry" }
@@ -246,7 +265,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 		SRTPath:      srtPath,
 		OutputPath:   in.OutputPath,
 		Subtitle:     embedSubtitle,
-		HasLocation:  hasLocation,
+		HasLocation:  hasLocation && !t.OmitLocation,
 		Lat:          loc.Lat,
 		Lon:          loc.Lon,
 		HasAltitude:  loc.HasElevation,
@@ -415,7 +434,10 @@ type muxConfig struct {
 	Subtitle bool
 	// HasLocation, Lat, Lon set the global location metadata tags from
 	// the clip's first GPS-having telemetry point. When false, no
-	// location tags are written at all (see firstGPSPoint).
+	// location tags are written at all. It is the AND of two separate
+	// questions -- did the clip window have a GPS fix (see firstGPSPoint),
+	// and does the user want the tag (see Telemetry.OmitLocation) -- because
+	// the argument list does not care which of the two said no.
 	HasLocation bool
 	Lat, Lon    float64
 	// HasAltitude, Alt add the optional ISO 6709 altitude component

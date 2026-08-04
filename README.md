@@ -143,10 +143,11 @@ Flags:
 - `--elevation-smoothing` — telemetry-hud only: an explicit Gaussian smoothing width (in FIT samples, ≈ seconds) for the elevation series, instead of the gain/loss auto-tuning. Default `0` = auto.
 - `--power-source` — telemetry-hud only: which power reading the lower-left metrics gauge shows when the FIT carries **both** a footpod (Stryd) developer-field power **and** the standard FIT `power` field — the two are different sensors and can disagree substantially. `auto` (default) prefers the Stryd developer field and falls back to the native field; `stryd` forces the footpod field (shows `-- W` if absent); `native` forces the standard FIT field. Only affects the on-screen HUD number — the `telemetry` SRT/GPX still carry every field regardless.
 - `--hud-layout` — telemetry-hud only: which gauge arrangement to use — `auto` (default), `default`, or `vertical`. `auto` picks the **vertical** layout for portrait (taller-than-wide) clips and the full **default** layout otherwise, keyed on the clip's *display* dimensions (a phone/action-cam clip stored landscape with a 90°/270° rotation flag is treated as the portrait it plays back as). The vertical layout keeps only the three gauges that read well on a narrow frame — the distance progress bar (top), the course map (middle-right, as in the landscape layout), and the elevation-vs-distance profile (bottom) — each widened to use more of the narrow width; the default layout's seven gauges crowd a portrait frame. Force one with `default`/`vertical`.
-- `--srt-format` — telemetry only: embed a `mov_text` telemetry subtitle track in this format — `none` (default), `readable` (a human-readable per-second readout), or `dji` (the DJI-drone SRT layout that [Telemetry Overlay](#embedding-telemetry-for-telemetry-overlay) reads directly from the video). The location tag is produced regardless. A muxed track is **hidden by default** (see `--show-subtitle`).
+- `--srt-format` — telemetry only: embed a `mov_text` telemetry subtitle track in this format — `none` (default), `readable` (a human-readable per-second readout), or `dji` (the DJI-drone SRT layout that [Telemetry Overlay](#embedding-telemetry-for-telemetry-overlay) reads directly from the video). The location tag is written independently of this (see `--location`). A muxed track is **hidden by default** (see `--show-subtitle`).
 - `--srt-sidecar` — telemetry only: write the `--srt-format` SRT as a **separate `.srt` file** next to the output (like `--gpx`) **instead of embedding it** — e.g. `clip - telemetry.srt` beside `clip - telemetry.mp4`. Nothing is muxed into the video, so nothing can display during playback, while Telemetry Overlay reads the separate file (matching DJI's own `NAME.MP4` + `NAME.SRT` pairing). **The reliable way to keep telemetry off screen** (see below). Off by default (the SRT is embedded); requires `--srt-format readable` or `dji`.
 - `--show-subtitle` — telemetry only: keep the **embedded** subtitle track visible/auto-displayed. **Off by default** — an embedded subtitle is flagged hidden (its track-`enabled` flag cleared), but **macOS players (QuickTime, Quick Look) auto-display subtitles regardless of that flag**, so this doesn't reliably hide it; use `--srt-sidecar` instead. Ignored with `--srt-sidecar`.
 - `--gpx` — telemetry only: **also** write a GPX sidecar next to the output (`clip - telemetry.gpx`). **Off by default** — most runs just want the muxed clip; the sidecar is a separate deliverable for map tools and re-syncing, so it's opt-in.
+- `--location` — telemetry only: write the clip's GPS position into the output's container metadata — the `location` tag and Apple's `com.apple.quicktime.location.ISO6709`. **On by default**, and the only telemetry output that is. Pass `--location=false` to leave it out: that tag is read by YouTube, Photos, Immich and QuickTime, so a run starting at your front door otherwise ships your home address inside the file. Note `--effect telemetry-hud` implies `--effect telemetry`, so this applies to a HUD burn too.
 - `--telemetry-stryd` — telemetry only: include Stryd running-dynamics developer fields (Form Power, Leg Spring Stiffness, ...) in the GPX sidecar and muxed SRT. Off by default.
 - `--strength` is accepted but **ignored** by `telemetry` — there is no "how strong" dial for attaching telemetry to a clip, so `ValidateStrength` accepts any value.
 
@@ -229,7 +230,10 @@ activity file onto a video clip, producing:
   software, ...) rather than reading an embedded track.
 - A global `location` metadata tag (and, for Apple players, the
   `com.apple.quicktime.location.ISO6709` variant), set from the clip's
-  first GPS-having telemetry point. When that point also has an elevation
+  first GPS-having telemetry point, **unless `--location=false`**. This is
+  the one output here that is on by default rather than opt-in, which is
+  why it is worth knowing about: consumer software reads it, and it records
+  where the clip was shot. When that point also has an elevation
   reading, the tag carries the three-component ISO 6709 form
   (`±lat±lon±alt/`, e.g. `-27.9445+153.4102+005.584/`) — the same shape
   iPhones write — and falls back to lat/lon only (`±lat±lon/`) otherwise.
@@ -289,7 +293,8 @@ videofx run.mp4 --effect telemetry --fit "run.fit" --offset 0 --srt-format reada
 produces `run - telemetry.mp4` (stream-copied video + audio + a visible
 telemetry subtitle + location tag) and, because `--gpx` was passed,
 `run - telemetry.gpx` next to the original. Drop the `--srt-format`/`--show-subtitle`/`--gpx`
-options (the defaults) to get just the location-tagged clip.
+options (the defaults) to get just the location-tagged clip, or add
+`--location=false` for a clip whose metadata carries no position at all.
 
 ### Embedding telemetry for Telemetry Overlay
 
@@ -348,8 +353,9 @@ stabilize then overlay: `--effect gocv-stabilizer,telemetry-hud`.
 
 **`telemetry-hud` implies `telemetry`.** A trailing `telemetry` pass is added
 automatically (unless you already listed one), so the HUD output also carries the
-lossless GPS location tag and preserved `creation_time` — and any `--srt-format`/`--gpx`
-you set apply to it. So `--effect telemetry-hud` produces `clip - hud - telemetry.mp4`.
+lossless GPS location tag and preserved `creation_time` — and any
+`--srt-format`/`--gpx`/`--location` you set apply to it. That cuts both ways: burning a
+HUD stamps the location tag too, so `--location=false` is what leaves it off. So `--effect telemetry-hud` produces `clip - hud - telemetry.mp4`.
 It's appended last on purpose: a telemetry pass before the overlay re-encode would have
 its embedded subtitle/location dropped by that encode.
 

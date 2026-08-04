@@ -15,6 +15,7 @@ import (
 
 	"videofx/internal/fittest"
 	"videofx/internal/logging"
+	"videofx/internal/runner"
 	"videofx/internal/telemetry"
 )
 
@@ -764,4 +765,139 @@ func TestWriteSidecar_AnnouncesAnOverwrite(t *testing.T) {
 			t.Errorf("srtSidecarPath = %q, want %q", got, want)
 		}
 	})
+}
+
+// TestTelemetry_Apply_OmitLocation is the assertion --location exists for, and
+// it is deliberately made at the ARGV level through a real Apply rather than
+// against muxArgs directly.
+//
+// The flag's default is true, so the positive case cannot fail: every existing
+// invocation writes the tag whether or not the flag is wired to anything at
+// all. The whole risk is the negative case being a no-op -- a --location=false
+// that parses, threads through, and then stamps the address anyway. Only the
+// finished command line can settle that, and only if the same fixture is shown
+// to produce the tags when the flag is left alone.
+func TestTelemetry_Apply_OmitLocation(t *testing.T) {
+	requireFFmpeg(t)
+	fitPath := testFITPath(t)
+	dir := t.TempDir()
+	// Inside the synthetic FIT's coverage, so the clip window really does have
+	// a GPS fix and there is something to suppress. Without that this test
+	// would pass on a track with no position at all.
+	src := generateSyntheticSource(t, dir, "src.mp4", "2026-07-04T21:00:00.000000Z")
+
+	run := func(t *testing.T, omit bool, out string) []string {
+		t.Helper()
+		fr := &fakeRunner{}
+		tel := &Telemetry{Runner: fr, FitPath: fitPath, OmitLocation: omit}
+		if err := tel.Apply(context.Background(), Input{
+			SourcePath: src,
+			OutputPath: filepath.Join(dir, out),
+			Log:        logging.New(io.Discard, logging.LevelInfo),
+		}); err != nil {
+			t.Fatalf("Apply(OmitLocation=%v): %v", omit, err)
+		}
+		if len(fr.calls) != 1 {
+			t.Fatalf("expected exactly one ffmpeg call, got %d", len(fr.calls))
+		}
+		return fr.calls[0].args
+	}
+
+	locationArgs := func(args []string) []string {
+		var found []string
+		for i := 0; i < len(args)-1; i++ {
+			if args[i] != "-metadata" {
+				continue
+			}
+			if strings.HasPrefix(args[i+1], "location=") ||
+				strings.HasPrefix(args[i+1], "com.apple.quicktime.location.ISO6709=") {
+				found = append(found, args[i+1])
+			}
+		}
+		return found
+	}
+
+	// The control. If this stops finding both tags the negative case below
+	// becomes vacuous, and would keep passing forever.
+	kept := locationArgs(run(t, false, "kept.mp4"))
+	if len(kept) != 2 {
+		t.Fatalf("default run wrote %d location tags, want 2 (%v) -- the negative case below proves nothing without this",
+			len(kept), kept)
+	}
+
+	omitted := run(t, true, "omitted.mp4")
+	if got := locationArgs(omitted); len(got) != 0 {
+		t.Errorf("OmitLocation still put the position in the argv: %v", got)
+	}
+	// -movflags use_metadata_tags exists only to make the Apple key stick, so
+	// it must go with them; leaving it behind would be harmless but would mean
+	// the two were not actually tied together.
+	if containsAdjacent(omitted, "-movflags", "use_metadata_tags") {
+		t.Error("OmitLocation left -movflags use_metadata_tags behind, which is only there to carry the Apple location key")
+	}
+	// Everything else about the mux is unaffected: this is a metadata opt-out,
+	// not a different command.
+	if !containsAdjacent(omitted, "-c:v", "copy") || !containsAdjacent(omitted, "-c:a", "copy") {
+		t.Errorf("the mux is no longer a stream copy: %v", omitted)
+	}
+	if !containsAdjacent(omitted, "-map_metadata", "0") {
+		t.Errorf("OmitLocation also dropped -map_metadata 0, which carries creation_time: %v", omitted)
+	}
+}
+
+// TestTelemetry_Apply_OmitLocation_EndToEnd runs the real ffmpeg and asks
+// ffprobe what actually landed in the container. The argv test above proves
+// the flag reaches the command line; this proves the command line means what
+// it looks like -- the two are not the same claim, and the tag's whole point
+// is that other software reads it out of the file.
+func TestTelemetry_Apply_OmitLocation_EndToEnd(t *testing.T) {
+	requireFFmpeg(t)
+	fitPath := testFITPath(t)
+	dir := t.TempDir()
+	src := generateSyntheticSource(t, dir, "src.mp4", "2026-07-04T21:00:00.000000Z")
+
+	formatTags := func(t *testing.T, path string) string {
+		t.Helper()
+		out, err := exec.Command("ffprobe", "-v", "error", "-show_format",
+			"-of", "default=nw=1", path).Output()
+		if err != nil {
+			t.Fatalf("probing %s: %v", path, err)
+		}
+		return string(out)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		omit       bool
+		wantInFile bool
+	}{
+		{"default writes the tag", false, true},
+		{"--location=false leaves it out", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "_")+".mp4")
+			tel := &Telemetry{Runner: runner.ExecRunner{}, FitPath: fitPath, OmitLocation: tc.omit}
+			if err := tel.Apply(context.Background(), Input{
+				SourcePath: src,
+				OutputPath: out,
+				Log:        logging.New(io.Discard, logging.LevelInfo),
+			}); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+
+			tags := formatTags(t, out)
+			got := strings.Contains(tags, "TAG:location=") ||
+				strings.Contains(tags, "com.apple.quicktime.location.ISO6709")
+			if got != tc.wantInFile {
+				t.Errorf("location tag present = %v, want %v\nffprobe -show_format said:\n%s",
+					got, tc.wantInFile, tags)
+			}
+			// creation_time must survive either way -- it is what the whole
+			// telemetry sync anchors on, and dropping it while removing the
+			// position would be a much worse trade than the one requested.
+			if !strings.Contains(tags, "creation_time") {
+				t.Errorf("creation_time did not survive the mux:\n%s", tags)
+			}
+		})
+	}
 }

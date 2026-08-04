@@ -464,9 +464,9 @@ func names(effs []effects.Effect) []string {
 // *effects.Telemetry's exported fields untouched, and must never touch
 // (or panic on) an effect of a different concrete type.
 func TestConfigureTelemetry(t *testing.T) {
-	origFit, origOffset, origSRT, origShow, origSidecar, origGPX, origStryd := fitPath, offsetSeconds, srtFormat, showSubtitle, srtSidecar, gpx, telemetryStryd
+	origFit, origOffset, origSRT, origShow, origSidecar, origGPX, origStryd, origLoc := fitPath, offsetSeconds, srtFormat, showSubtitle, srtSidecar, gpx, telemetryStryd, location
 	t.Cleanup(func() {
-		fitPath, offsetSeconds, srtFormat, showSubtitle, srtSidecar, gpx, telemetryStryd = origFit, origOffset, origSRT, origShow, origSidecar, origGPX, origStryd
+		fitPath, offsetSeconds, srtFormat, showSubtitle, srtSidecar, gpx, telemetryStryd, location = origFit, origOffset, origSRT, origShow, origSidecar, origGPX, origStryd, origLoc
 	})
 
 	fitPath = "test_videos/run.fit"
@@ -476,6 +476,12 @@ func TestConfigureTelemetry(t *testing.T) {
 	srtSidecar = true
 	gpx = true
 	telemetryStryd = true
+	// --location is the one flag here whose default is TRUE and whose field is
+	// inverted, so the value that makes this assertion discriminating is
+	// false: it must land as OmitLocation=true, which is not the field's zero
+	// value. Setting it to true instead would expect false, which is what a
+	// deleted assignment also produces.
+	location = false
 
 	tel := &effects.Telemetry{}
 	configureTelemetry(tel)
@@ -500,6 +506,10 @@ func TestConfigureTelemetry(t *testing.T) {
 	}
 	if tel.IncludeStryd != telemetryStryd {
 		t.Errorf("IncludeStryd = %v, want %v", tel.IncludeStryd, telemetryStryd)
+	}
+	if tel.OmitLocation != !location {
+		t.Errorf("OmitLocation = %v, want %v (--location=%v is an opt-out, so the field is its inverse)",
+			tel.OmitLocation, !location, location)
 	}
 
 	// Must not panic, and must not affect a different effect type, when
@@ -937,5 +947,36 @@ func TestBuildForcedLens(t *testing.T) {
 				t.Errorf("principal point = (%v,%v), want (0,0) left for Analyze to fill", got.CX, got.CY)
 			}
 		})
+	}
+}
+
+// TestNewRootCmd_LocationFlagDefaultsOn pins the decision --location was added
+// under: it is an OPT-OUT, so its default must be true and no existing
+// invocation may start behaving differently for having added it.
+//
+// This is the assertion the flag's own tests cannot make. Everything else about
+// --location is checked through the false path, because that is where a
+// silent no-op would hide; but a default that flipped to false would suppress
+// the tag for every user who never passes the flag at all, and every one of
+// those tests would still pass.
+func TestNewRootCmd_LocationFlagDefaultsOn(t *testing.T) {
+	f := NewRootCmd().Flags().Lookup("location")
+	if f == nil {
+		t.Fatal("flag --location not registered")
+	}
+	if f.DefValue != "true" {
+		t.Errorf("--location default = %q, want \"true\" -- it is an opt-out; a false default "+
+			"silently stops writing the location tag for everyone who never passes the flag", f.DefValue)
+	}
+
+	// And the default, run through the wiring, must leave the tag on.
+	origLoc := location
+	t.Cleanup(func() { location = origLoc })
+	location = true
+
+	tel := &effects.Telemetry{}
+	configureTelemetry(tel)
+	if tel.OmitLocation {
+		t.Error("the default --location=true still set OmitLocation, so the tag would be dropped by default")
 	}
 }

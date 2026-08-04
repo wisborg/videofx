@@ -66,6 +66,7 @@ var (
 	srtSidecar     bool
 	gpx            bool
 	telemetryStryd bool
+	location       bool
 	hudTimeZone    string
 	hudLayout      string
 	powerSource    string
@@ -188,6 +189,8 @@ func NewRootCmd() *cobra.Command {
 		"telemetry-hud only: known total elevation LOSS (meters) for the activity; see --elevation-gain. 0 = use the FIT's own total")
 	root.Flags().BoolVar(&telemetryStryd, "telemetry-stryd", false,
 		"telemetry only: include Stryd running-dynamics developer fields in the GPX sidecar and muxed SRT")
+	root.Flags().BoolVar(&location, "location", true,
+		"telemetry only: write the clip's GPS position into the output's container metadata (the \"location\" tag and Apple's \"com.apple.quicktime.location.ISO6709\"). On by default. Pass --location=false to leave it out: the tag is read by YouTube, Photos, Immich and QuickTime, so a run that starts at your front door otherwise ships your home address in the file. Note --effect telemetry-hud implies --effect telemetry, so this applies to a HUD burn as well")
 
 	_ = root.MarkFlagRequired("effect")
 
@@ -616,7 +619,7 @@ func parseUTCOffset(s string) (int, bool) {
 }
 
 // configureTelemetry applies --fit/--offset/--srt-format/--show-subtitle/
-// --srt-sidecar/--gpx/--telemetry-stryd to effect if it is a
+// --srt-sidecar/--gpx/--telemetry-stryd/--location to effect if it is a
 // *effects.Telemetry.
 func configureTelemetry(effect effects.Effect) {
 	if tel, ok := effect.(*effects.Telemetry); ok {
@@ -627,6 +630,10 @@ func configureTelemetry(effect effects.Effect) {
 		tel.SRTSidecar = srtSidecar
 		tel.GPX = gpx
 		tel.IncludeStryd = telemetryStryd
+		// Inverted: the flag is an opt-OUT with a true default, while the
+		// field's zero value has to keep writing the tag. See
+		// effects.Telemetry.OmitLocation.
+		tel.OmitLocation = !location
 	}
 }
 
