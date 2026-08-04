@@ -328,81 +328,20 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 	w, h := size.Width, size.Height
 	scaleFactor := series.ScaleFactor()
 
-	corrections := result.Corrections
-	stats := RenderStats{}
-	var zoomFactor float64 // constant multiplicative zoom (1.0 = no zoom)
-	var zooms []float64    // per-frame zoom, when non-nil overrides zoomFactor
+	// Every geometric decision this render makes is taken here, in one pure
+	// function, before a single frame is decoded; what follows only allocates
+	// the warp state the plan asks for and executes it.
+	plan := buildRenderPlan(series, result, opts, w, h, info.FPS)
+	stats := plan.stats
 
-	switch opts.EdgeMode {
-	case EdgeModeFixed:
-		zoomFactor = 1 + opts.FixedZoom
-		stats.Zoom = opts.FixedZoom
-	case EdgeModeAdaptive:
-		maxZoomFactor := 0.0 // 0 = uncapped, matching AdaptiveZoom's own convention
-		if opts.MaxZoom > 0 {
-			maxZoomFactor = 1 + opts.MaxZoom
-		}
-		if opts.ZoomTransitionSeconds > 0 {
-			// Time-varying envelope: zoom eases between calm and shaky
-			// regions over ZoomTransitionSeconds. sigma is in frames, so
-			// convert the requested duration via the source frame rate.
-			env := AdaptiveZoomTimeVarying(corrections, scaleFactor, w, h, maxZoomFactor, opts.ZoomTransitionSeconds*info.FPS)
-			zooms = env.Zooms
-			corrections = env.ScaledCorrections
-			stats.Zoom = env.PeakZoom - 1
-			stats.RequiredZoom = env.PeakRequired - 1
-			stats.ClampedFrames = env.ClampedFrames
-		} else {
-			az := AdaptiveZoom(corrections, scaleFactor, w, h, maxZoomFactor)
-			zoomFactor = az.Zoom
-			corrections = az.ScaledCorrections
-			stats.Zoom = az.Zoom - 1
-			stats.RequiredZoom = az.RequiredZoom - 1
-			stats.ClampedFrames = az.ClampedFrames
-		}
-	case EdgeModeFlowFill:
-		zoomFactor = 1.0 // no crop -- borders are filled, not hidden by zooming
-	}
-
-	// Rotation model. When it engages it replaces the 2D correction and its
-	// zoom outright, so it is computed here, before the encoder is opened, and
-	// the 2D zoom decided above is discarded.
+	// The rotation path's warp state. Whether to build it is not decided
+	// here -- the plan already decided that; this only allocates what the
+	// plan asked for. It stays ahead of the encoder so that nothing opens an
+	// ffmpeg process before the geometry is settled, as before.
 	var sphere *sphereWarpState
-	var rotCorr []Quat
-	var rotZooms []float64
-	var rotRS []Vec3
-	if opts.Rotation && series.hasRotations() {
-		if corr := BuildRotationCorrections(series, result.Options.Sigma, result.Options.RadiusMultiple); len(corr) > 0 {
-			// The lens was calibrated in analysis-resolution pixels; the render
-			// warps source-resolution ones. Getting this conversion wrong is
-			// the same silent, plausible-looking 4x error Transition.DX/DY
-			// warns about.
-			lens := series.Lens.Lens.Scaled(scaleFactor)
-			maxZoomFactor := 0.0
-			if opts.MaxZoom > 0 {
-				maxZoomFactor = 1 + opts.MaxZoom
-			}
-			sigmaFrames := 0.0
-			if opts.ZoomTransitionSeconds > 0 {
-				sigmaFrames = opts.ZoomTransitionSeconds * info.FPS
-			}
-			// Rolling shutter, if a readout ratio was supplied. Unlike the 2D
-			// path there is nothing to compose an affine into here: each row
-			// simply saw a different camera orientation, which this model can
-			// state directly (see BuildRSRotations).
-			rotRS = BuildRSRotations(series, opts.RSRatio)
-			plan := PlanRotationZoom(corr, lens, w, h, maxZoomFactor, sigmaFrames, rotRS)
-			rotCorr = plan.Corrections
-			rotZooms = plan.Zooms
-			sphere = newSphereWarpState(lens, w, h)
-			defer sphere.Close()
-
-			stats.Zoom = plan.PeakZoom - 1
-			stats.RequiredZoom = plan.PeakRequired - 1
-			stats.ClampedFrames = plan.ClampedFrames
-			stats.MeshMargin, stats.RSMargin = 0, 0
-			stats.Lens = series.Lens
-		}
+	if plan.sphere {
+		sphere = newSphereWarpState(plan.lens, w, h)
+		defer sphere.Close()
 	}
 
 	enc, err := vidio.OpenEncoder(ctx, vidio.EncoderConfig{
@@ -436,64 +375,21 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 	defer func() { _ = enc.Close() }()
 
 	var ff *flowFillState
-	if opts.EdgeMode == EdgeModeFlowFill {
+	if plan.flowFill {
 		ff = newFlowFillState(size)
 		defer ff.Close()
 	}
 
-	// EXPERIMENTAL perspective (homography) correction, opt-in and only for the
-	// cropping edge modes. perspCorr[i] is the per-frame perspective correction
-	// in analysis coordinates; nil when disabled or when the series carries no
-	// residuals, in which case the loop stays on the pure-similarity WarpAffine
-	// path below.
-	var perspCorr []matrix3
-	if opts.PerspectiveRegularize > 0 && ff == nil && sphere == nil && series.hasPerspective() {
-		perspCorr = buildPerspectiveCorrections(series, result.Options.Sigma, result.Options.RadiusMultiple, opts.PerspectiveRegularize)
-	}
 	// scaleBasis moves an analysis-coordinate perspective correction into
 	// source pixels (see matrix3.conjugateBy); built once.
 	scaleBasis := scalingMatrix3(scaleFactor)
 
-	// EXPERIMENTAL mesh (MeshFlow) correction, opt-in and only for the cropping
-	// edge modes. meshCorr[i] is the per-frame per-vertex residual correction
-	// (analysis coords); mesh holds the reusable warp Mats. nil/no-op when
-	// disabled or when the series carries no fields.
-	var meshCorr []MeshField
+	// The mesh's reusable warp Mats. plan.meshCorr is non-empty exactly when
+	// the mesh correction engaged, so it is what decides this.
 	var mesh *meshWarpState
-	var meshMargin float64
-	if opts.Mesh && ff == nil && sphere == nil && perspCorr == nil && series.hasMesh() {
-		meshCorr = buildMeshCorrections(series, result.Options.Sigma, result.Options.RadiusMultiple, opts.MeshStrength, meshDenoiseSigma)
-		if len(meshCorr) > 0 {
-			mesh = newMeshWarpState(meshCorr[0].Cols, meshCorr[0].Rows, w, h, size.MatType(), scaleFactor)
-			defer mesh.Close()
-			// Measure the true exposed-border crop (rotation included), with the
-			// cheap analytic estimate as a floor, plus a small safety cushion.
-			measured := meshCoverageCrop(meshCorr, corrections, zoomFactor, zooms, scaleFactor, w, h)
-			meshMargin = math.Max(measured, meshCropMargin(meshCorr, scaleFactor, w, h)) + opts.MeshZoomMargin
-			stats.MeshMargin = meshMargin
-		}
-	}
-
-	// Rolling-shutter rectification, folded into the same transform as the
-	// correction below. One clip-wide zoom margin covers every frame's
-	// rectification; see RSZoomMargin for why it is not per-frame.
-	rsRect := opts.RS
-	if sphere != nil {
-		// The 2D rectifiers are an affine composed into a 2D warp, and there is
-		// no 2D warp on this path. The rotation path does its own rectification
-		// from opts.RSRatio, above, which is a better fit to the physics; these
-		// would double-correct it.
-		rsRect = nil
-	}
-	if ff != nil {
-		// EdgeModeFlowFill does not crop at all, so there is no zoom to hide
-		// the band a rectification pulls in; it would show as a filled edge.
-		rsRect = nil
-	}
-	var rsMargin float64
-	if rsRect != nil {
-		rsMargin = RSZoomMargin(rsRect, w, h)
-		stats.RSMargin = rsMargin
+	if len(plan.meshCorr) > 0 {
+		mesh = newMeshWarpState(plan.meshCorr[0].Cols, plan.meshCorr[0].Rows, w, h, size.MatType(), scaleFactor)
+		defer mesh.Close()
 	}
 
 	// Two Mats, reused across every frame -- see internal/vidio/decoder.go's
@@ -519,28 +415,28 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 		}
 
 		corr := identityCorrection
-		if frames < len(corrections) {
-			corr = corrections[frames]
+		if frames < len(plan.corrections) {
+			corr = plan.corrections[frames]
 		}
 		// z is the constant zoom, unless a per-frame envelope is in effect.
 		// Past the envelope's end (only on a frame/correction-count mismatch,
 		// which also yields identityCorrection above) fall back to 1.0 -- an
 		// unmodified frame needs no crop -- never to the unset zoomFactor(0).
-		z := zoomFactor
-		if zooms != nil {
+		z := plan.zoomFactor
+		if plan.zooms != nil {
 			z = 1.0
-			if frames < len(zooms) {
-				z = zooms[frames]
+			if frames < len(plan.zooms) {
+				z = plan.zooms[frames]
 			}
 		}
-		if perspCorr != nil {
+		if plan.perspCorr != nil {
 			z *= 1 + opts.PerspectiveZoomMargin
 		}
 		if mesh != nil {
-			z *= 1 + meshMargin
+			z *= 1 + plan.meshMargin
 		}
-		if rsRect != nil {
-			z *= 1 + rsMargin
+		if plan.rsRect != nil {
+			z *= 1 + plan.rsMargin
 		}
 		transform := buildCorrectionTransform(corr, scaleFactor, w, h, z)
 
@@ -548,8 +444,8 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 		// (widened to an affine) unless a rectification is composed under it,
 		// applied FIRST so the correction acts on a global-shutter frame.
 		total := affineFromSimilarity(transform)
-		if rsRect != nil && frames < len(rsRect) {
-			total = total.mul(rsRect[frames].affine(float64(h) / 2))
+		if plan.rsRect != nil && frames < len(plan.rsRect) {
+			total = total.mul(plan.rsRect[frames].affine(float64(h) / 2))
 		}
 
 		if sphere != nil {
@@ -557,20 +453,20 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 			// series is not what gets applied, and on a short clip the two
 			// can legitimately differ in length, so counting the wrong one
 			// would report an unstabilized tail on every healthy render.
-			if frames >= len(rotCorr) {
+			if frames >= len(plan.rotCorr) {
 				stats.UncorrectedFrames++
 			}
 			q := identityQuat
-			if frames < len(rotCorr) {
-				q = rotCorr[frames]
+			if frames < len(plan.rotCorr) {
+				q = plan.rotCorr[frames]
 			}
 			rz := 1.0
-			if frames < len(rotZooms) {
-				rz = rotZooms[frames]
+			if frames < len(plan.rotZooms) {
+				rz = plan.rotZooms[frames]
 			}
 			var rs Vec3
-			if frames < len(rotRS) {
-				rs = rotRS[frames]
+			if frames < len(plan.rotRS) {
+				rs = plan.rotRS[frames]
 			}
 			if err := sphere.render(src, q, rz, rs, &dst); err != nil {
 				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
@@ -584,7 +480,7 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 
 		// Every remaining path warps by corr, so a frame past the end of
 		// corrections is a frame passed through unstabilized.
-		if frames >= len(corrections) {
+		if frames >= len(plan.corrections) {
 			stats.UncorrectedFrames++
 		}
 
@@ -593,13 +489,13 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 			if err := ff.render(src, transform, &dst); err != nil {
 				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
 			}
-		case perspCorr != nil:
+		case plan.perspCorr != nil:
 			// Compose the similarity correction (source coords) with this
 			// frame's perspective correction (analysis coords -> source coords
 			// via conjugation), applied first, and warp with the full 3x3.
 			p := identityMatrix3
-			if frames < len(perspCorr) {
-				p = perspCorr[frames]
+			if frames < len(plan.perspCorr) {
+				p = plan.perspCorr[frames]
 			}
 			full := total.toMatrix3().mul(p.conjugateBy(scaleBasis))
 			if err := warpFramePerspective(src, &dst, full, w, h); err != nil {
@@ -609,8 +505,8 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 			// Two passes: the local mesh residual (Remap) first, then the
 			// global similarity + zoom (WarpAffine) over the result.
 			mc := MeshField{Cols: mesh.cols, Rows: mesh.rows, VX: make([]float64, mesh.cols*mesh.rows), VY: make([]float64, mesh.cols*mesh.rows)}
-			if frames < len(meshCorr) {
-				mc = meshCorr[frames]
+			if frames < len(plan.meshCorr) {
+				mc = plan.meshCorr[frames]
 			}
 			if err := mesh.render(src, mc, total, &dst); err != nil {
 				return stats, fmt.Errorf("stabilize: rendering %s: warping frame %d: %w", sourcePath, frames, err)
@@ -636,6 +532,209 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 
 	stats.FramesRendered = frames
 	return stats, nil
+}
+
+// renderPlan is every geometric decision a render makes: which of the four
+// correction paths owns the frame, the per-frame corrections and zooms that
+// path applies, and the crop each one costs. Exactly one path owns a render --
+// they are alternative answers to the same question, not layers -- and which
+// one it is is decided here rather than inferred from a handful of nil checks
+// spread across the frame loop.
+//
+// It exists as a separate value because the decisions are arithmetic while
+// everything around them is not: Render needs a decoder, an encoder, OpenCV
+// warp state and tens of seconds per clip, whereas a wrong path choice, a lens
+// left unscaled or a miscounted crop is a pure-data mistake that a test can
+// catch in milliseconds. See buildRenderPlan.
+type renderPlan struct {
+	// corrections is the per-frame 2D similarity correction, after any
+	// adaptive-zoom rescaling replaced the raw one from Smooth. Also the
+	// series the frame loop counts UncorrectedFrames against on every path
+	// except rotation.
+	corrections []Correction
+
+	// zoomFactor is the constant multiplicative crop (1.0 = none); zooms,
+	// when non-nil, supersedes it with a per-frame envelope.
+	zoomFactor float64
+	zooms      []float64
+
+	// sphere reports that the rotation path engaged. It OWNS the geometry
+	// when it does: the 2D correction and zoom computed above it are
+	// discarded, and mesh, perspective and the 2D rolling-shutter
+	// rectifiers are all suppressed below it.
+	sphere bool
+
+	// lens is the calibrated lens SCALED to source resolution. The
+	// calibration is in analysis-resolution pixels and the render warps
+	// source-resolution ones; skipping that conversion is the silent,
+	// plausible-looking 4x error Transition.DX/DY warns about. Only
+	// meaningful when sphere is true.
+	lens     Lens
+	rotCorr  []Quat
+	rotZooms []float64
+	rotRS    []Vec3
+
+	// flowFill reports EdgeModeFlowFill, which fills the borders instead of
+	// cropping them away -- so there is no zoom to hide anything behind, and
+	// the rectifiers are suppressed for the same reason.
+	flowFill bool
+
+	// perspCorr is the EXPERIMENTAL per-frame homography correction in
+	// analysis coordinates, or nil to leave the loop on the similarity path.
+	perspCorr []matrix3
+
+	// meshCorr is the EXPERIMENTAL per-frame per-vertex residual field
+	// (analysis coordinates); non-empty exactly when the mesh path engaged.
+	// meshMargin is the extra crop it needs.
+	meshCorr   []MeshField
+	meshMargin float64
+
+	// rsRect is the per-frame rolling-shutter rectification composed under
+	// the correction, and rsMargin the one clip-wide crop that covers it.
+	rsRect   []RSRectifier
+	rsMargin float64
+
+	// stats is the plan's own contribution to the render's statistics: the
+	// zoom fields and the lens. Render starts from this value and adds only
+	// what it learns while decoding (FramesRendered, UncorrectedFrames).
+	stats RenderStats
+}
+
+// buildRenderPlan decides how a clip will be rendered, from the analysis
+// (series), the smoothing result, the render options and the SOURCE frame
+// size -- w and h are the decoder's display-size frame, not the analysis
+// resolution, and fps is the source frame rate, which is what converts
+// ZoomTransitionSeconds into the frame counts the zoom planners want.
+//
+// The order below is load bearing. The 2D zoom plan is computed first and then
+// overwritten wholesale if the rotation path engages (that path's own comment
+// says the 2D plan is discarded); mesh and perspective each stand down for the
+// paths above them; and the rectifiers stand down for rotation and flow-fill
+// last of all. Reordering it would silently double-correct.
+//
+// It returns no error: nothing here can fail. Render validates the options it
+// can reject (edge mode, negative zooms) before it opens anything, and the
+// planners below all degrade to a no-op rather than failing -- meshCoverageCrop
+// returns 0 ("no extra crop") even when its OpenCV calls fail, which is a
+// separate, known weakness and not one this function can report on.
+func buildRenderPlan(series *MotionSeries, result *SmoothResult, opts RenderOptions, w, h int, fps float64) renderPlan {
+	scaleFactor := series.ScaleFactor()
+	plan := renderPlan{corrections: result.Corrections}
+
+	switch opts.EdgeMode {
+	case EdgeModeFixed:
+		plan.zoomFactor = 1 + opts.FixedZoom
+		plan.stats.Zoom = opts.FixedZoom
+	case EdgeModeAdaptive:
+		maxZoomFactor := 0.0 // 0 = uncapped, matching AdaptiveZoom's own convention
+		if opts.MaxZoom > 0 {
+			maxZoomFactor = 1 + opts.MaxZoom
+		}
+		if opts.ZoomTransitionSeconds > 0 {
+			// Time-varying envelope: zoom eases between calm and shaky
+			// regions over ZoomTransitionSeconds. sigma is in frames, so
+			// convert the requested duration via the source frame rate.
+			env := AdaptiveZoomTimeVarying(plan.corrections, scaleFactor, w, h, maxZoomFactor, opts.ZoomTransitionSeconds*fps)
+			plan.zooms = env.Zooms
+			plan.corrections = env.ScaledCorrections
+			plan.stats.Zoom = env.PeakZoom - 1
+			plan.stats.RequiredZoom = env.PeakRequired - 1
+			plan.stats.ClampedFrames = env.ClampedFrames
+		} else {
+			az := AdaptiveZoom(plan.corrections, scaleFactor, w, h, maxZoomFactor)
+			plan.zoomFactor = az.Zoom
+			plan.corrections = az.ScaledCorrections
+			plan.stats.Zoom = az.Zoom - 1
+			plan.stats.RequiredZoom = az.RequiredZoom - 1
+			plan.stats.ClampedFrames = az.ClampedFrames
+		}
+	case EdgeModeFlowFill:
+		plan.zoomFactor = 1.0 // no crop -- borders are filled, not hidden by zooming
+		plan.flowFill = true
+	}
+
+	// Rotation model. When it engages it replaces the 2D correction and its
+	// zoom outright, so the 2D zoom decided above is discarded.
+	if opts.Rotation && series.hasRotations() {
+		if corr := BuildRotationCorrections(series, result.Options.Sigma, result.Options.RadiusMultiple); len(corr) > 0 {
+			// The lens was calibrated in analysis-resolution pixels; the render
+			// warps source-resolution ones. Getting this conversion wrong is
+			// the same silent, plausible-looking 4x error Transition.DX/DY
+			// warns about.
+			lens := series.Lens.Lens.Scaled(scaleFactor)
+			maxZoomFactor := 0.0
+			if opts.MaxZoom > 0 {
+				maxZoomFactor = 1 + opts.MaxZoom
+			}
+			sigmaFrames := 0.0
+			if opts.ZoomTransitionSeconds > 0 {
+				sigmaFrames = opts.ZoomTransitionSeconds * fps
+			}
+			// Rolling shutter, if a readout ratio was supplied. Unlike the 2D
+			// path there is nothing to compose an affine into here: each row
+			// simply saw a different camera orientation, which this model can
+			// state directly (see BuildRSRotations).
+			plan.rotRS = BuildRSRotations(series, opts.RSRatio)
+			rot := PlanRotationZoom(corr, lens, w, h, maxZoomFactor, sigmaFrames, plan.rotRS)
+			plan.sphere = true
+			plan.lens = lens
+			plan.rotCorr = rot.Corrections
+			plan.rotZooms = rot.Zooms
+
+			plan.stats.Zoom = rot.PeakZoom - 1
+			plan.stats.RequiredZoom = rot.PeakRequired - 1
+			plan.stats.ClampedFrames = rot.ClampedFrames
+			plan.stats.MeshMargin, plan.stats.RSMargin = 0, 0
+			plan.stats.Lens = series.Lens
+		}
+	}
+
+	// EXPERIMENTAL perspective (homography) correction, opt-in and only for the
+	// cropping edge modes. perspCorr[i] is the per-frame perspective correction
+	// in analysis coordinates; nil when disabled or when the series carries no
+	// residuals, in which case the render stays on the pure-similarity
+	// WarpAffine path.
+	if opts.PerspectiveRegularize > 0 && !plan.flowFill && !plan.sphere && series.hasPerspective() {
+		plan.perspCorr = buildPerspectiveCorrections(series, result.Options.Sigma, result.Options.RadiusMultiple, opts.PerspectiveRegularize)
+	}
+
+	// EXPERIMENTAL mesh (MeshFlow) correction, opt-in and only for the cropping
+	// edge modes. meshCorr[i] is the per-frame per-vertex residual correction
+	// (analysis coords); empty/no-op when disabled or when the series carries
+	// no fields.
+	if opts.Mesh && !plan.flowFill && !plan.sphere && plan.perspCorr == nil && series.hasMesh() {
+		plan.meshCorr = buildMeshCorrections(series, result.Options.Sigma, result.Options.RadiusMultiple, opts.MeshStrength, meshDenoiseSigma)
+		if len(plan.meshCorr) > 0 {
+			// Measure the true exposed-border crop (rotation included), with the
+			// cheap analytic estimate as a floor, plus a small safety cushion.
+			measured := meshCoverageCrop(plan.meshCorr, plan.corrections, plan.zoomFactor, plan.zooms, scaleFactor, w, h)
+			plan.meshMargin = math.Max(measured, meshCropMargin(plan.meshCorr, scaleFactor, w, h)) + opts.MeshZoomMargin
+			plan.stats.MeshMargin = plan.meshMargin
+		}
+	}
+
+	// Rolling-shutter rectification, folded into the same transform as the
+	// correction. One clip-wide zoom margin covers every frame's
+	// rectification; see RSZoomMargin for why it is not per-frame.
+	plan.rsRect = opts.RS
+	if plan.sphere {
+		// The 2D rectifiers are an affine composed into a 2D warp, and there is
+		// no 2D warp on this path. The rotation path does its own rectification
+		// from opts.RSRatio, above, which is a better fit to the physics; these
+		// would double-correct it.
+		plan.rsRect = nil
+	}
+	if plan.flowFill {
+		// EdgeModeFlowFill does not crop at all, so there is no zoom to hide
+		// the band a rectification pulls in; it would show as a filled edge.
+		plan.rsRect = nil
+	}
+	if plan.rsRect != nil {
+		plan.rsMargin = RSZoomMargin(plan.rsRect, w, h)
+		plan.stats.RSMargin = plan.rsMargin
+	}
+
+	return plan
 }
 
 // warpFrame applies transform to src, writing the result into dst at w x h,
