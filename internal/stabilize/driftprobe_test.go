@@ -145,8 +145,8 @@ func TestDriftProbe(t *testing.T) {
 			continue
 		}
 		fmt.Printf("%-6d %-8d %-12.3f %-12.4f %-12.4f %.0f\n",
-			g, len(drift[g]), median(drift[g]), median(rotDiff[g])*180/math.Pi,
-			median(scaleDiff[g]), median(survivors[g]))
+			g, len(drift[g]), medianAverage(drift[g]), medianAverage(rotDiff[g])*180/math.Pi,
+			medianAverage(scaleDiff[g]), medianAverage(survivors[g]))
 	}
 	fmt.Printf("\nseconds at %.2ffps: ", series.FPS)
 	for _, g := range gaps {

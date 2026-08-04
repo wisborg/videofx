@@ -117,5 +117,5 @@ func simulateMetric(pairs []correspondence, opts Options, corr func(frame int, p
 			mags = append(mags, math.Hypot(fit.Tx, fit.Ty))
 		}
 	}
-	return medianOf(mags), pctile(mags, 90)
+	return medianUpper(mags), pctile(mags, 90)
 }

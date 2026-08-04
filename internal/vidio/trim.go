@@ -3,9 +3,7 @@ package vidio
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -38,7 +36,7 @@ func TrimClip(ctx context.Context, src, dst string, startSeconds, endSeconds flo
 	}
 
 	args := []string{
-		"-y", "-hide_banner", "-loglevel", "error",
+		"-y",
 		"-ss", secs(startSeconds), // fast seek before -i (keyframe-aligned)
 		"-i", src,
 		"-t", secs(end - startSeconds),
@@ -53,8 +51,17 @@ func TrimClip(ctx context.Context, src, dst string, startSeconds, endSeconds flo
 	}
 	args = append(args, dst)
 
-	if out, err := exec.CommandContext(ctx, "ffmpeg", args...).CombinedOutput(); err != nil {
-		return fmt.Errorf("vidio: trimming %s: %w\n%s", src, err, strings.TrimSpace(string(out)))
+	// Through newFFmpegCmd like every other ffmpeg invocation in this package:
+	// it supplies the quiet flags this used to pass by hand, and -- the part
+	// that was actually missing -- captures stderr into the bounded buffer
+	// instead of slurping combined output unbounded. A stream copy of a long
+	// clip that fails late could otherwise return an arbitrarily large error.
+	cmd, capture := newFFmpegCmd(ctx, args...)
+	if err := cmd.Run(); err != nil {
+		if tail := capture.String(); tail != "" {
+			return fmt.Errorf("vidio: trimming %s: %w\nffmpeg stderr:\n%s", src, err, tail)
+		}
+		return fmt.Errorf("vidio: trimming %s: %w", src, err)
 	}
 	return nil
 }

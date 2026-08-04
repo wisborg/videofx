@@ -3,6 +3,7 @@ package stabilize
 import (
 	"encoding/csv"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"sort"
@@ -165,8 +166,18 @@ func (r *SmoothResult) WriteCSV(path string) error {
 	if err != nil {
 		return fmt.Errorf("stabilize: creating diagnostics CSV %s: %w", path, err)
 	}
-	defer f.Close()
+	// Close's error is checked, not deferred away: a write that only fails on
+	// the final flush -- a full disk is the ordinary way -- would otherwise
+	// leave a truncated CSV behind and report success. Same cerr-if-werr-nil
+	// shape as WriteSidecar.
+	werr := r.writeCSVTo(f, path)
+	if cerr := f.Close(); werr == nil && cerr != nil {
+		werr = fmt.Errorf("stabilize: closing diagnostics CSV %s: %w", path, cerr)
+	}
+	return werr
+}
 
+func (r *SmoothResult) writeCSVTo(f io.Writer, path string) error {
 	w := csv.NewWriter(f)
 	header := []string{
 		"frame",

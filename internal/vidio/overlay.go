@@ -79,7 +79,7 @@ func overlayArgs(cfg OverlayConfig) []string {
 	if cfg.Quality > 0 {
 		args = append(args, "-q:v", strconv.Itoa(cfg.Quality))
 	}
-	args = append(args, "-tag:v", "hvc1", cfg.OutputPath)
+	args = append(args, "-tag:v", "hvc1", PositionalPath(cfg.OutputPath))
 	return args
 }
 

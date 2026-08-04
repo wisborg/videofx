@@ -2,6 +2,9 @@ package vidio
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -77,5 +80,84 @@ func TestNewFFmpegCmd_PrependsQuietFlags(t *testing.T) {
 	}
 	if cmd.Stderr != capture {
 		t.Error("expected cmd.Stderr to be the returned capture")
+	}
+}
+
+// TestPositionalPath pins the dash guard. The hazard is verified, not assumed:
+// `ffprobe -v error -show_format -report` (a real file named "-report") parses
+// the filename as ffmpeg's own -report option, writes an ffprobe-TIMESTAMP.log
+// into the current working directory, and fails with "You have to specify one
+// input file".
+//
+// The negative cases matter as much as the positive one: rewriting paths that
+// need no rewriting would put "./" in front of every filename in every error
+// message this package produces.
+func TestPositionalPath(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"-report", "./-report"},
+		{"-i", "./-i"},
+		{"--output.mp4", "./--output.mp4"},
+		// Left alone: no leading dash, so no ambiguity to resolve.
+		{"clip.mp4", "clip.mp4"},
+		{"my - clip.mp4", "my - clip.mp4"},
+		{"/Users/someone/Movies/clip.mp4", "/Users/someone/Movies/clip.mp4"},
+		{"./already-relative.mp4", "./already-relative.mp4"},
+		{"sub/dir/-not-first.mp4", "sub/dir/-not-first.mp4"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := PositionalPath(tt.in); got != tt.want {
+			t.Errorf("PositionalPath(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestPositionalPath_AppliedToProbeArgv is the wiring check: the function above
+// is only useful where it is actually called, and Probe's path is the bare
+// positional that provoked the finding.
+func TestPositionalPath_AppliedToProbeArgv(t *testing.T) {
+	requireFFmpeg(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "-report")
+	if out, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc=size=32x24:rate=5:duration=1",
+		"-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mp4", "-y", path,
+	).CombinedOutput(); err != nil {
+		t.Fatalf("generating a dash-named clip: %v\n%s", err, out)
+	}
+
+	// Run from the directory holding it and probe by its RELATIVE name. This
+	// is the whole point: t.TempDir() is absolute, so an absolute path never
+	// begins with a dash and the guard is never reached -- a version of this
+	// test that passed the absolute path passed with the guard removed, which
+	// is no test at all.
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+
+	info, err := Probe(context.Background(), filepath.Base(path))
+	if err != nil {
+		t.Fatalf("Probe of a file named %q failed: %v", filepath.Base(path), err)
+	}
+	if info.Width != 32 || info.Height != 24 {
+		t.Errorf("Probe returned %dx%d, want 32x24", info.Width, info.Height)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "ffprobe-") && strings.HasSuffix(e.Name(), ".log") {
+			t.Errorf("ffprobe wrote %s into the working directory -- the filename was parsed as -report", e.Name())
+		}
 	}
 }

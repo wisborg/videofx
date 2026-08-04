@@ -686,3 +686,82 @@ func TestTelemetry_Apply_PartialOverlapWarns(t *testing.T) {
 		t.Errorf("warning does not name the FIT file it is about: %q", out)
 	}
 }
+
+// TestWriteSidecar_AnnouncesAnOverwrite covers the one thing that changed about
+// how sidecars are written.
+//
+// The review asked for these to go through naming.Resolve like every other
+// output, and that would have been wrong: Resolve's collision suffix produces
+// "clip - telemetry - 1.srt" beside "clip - telemetry.mp4", and a sidecar that
+// does not share the video's stem pairs with nothing -- which is the entire
+// point of writing one (see writeSidecar's doc comment). So the path still
+// tracks the video, and what changed is that clobbering an existing sidecar is
+// no longer silent.
+func TestWriteSidecar_AnnouncesAnOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "clip - telemetry.gpx")
+
+	points := []telemetry.ClipPoint{{
+		PTS:      0,
+		WallTime: time.Date(2026, 7, 4, 21, 0, 0, 0, time.UTC),
+		Sample: telemetry.Sample{
+			Time: time.Date(2026, 7, 4, 21, 0, 0, 0, time.UTC),
+			Lat:  -27.4698, Lon: 153.0251, HasGPS: true,
+		},
+	}}
+
+	t.Run("a fresh path says nothing", func(t *testing.T) {
+		var buf bytes.Buffer
+		log := logging.New(&buf, logging.LevelInfo)
+		if err := writeGPXFile(log, path, points, telemetry.DefaultFieldOptions()); err != nil {
+			t.Fatalf("writeGPXFile: %v", err)
+		}
+		if strings.Contains(buf.String(), "overwriting") {
+			t.Errorf("warned about overwriting a file that did not exist: %s", buf.String())
+		}
+	})
+
+	t.Run("an existing path is announced and replaced", func(t *testing.T) {
+		// Longer than any GPX this will write, so a failure to truncate shows
+		// up as trailing junk rather than being invisible.
+		stale := strings.Repeat("stale sidecar from an earlier run\n", 200)
+		if err := os.WriteFile(path, []byte(stale), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		var buf bytes.Buffer
+		log := logging.New(&buf, logging.LevelInfo)
+		if err := writeGPXFile(log, path, points, telemetry.DefaultFieldOptions()); err != nil {
+			t.Fatalf("writeGPXFile: %v", err)
+		}
+		if !strings.Contains(buf.String(), "overwriting an existing GPX sidecar") {
+			t.Errorf("overwrote an existing sidecar without saying so; log was: %q", buf.String())
+		}
+		if !strings.Contains(buf.String(), "clip - telemetry.gpx") {
+			t.Errorf("the warning does not name the file; log was: %q", buf.String())
+		}
+
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(got), "stale sidecar") {
+			t.Error("the previous contents survived -- the file was not truncated")
+		}
+		if !strings.Contains(string(got), "<gpx") {
+			t.Errorf("the new GPX was not written; got %d bytes starting %q", len(got), string(got[:min(40, len(got))]))
+		}
+	})
+
+	// The sidecar's name must still be derived from the video, not resolved
+	// away from it: this is the property that makes it a sidecar at all.
+	t.Run("the path still tracks the video's stem", func(t *testing.T) {
+		const out = "/tmp/clip - telemetry.mp4"
+		if got, want := gpxSidecarPath(out), "/tmp/clip - telemetry.gpx"; got != want {
+			t.Errorf("gpxSidecarPath = %q, want %q", got, want)
+		}
+		if got, want := srtSidecarPath(out), "/tmp/clip - telemetry.srt"; got != want {
+			t.Errorf("srtSidecarPath = %q, want %q", got, want)
+		}
+	})
+}

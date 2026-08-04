@@ -82,3 +82,28 @@ func newFFmpegCmd(ctx context.Context, args ...string) (*exec.Cmd, *stderrCaptur
 	// channel.
 	return cmd, capture
 }
+
+// PositionalPath makes p safe to hand to ffmpeg/ffprobe as a BARE positional
+// argument -- an input or output filename that follows no flag of its own.
+//
+// Both tools parse any argument beginning with "-" as an option, so an
+// ordinary file whose name starts with a dash is read as one. This is not
+// theoretical: verified, `ffprobe ... -report` treats the filename as
+// ffmpeg's own -report option, writes an ffprobe-TIMESTAMP.log into the
+// current working directory, and then fails with "You have to specify one
+// input file". A file named "-i" or "-y" would be worse than noisy.
+//
+// Prefixing "./" makes it an unambiguous relative path. Paths that do not
+// begin with a dash are returned unchanged, so this only ever affects the
+// argument it needs to, and never rewrites a path a user would recognize in
+// an error message.
+//
+// Only bare positionals need this. A path passed as the VALUE of a flag
+// (ffmpeg's "-i", src) is already unambiguous, because the option parser has
+// consumed the flag and takes the next argument literally.
+func PositionalPath(p string) string {
+	if strings.HasPrefix(p, "-") {
+		return "./" + p
+	}
+	return p
+}

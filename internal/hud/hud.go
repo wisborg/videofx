@@ -189,6 +189,9 @@ type Renderer struct {
 
 	mu    sync.Mutex
 	faces map[int]font.Face
+	// courseGeo memoizes the course map's route projection, which is the same
+	// for every frame of a render -- see courseMapGeometry.
+	courseGeo map[courseGeoKey]courseMapGeo
 }
 
 var monoFont = mustParseFont(gomono.TTF)

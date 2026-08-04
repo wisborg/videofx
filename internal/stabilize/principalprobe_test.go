@@ -138,7 +138,7 @@ func TestPrincipalPointProbe(t *testing.T) {
 				}
 			}
 		}
-		fmt.Printf("%-26s %-12.3f %-12.3f %-12.3f\n", m.name, medianOf(rnd), medianOf(lr), medianOf(tb))
+		fmt.Printf("%-26s %-12.3f %-12.3f %-12.3f\n", m.name, medianUpper(rnd), medianUpper(lr), medianUpper(tb))
 	}
 }
 
@@ -156,7 +156,7 @@ func bestFocalAt(pairs []correspondence, kind LensKind, w, h, dx, dy, focal0 flo
 				errs = append(errs, rotationReprojectionError(p.from, p.to, lens, q.Matrix()))
 			}
 		}
-		if e := medianOf(errs); e < bestErr {
+		if e := medianUpper(errs); e < bestErr {
 			bestErr, bestFocal = e, lens.Focal
 		}
 	}

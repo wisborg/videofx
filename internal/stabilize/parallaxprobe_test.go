@@ -129,21 +129,21 @@ func TestParallaxProbe(t *testing.T) {
 
 	fmt.Printf("\n=== how much does the global similarity fit depend on WHICH points it sees? ===\n")
 	fmt.Printf("clip %s, analysis %.0fx%.0f, %d frame pairs\n\n", videoPath, w, h, len(allTrans))
-	fmt.Printf("all-points fit: median |translation| %.3f px  (this is the raw residual metric)\n\n", median(allTrans))
+	fmt.Printf("all-points fit: median |translation| %.3f px  (this is the raw residual metric)\n\n", medianAverage(allTrans))
 	fmt.Printf("%-12s %-8s %-10s %-10s %s\n", "split", "pairs", "median", "p90", "what it isolates")
 	report := func(name string, v []float64, note string) {
 		if len(v) == 0 {
 			return
 		}
-		fmt.Printf("%-12s %-8d %-10.3f %-10.3f %s\n", name, len(v), median(v), pctile(v, 90), note)
+		fmt.Printf("%-12s %-8d %-10.3f %-10.3f %s\n", name, len(v), medianAverage(v), pctile(v, 90), note)
 	}
 	report("random", randomDiff, "estimator/sampling noise floor")
 	report("vertical", vertDiff, "depth split (near ground vs far background)")
 	report("horizontal", horizDiff, "control: spatial split, little depth structure")
 
 	fmt.Printf("\nper-point residual against the all-points fit (analysis px):\n")
-	fmt.Printf("  top half    median %.3f  p90 %.3f  (n=%d)\n", median(resTop), pctile(resTop, 90), len(resTop))
-	fmt.Printf("  bottom half median %.3f  p90 %.3f  (n=%d)\n", median(resBottom), pctile(resBottom, 90), len(resBottom))
+	fmt.Printf("  top half    median %.3f  p90 %.3f  (n=%d)\n", medianAverage(resTop), pctile(resTop, 90), len(resTop))
+	fmt.Printf("  bottom half median %.3f  p90 %.3f  (n=%d)\n", medianAverage(resBottom), pctile(resBottom, 90), len(resBottom))
 }
 
 // splitDisagreement fits one similarity to the points selected by inA and

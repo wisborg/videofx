@@ -147,7 +147,55 @@ type courseMapGeo struct {
 	fullLw float64
 }
 
+// courseGeoKey identifies the inputs courseMapGeometry's result depends on.
+// Everything in it is fixed for a whole render -- the route slice is built once
+// by the caller, the box comes from the layout and the frame size, and none of
+// it varies with f.Time or the frame's sample -- which is exactly why the
+// result can be cached across frames.
+//
+// The route is identified by its backing array and length rather than its
+// contents: a Renderer handed a genuinely different route gets a different
+// first element, so the cache cannot serve a stale projection, and this costs
+// a pointer comparison instead of walking up to 500 points.
+type courseGeoKey struct {
+	route *GeoPoint
+	n     int
+	box   Box
+	w, h  int
+}
+
+// courseMapGeometry projects the route into box's pixel space, memoized on the
+// Renderer.
+//
+// Without the cache this ran per frame: a mean latitude over the whole route,
+// then a projection, bounds pass and scale pass over up to 500 points, plus
+// four float64 slices of garbage, on every frame of the clip. The static-layer
+// cache in telemetry-hud already spared the RASTERIZATION of the dim route
+// outline, but not this arithmetic, which the per-frame Draw needs as well.
 func courseMapGeometry(r *Renderer, box Box, f Frame) (courseMapGeo, bool) {
+	if f.Course != nil && len(f.Course.Route) >= 2 {
+		key := courseGeoKey{route: &f.Course.Route[0], n: len(f.Course.Route), box: box, w: f.Width, h: f.Height}
+		r.mu.Lock()
+		hit, ok := r.courseGeo[key]
+		r.mu.Unlock()
+		if ok {
+			return hit, true
+		}
+		g, valid := computeCourseMapGeometry(r, box, f)
+		if valid {
+			r.mu.Lock()
+			if r.courseGeo == nil {
+				r.courseGeo = map[courseGeoKey]courseMapGeo{}
+			}
+			r.courseGeo[key] = g
+			r.mu.Unlock()
+		}
+		return g, valid
+	}
+	return computeCourseMapGeometry(r, box, f)
+}
+
+func computeCourseMapGeometry(r *Renderer, box Box, f Frame) (courseMapGeo, bool) {
 	if f.Course == nil || len(f.Course.Route) < 2 {
 		return courseMapGeo{}, false
 	}

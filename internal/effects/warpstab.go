@@ -3,6 +3,7 @@ package effects
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	"videofx/internal/runner"
+	"videofx/internal/vidio"
 )
 
 func init() {
@@ -214,7 +216,7 @@ func (w *WarpStabilizer) Apply(ctx context.Context, in Input) error {
 		// this is a merge, not a clobber.
 		"-map_metadata", "0",
 		"-map_metadata:s:v:0", "0:s:v:0",
-		in.OutputPath,
+		vidio.PositionalPath(in.OutputPath),
 	)
 	if err := w.Runner.Run(ctx, ffmpegBin, transformArgs...); err != nil {
 		return fmt.Errorf("transform pass (using %s): %w", ffmpegBin, err)
@@ -247,17 +249,10 @@ func mapStrength(strength float64) vidstabParams {
 	s := clamp(strength, 0, 1)
 
 	return vidstabParams{
-		shakiness: 1 + int(round(s*9)),   // 1-10
-		smoothing: 10 + int(round(s*90)), // 10-100 frames
-		zoom:      int(round(s * 5)),     // 0-5% allowed zoom
+		shakiness: 1 + int(math.Round(s*9)),   // 1-10
+		smoothing: 10 + int(math.Round(s*90)), // 10-100 frames
+		zoom:      int(math.Round(s * 5)),     // 0-5% allowed zoom
 	}
-}
-
-func round(f float64) float64 {
-	if f < 0 {
-		return float64(int(f - 0.5))
-	}
-	return float64(int(f + 0.5))
 }
 
 // escapeFilterPath escapes a path for safe use inside an ffmpeg -vf

@@ -3,6 +3,7 @@ package effects
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -199,7 +200,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 
 	if t.GPX {
 		gpxPath := gpxSidecarPath(in.OutputPath)
-		if err := writeGPXFile(gpxPath, points, fields); err != nil {
+		if err := writeGPXFile(log, gpxPath, points, fields); err != nil {
 			return err
 		}
 	}
@@ -212,7 +213,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 	// hidden -- see hideSubtitleTrack) while Telemetry Overlay reads the
 	// separate .srt, matching DJI's own MP4+SRT file-pair workflow.
 	if wantSRT && t.SRTSidecar {
-		if err := writeSRTFile(srtSidecarPath(in.OutputPath), points, fields, srtFormat); err != nil {
+		if err := writeSRTFile(log, srtSidecarPath(in.OutputPath), points, fields, srtFormat); err != nil {
 			return err
 		}
 	}
@@ -226,7 +227,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 		defer os.RemoveAll(tmpDir)
 
 		srtPath = filepath.Join(tmpDir, "telemetry.srt")
-		if err := writeSRTFile(srtPath, points, fields, srtFormat); err != nil {
+		if err := writeSRTFile(log, srtPath, points, fields, srtFormat); err != nil {
 			return err
 		}
 	}
@@ -317,31 +318,57 @@ func srtSidecarPath(outputPath string) string {
 	return strings.TrimSuffix(outputPath, ext) + ".srt"
 }
 
-// writeGPXFile creates path and renders points to it via telemetry.WriteGPX.
-func writeGPXFile(path string, points []telemetry.ClipPoint, fields telemetry.FieldOptions) error {
+// writeSidecar creates path (announcing it first if something is already
+// there) and renders the file's body through render.
+//
+// The path is NOT run through naming.Resolve, deliberately, even though every
+// other output this program writes is. A sidecar is only useful if it shares
+// the video's stem -- that is how Telemetry Overlay pairs "NAME.MP4" with
+// "NAME.SRT", and it is the whole reason gpxSidecarPath/srtSidecarPath derive
+// from the output path rather than inventing one. Resolve's collision suffix
+// would produce "clip - telemetry - 1.srt" beside "clip - telemetry.mp4",
+// which pairs with nothing: a uniquely-named sidecar is a broken sidecar.
+//
+// The video path it is derived from has already been through Resolve, so the
+// only way to land on an existing file is a sidecar orphaned by an earlier run
+// whose video was moved or deleted. Overwriting that is the right outcome --
+// the sidecar belongs to the video being written -- but it should not happen
+// quietly, so it is announced.
+//
+// Close's error is checked rather than deferred away: these are buffered
+// writes, so a full disk typically fails at the final flush, and ignoring it
+// reports a truncated GPX or SRT as a success.
+func writeSidecar(log *logging.Logger, kind, path string, render func(io.Writer) error) error {
+	if _, err := os.Stat(path); err == nil {
+		log.Warnf("overwriting an existing %s sidecar: %s", kind, filepath.Base(path))
+	}
 	f, err := os.Create(path)
 	if err != nil {
-		return fmt.Errorf("creating GPX sidecar %s: %w", path, err)
+		return fmt.Errorf("creating %s sidecar %s: %w", kind, path, err)
 	}
-	defer f.Close()
-	if err := telemetry.WriteGPX(f, points, telemetry.GPXOptions{Fields: fields}); err != nil {
-		return fmt.Errorf("writing GPX sidecar %s: %w", path, err)
+	werr := render(f)
+	if werr != nil {
+		werr = fmt.Errorf("writing %s sidecar %s: %w", kind, path, werr)
 	}
-	return nil
+	if cerr := f.Close(); werr == nil && cerr != nil {
+		werr = fmt.Errorf("closing %s sidecar %s: %w", kind, path, cerr)
+	}
+	return werr
+}
+
+// writeGPXFile creates path and renders points to it via telemetry.WriteGPX.
+func writeGPXFile(log *logging.Logger, path string, points []telemetry.ClipPoint, fields telemetry.FieldOptions) error {
+	return writeSidecar(log, "GPX", path, func(w io.Writer) error {
+		return telemetry.WriteGPX(w, points, telemetry.GPXOptions{Fields: fields})
+	})
 }
 
 // writeSRTFile creates path and renders points to it via telemetry.WriteSRT
 // in the given format.
-func writeSRTFile(path string, points []telemetry.ClipPoint, fields telemetry.FieldOptions, format telemetry.SRTFormat) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("creating SRT %s: %w", path, err)
-	}
-	defer f.Close()
-	if err := telemetry.WriteSRT(f, points, telemetry.SRTOptions{Fields: fields, Format: format}); err != nil {
-		return fmt.Errorf("writing SRT %s: %w", path, err)
-	}
-	return nil
+func writeSRTFile(log *logging.Logger, path string, points []telemetry.ClipPoint, fields telemetry.FieldOptions, format telemetry.SRTFormat) error {
+	return writeSidecar(log, "SRT", path, func(w io.Writer) error {
+		return telemetry.WriteSRT(w, points, telemetry.SRTOptions{Fields: fields, Format: format})
+	})
 }
 
 // firstGPSPoint returns the first GPS-having point's Sample in points, or
@@ -475,7 +502,7 @@ func muxArgs(cfg muxConfig) []string {
 		)
 	}
 
-	args = append(args, cfg.OutputPath)
+	args = append(args, vidio.PositionalPath(cfg.OutputPath))
 	return args
 }
 

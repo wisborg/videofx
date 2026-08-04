@@ -121,11 +121,17 @@ func run(aPath, bPath string, step, width int) error {
 
 // registerPair fits one similarity mapping points in a onto points in b.
 func registerPair(orb *gocv.ORB, matcher *gocv.BFMatcher, a, b gocv.Mat) (scale, rot, tx, ty float64, ok bool) {
+	// Compute's mask argument is an empty Mat meaning "no mask", but it is
+	// still a C++ allocation the Go GC cannot reclaim, and this runs once per
+	// frame pair over a whole clip. One mask, closed once, serves both calls.
+	noMask := gocv.NewMat()
+	defer noMask.Close()
+
 	kpA := orb.Detect(a)
-	kpA, descA := orb.Compute(a, gocv.NewMat(), kpA)
+	kpA, descA := orb.Compute(a, noMask, kpA)
 	defer descA.Close()
 	kpB := orb.Detect(b)
-	kpB, descB := orb.Compute(b, gocv.NewMat(), kpB)
+	kpB, descB := orb.Compute(b, noMask, kpB)
 	defer descB.Close()
 	if descA.Empty() || descB.Empty() || len(kpA) < 8 || len(kpB) < 8 {
 		return 0, 0, 0, 0, false

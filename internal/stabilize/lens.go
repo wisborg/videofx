@@ -3,7 +3,6 @@ package stabilize
 import (
 	"fmt"
 	"math"
-	"sort"
 
 	"gocv.io/x/gocv"
 )
@@ -340,7 +339,7 @@ func FitRotation(from, to []gocv.Point2f, lens Lens) (Quat, bool) {
 		// pixels subtend at this lens so that near-perfect agreement (synthetic
 		// data, or a very clean pair) does not collapse the scale to zero and
 		// down-weight everything.
-		scale := math.Max(medianOf(errs), minRotationTrim/lens.Focal)
+		scale := math.Max(medianUpper(errs), minRotationTrim/lens.Focal)
 		knee := robustKnee * scale
 		for i := range weights {
 			if errs[i] <= knee {
@@ -443,16 +442,6 @@ func dominantEigenvector4(A [4][4]float64) Quat {
 		}
 	}
 	return Quat{V[0][best], V[1][best], V[2][best], V[3][best]}
-}
-
-// medianOf sorts a copy and returns the middle element.
-func medianOf(v []float64) float64 {
-	if len(v) == 0 {
-		return 0
-	}
-	s := append([]float64(nil), v...)
-	sort.Float64s(s)
-	return s[len(s)/2]
 }
 
 // LensCalibration is the lens recovered from a clip's own motion, together with
@@ -582,7 +571,7 @@ func CalibrateLens(pairs []correspondence, width, height float64, opts Options) 
 		}
 	}
 	best := LensCalibration{
-		SimilarityError: medianOf(simErrs),
+		SimilarityError: medianUpper(simErrs),
 		Pairs:           len(pairs),
 		Error:           math.Inf(1),
 	}
@@ -603,7 +592,7 @@ func CalibrateLens(pairs []correspondence, width, height float64, opts Options) 
 		if len(errs) == 0 {
 			continue
 		}
-		e := medianOf(errs)
+		e := medianUpper(errs)
 		if lens.Focal == longest*width {
 			flat[lens.Kind] = e
 		}
@@ -630,7 +619,7 @@ func rotationReprojectionError(from, to []gocv.Point2f, lens Lens, R Mat3) float
 		}
 		errs = append(errs, math.Hypot(x-float64(to[i].X), y-float64(to[i].Y)))
 	}
-	return medianOf(errs)
+	return medianUpper(errs)
 }
 
 // medianReprojectionError is rotationReprojectionError's 2D counterpart.
@@ -640,7 +629,7 @@ func medianReprojectionError(from, to []gocv.Point2f, fit similarity2D) float64 
 		p := fit.apply(point2{X: float64(from[i].X), Y: float64(from[i].Y)})
 		errs = append(errs, math.Hypot(p.X-float64(to[i].X), p.Y-float64(to[i].Y)))
 	}
-	return medianOf(errs)
+	return medianUpper(errs)
 }
 
 // fitSimilarityPoints is the pipeline's RANSAC similarity fit over an arbitrary

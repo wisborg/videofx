@@ -2,7 +2,6 @@ package stabilize
 
 import (
 	"math"
-	"sort"
 
 	"gocv.io/x/gocv"
 )
@@ -114,8 +113,8 @@ func buildMeshField(from, to []gocv.Point2f, sim Transition, cols, rows, w, h in
 				}
 			}
 			idx := r*cols + c
-			field.VX[idx] = median(vx) // median([]) == 0: no local correction here
-			field.VY[idx] = median(vy)
+			field.VX[idx] = medianAverage(vx) // medianAverage([]) == 0: no local correction here
+			field.VY[idx] = medianAverage(vy)
 		}
 	}
 
@@ -228,23 +227,6 @@ func buildMeshCorrections(series *MotionSeries, sigma, radiusMultiple, gain, den
 	return out
 }
 
-// median returns the median of vs, or 0 for an empty slice (a vertex with no
-// nearby features contributes no local correction). vs is copied before
-// sorting so the caller's slice order is untouched.
-func median(vs []float64) float64 {
-	if len(vs) == 0 {
-		return 0
-	}
-	s := make([]float64, len(vs))
-	copy(s, vs)
-	sort.Float64s(s)
-	n := len(s)
-	if n%2 == 1 {
-		return s[n/2]
-	}
-	return (s[n/2-1] + s[n/2]) / 2
-}
-
 // spatialMedian3x3 replaces each grid value with the median of its up-to-3x3
 // neighbourhood (edge cells use the smaller clipped window). Returns a new
 // slice; the input is not modified.
@@ -262,7 +244,7 @@ func spatialMedian3x3(v []float64, cols, rows int) []float64 {
 					}
 				}
 			}
-			out[r*cols+c] = median(win)
+			out[r*cols+c] = medianAverage(win)
 		}
 	}
 	return out

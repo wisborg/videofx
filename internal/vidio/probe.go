@@ -148,7 +148,7 @@ func Probe(ctx context.Context, path string) (Info, error) {
 		"-print_format", "json",
 		"-show_format",
 		"-show_streams",
-		path,
+		PositionalPath(path),
 	)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

@@ -75,7 +75,7 @@ func TestLensProbe(t *testing.T) {
 		if math.Abs(lens.Focal-cal.Lens.Focal) < 1e-9 {
 			marker = "  <- chosen"
 		}
-		fmt.Printf("  f=%7.1f (%.0f deg HFOV)  %.4f%s\n", lens.Focal, lens.HorizontalFOV(w), medianOf(errs), marker)
+		fmt.Printf("  f=%7.1f (%.0f deg HFOV)  %.4f%s\n", lens.Focal, lens.HorizontalFOV(w), medianUpper(errs), marker)
 	}
 
 	grid := evalGrid(w, h)
@@ -117,10 +117,10 @@ func TestLensProbe(t *testing.T) {
 				}
 			}
 		}
-		fmt.Printf("%-24s %-12.3f %-12.3f %-12.3f\n", m.name, medianOf(rnd), medianOf(lr), medianOf(tb))
+		fmt.Printf("%-24s %-12.3f %-12.3f %-12.3f\n", m.name, medianUpper(rnd), medianUpper(lr), medianUpper(tb))
 	}
 	fmt.Printf("\nsimilarity per-point error %.4f, rotation %.4f (both floored by ~1.8px tracking noise)\n",
-		medianOf(simErr), cal.Error)
+		medianUpper(simErr), cal.Error)
 }
 
 // collectPairs runs the tracking half of the analysis pass and returns every
@@ -237,11 +237,11 @@ func crossValidate(pairs []correspondence, fit predictor, inA func(gocv.Point2f)
 				e = append(e, math.Hypot(q.X-float64(p.to[i].X), q.Y-float64(p.to[i].Y)))
 			}
 			if len(e) > 10 {
-				errs = append(errs, medianOf(e))
+				errs = append(errs, medianUpper(e))
 			}
 		}
 	}
-	return medianOf(errs)
+	return medianUpper(errs)
 }
 
 func splitDisagreementRot(from, to []gocv.Point2f, grid []point2, lens Lens, inA func(int, gocv.Point2f) bool) (float64, bool) {
