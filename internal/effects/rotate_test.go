@@ -2,7 +2,12 @@ package effects
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"testing"
+
+	"videofx/internal/runner"
+	"videofx/internal/vidio"
 )
 
 // TestComposedDisplayRotation pins the clockwise-composition math: the value
@@ -99,4 +104,116 @@ func indexOf(args []string, want string) int {
 		}
 	}
 	return -1
+}
+
+// TestRotate_Apply_RoundTripsThroughTheContainer runs the real ffmpeg and
+// re-probes the result. Everything above this point tests the argv in
+// isolation, which cannot see whether ffmpeg honours what it was handed:
+// -display_rotation is an INPUT option, and nothing else in the suite checks
+// that a display matrix applied on the input side survives a -c copy into the
+// output container at all.
+//
+// Two conversions have to agree for a round trip to close, and they are
+// deliberately opposite: composedDisplayRotation writes a value normalized to
+// [0, 360), while ffprobe reports the side-data rotation in (-180, 180] --
+// measured: a written 270 reads back as -90, and a written 180 as -180. Probe
+// normalizes it back. A test asserting on ffprobe's raw output would therefore
+// have to hardcode the negative values; asserting through Probe pins the pair
+// of conversions the CLI actually depends on.
+func TestRotate_Apply_RoundTripsThroughTheContainer(t *testing.T) {
+	requireFFmpeg(t)
+
+	dir := t.TempDir()
+	// 64x48, so a 90/270 turn visibly swaps the display dimensions and a
+	// 0/180 one does not. The creation_time is here because -map_metadata 0
+	// is part of what this effect promises: a rotate must not cost the clip
+	// the timestamp the telemetry sync anchors on.
+	const created = "2026-07-04T20:32:56.000000Z"
+	src := generateSyntheticSource(t, dir, "src.mp4", created)
+
+	srcInfo, err := vidio.Probe(context.Background(), src)
+	if err != nil {
+		t.Fatalf("probing the source: %v", err)
+	}
+	if srcInfo.Rotation != 0 {
+		t.Fatalf("the generated source already carries a %d rotation; the cases below assume it starts at 0", srcInfo.Rotation)
+	}
+
+	cases := []struct {
+		degrees               int
+		wantRotation          int
+		wantWidth, wantHeight int
+	}{
+		// A clockwise turn of D from 0 is written as (0 - D) mod 360.
+		{90, 270, 48, 64},
+		{180, 180, 64, 48},
+		{270, 90, 48, 64},
+	}
+	for _, c := range cases {
+		t.Run(fmt.Sprintf("%d degrees", c.degrees), func(t *testing.T) {
+			out := filepath.Join(dir, fmt.Sprintf("out%d.mp4", c.degrees))
+			r := &Rotate{Runner: runner.ExecRunner{}, Degrees: c.degrees}
+			if err := r.Apply(context.Background(), Input{SourcePath: src, OutputPath: out}); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+
+			info, err := vidio.Probe(context.Background(), out)
+			if err != nil {
+				t.Fatalf("probing the output: %v", err)
+			}
+			if info.Rotation != c.wantRotation {
+				t.Errorf("Rotation = %d, want %d -- the display matrix did not survive the copy",
+					info.Rotation, c.wantRotation)
+			}
+			if got, want := info.DisplayWidth(), c.wantWidth; got != want {
+				t.Errorf("DisplayWidth = %d, want %d", got, want)
+			}
+			if got, want := info.DisplayHeight(), c.wantHeight; got != want {
+				t.Errorf("DisplayHeight = %d, want %d", got, want)
+			}
+			// The coded frame is untouched: this effect is metadata-only.
+			if info.Width != srcInfo.Width || info.Height != srcInfo.Height {
+				t.Errorf("coded size = %dx%d, want the source's %dx%d -- a lossless rotate must not re-encode",
+					info.Width, info.Height, srcInfo.Width, srcInfo.Height)
+			}
+			if !info.HasCreationTime || !info.CreationTime.Equal(srcInfo.CreationTime) {
+				t.Errorf("creation_time = %v (present=%v), want the source's %v -- -map_metadata 0 did not carry it through",
+					info.CreationTime, info.HasCreationTime, srcInfo.CreationTime)
+			}
+		})
+	}
+}
+
+// TestRotate_Apply_ComposesWithAnExistingRotation is the round trip that
+// composedDisplayRotation exists for, and the one an argv-only test cannot
+// reach: the second rotate has to READ the first one's metadata back off the
+// file. Two 90-degree clockwise turns must land on 180, not on 270 -- which is
+// what writing the requested angle straight through, instead of composing it,
+// would produce.
+func TestRotate_Apply_ComposesWithAnExistingRotation(t *testing.T) {
+	requireFFmpeg(t)
+
+	dir := t.TempDir()
+	src := generateSyntheticSource(t, dir, "src.mp4", "")
+
+	path := src
+	for i := 0; i < 2; i++ {
+		out := filepath.Join(dir, fmt.Sprintf("turn%d.mp4", i))
+		r := &Rotate{Runner: runner.ExecRunner{}, Degrees: 90}
+		if err := r.Apply(context.Background(), Input{SourcePath: path, OutputPath: out}); err != nil {
+			t.Fatalf("Apply (turn %d): %v", i, err)
+		}
+		path = out
+	}
+
+	info, err := vidio.Probe(context.Background(), path)
+	if err != nil {
+		t.Fatalf("probing: %v", err)
+	}
+	if info.Rotation != 180 {
+		t.Errorf("Rotation after two 90-degree clockwise turns = %d, want 180", info.Rotation)
+	}
+	if got, want := info.DisplayWidth(), 64; got != want {
+		t.Errorf("DisplayWidth = %d, want %d -- a 180 turn must not swap the dimensions", got, want)
+	}
 }

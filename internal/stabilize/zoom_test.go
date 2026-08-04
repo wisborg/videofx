@@ -87,7 +87,7 @@ func TestMinZoomForCorrection_PureRotationMatchesClosedForm(t *testing.T) {
 // TestMinZoomForCorrection_EmpiricalWarpAffineCrossCheck is a pixel-level
 // cross-check of minZoomForCorrection's math against gocv.WarpAffine
 // itself -- the actual production code path Render uses to warp pixels
-// (see warp.go's warpFrame) -- rather than only against pure point2/
+// (see render.go's warpFrameAffine) -- rather than only against pure point2/
 // apply() arithmetic (fitsWithinBounds and the closed-form tests above
 // share buildCorrectionTransform with the code under test, so none of
 // them would catch a mismatch between what that function computes and
@@ -95,7 +95,7 @@ func TestMinZoomForCorrection_PureRotationMatchesClosedForm(t *testing.T) {
 // or half-pixel convention error).
 //
 // It warps an all-white frame with buildCorrectionTransform's own matrix
-// (via toMat(), the same conversion warpFrame uses) at the computed
+// (via toMat(), the same conversion warpFrameAffine uses) at the computed
 // required zoom, and checks all four corners: at (just above) the
 // required zoom every corner must stay white (no BORDER_CONSTANT black
 // exposed); at a zoom a few percent below it, at least one corner must

@@ -445,20 +445,6 @@ func dominantEigenvector4(A [4][4]float64) Quat {
 	return Quat{V[0][best], V[1][best], V[2][best], V[3][best]}
 }
 
-// medianAbsDeviation is the MAD, scaled to be a consistent estimator of the
-// standard deviation for normal data.
-func medianAbsDeviation(v []float64) float64 {
-	if len(v) == 0 {
-		return 0
-	}
-	m := medianOf(v)
-	d := make([]float64, len(v))
-	for i, x := range v {
-		d[i] = math.Abs(x - m)
-	}
-	return medianOf(d) * 1.4826
-}
-
 // medianOf sorts a copy and returns the middle element.
 func medianOf(v []float64) float64 {
 	if len(v) == 0 {

@@ -737,23 +737,20 @@ func buildRenderPlan(series *MotionSeries, result *SmoothResult, opts RenderOpti
 	return plan
 }
 
-// warpFrame applies transform to src, writing the result into dst at w x h,
-// with plain black (BORDER_CONSTANT) filling anything the transform
+// warpFrameAffine applies transform to src, writing the result into dst at
+// w x h, with plain black (BORDER_CONSTANT) filling anything the transform
 // doesn't cover. Used by EdgeModeFixed and EdgeModeAdaptive, both of which
 // rely on their zoom factor (baked into transform already -- see
 // buildCorrectionTransform) to guarantee the canvas is fully covered by
 // real content, so what BORDER_CONSTANT actually fills in should never be
 // visible in a correctly-computed adaptive render or a generously-sized
 // fixed one.
-func warpFrame(src gocv.Mat, dst *gocv.Mat, transform similarity2D, w, h int) error {
-	return warpFrameAffine(src, dst, affineFromSimilarity(transform), w, h)
-}
-
-// warpFrameAffine is warpFrame over the general affine form, which is what the
-// render loop actually calls: a rolling-shutter rectification composed under
-// the correction makes the total transform a shear, not a similarity. With no
-// rectification the matrix is numerically identical to the one warpFrame would
-// have built, so the uncorrected path is unchanged rather than merely
+//
+// It takes the general affine form rather than a similarity2D because a
+// rolling-shutter rectification composed under the correction makes the total
+// transform a shear, not a similarity. With no rectification the matrix is
+// numerically identical to the one affineFromSimilarity produces from the
+// correction alone, so the uncorrected path is unchanged rather than merely
 // equivalent.
 func warpFrameAffine(src gocv.Mat, dst *gocv.Mat, transform affine2D, w, h int) error {
 	m := transform.toMat()
@@ -761,10 +758,10 @@ func warpFrameAffine(src gocv.Mat, dst *gocv.Mat, transform affine2D, w, h int) 
 	return gocv.WarpAffineWithParams(src, dst, m, image.Pt(w, h), gocv.InterpolationLinear, gocv.BorderConstant, color.RGBA{})
 }
 
-// warpFramePerspective is warpFrame's homography counterpart: it applies a full
-// 3x3 transform via WarpPerspective, used by the EXPERIMENTAL
+// warpFramePerspective is warpFrameAffine's homography counterpart: it applies
+// a full 3x3 transform via WarpPerspective, used by the EXPERIMENTAL
 // WarpModelHomography render path (see Render's perspective branch). Same
-// BORDER_CONSTANT convention as warpFrame -- the zoom folded into the transform
+// BORDER_CONSTANT convention -- the zoom folded into the transform
 // (plus PerspectiveZoomMargin) is what keeps the black border off-canvas.
 func warpFramePerspective(src gocv.Mat, dst *gocv.Mat, transform matrix3, w, h int) error {
 	m := transform.toMat()

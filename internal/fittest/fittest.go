@@ -30,9 +30,12 @@ import (
 	"time"
 
 	"github.com/muktihari/fit/encoder"
+	"github.com/muktihari/fit/profile/basetype"
 	"github.com/muktihari/fit/profile/filedef"
 	"github.com/muktihari/fit/profile/mesgdef"
 	"github.com/muktihari/fit/profile/typedef"
+	"github.com/muktihari/fit/profile/untyped/mesgnum"
+	"github.com/muktihari/fit/proto"
 )
 
 // Options controls the generated activity. The zero value is not useful; start
@@ -57,7 +60,52 @@ type Options struct {
 	// telemetry's HUD uses them to auto-tune elevation smoothing, so a fixture
 	// that omitted them would exercise a different path than a real file.
 	TotalAscent, TotalDescent uint16
+
+	// OutOfOrder writes the record messages in reverse chronological order.
+	//
+	// A device writes them in order, but nothing in the FIT format guarantees
+	// it, and telemetry.Decode sorts at decode time precisely so that later
+	// phases can rely on the invariant instead of re-checking it. A fixture
+	// that is already sorted cannot tell a working sort from a deleted one, so
+	// asserting the sort contract needs a file that is genuinely out of order.
+	//
+	// Note this cannot be done by shuffling Records before encoding:
+	// filedef.Activity.ToFIT runs SortMessagesByTimestamp over everything it
+	// emits after the header messages, which would put them straight back.
+	// Build therefore reverses the encoded record messages afterwards.
+	OutOfOrder bool
+
+	// DeveloperField, when non-empty, registers one developer field under this
+	// name and writes it on every record, together with the DeveloperDataId
+	// and FieldDescription messages a recording app or sensor writes to
+	// declare it.
+	//
+	// telemetry.Decode resolves developer fields by NAME out of those
+	// FieldDescription messages rather than by hardcoding vendor field
+	// numbers, so a fixture without them leaves that resolution -- and the
+	// scale/offset arithmetic below -- covered only by the real-file test that
+	// skips for everyone but its author.
+	DeveloperField string
+
+	// DeveloperFieldScale and DeveloperFieldOffset are the scale divisor and
+	// offset declared on that field's description. The raw value written per
+	// record is DeveloperFieldRaw(i), and a decoder is expected to return
+	// raw/scale - offset. A zero scale declares no scale (the FIT invalid
+	// sentinel is written instead), meaning "already in final units".
+	DeveloperFieldScale  uint8
+	DeveloperFieldOffset int8
 }
+
+// DeveloperFieldRaw returns the raw, unscaled value Build writes into record
+// i's developer field. It is exported so a test can state the expected decoded
+// value as raw/scale - offset without duplicating the generator's arithmetic.
+func DeveloperFieldRaw(i int) uint16 { return uint16(100 + i%400) }
+
+// devFieldNum is the field definition number the generated developer field is
+// registered under. Any number would do -- the point of the FieldDescription
+// mechanism is that a decoder must not care which one a vendor picked -- so
+// this is deliberately not 0, to catch a decoder that assumes it.
+const devFieldNum = 3
 
 // DefaultOptions describes a ~4h34m activity at 1 Hz.
 //
@@ -114,6 +162,31 @@ func Build(opts Options) ([]byte, error) {
 		},
 	}
 
+	if opts.DeveloperField != "" {
+		// A developer field is only interpretable through the pair of
+		// messages that declare it: the DeveloperDataId registers the
+		// application, and the FieldDescription names, types and scales one
+		// of its fields. Field numbers are unique only within a
+		// DeveloperDataId, which is why both are written.
+		fd := mesgdef.NewFieldDescription(nil).
+			SetDeveloperDataIndex(0).
+			SetFieldDefinitionNumber(devFieldNum).
+			SetFitBaseTypeId(basetype.Uint16).
+			SetFieldName([]string{opts.DeveloperField})
+		if opts.DeveloperFieldScale != 0 {
+			fd.SetScale(opts.DeveloperFieldScale)
+		}
+		if opts.DeveloperFieldOffset != 0 {
+			fd.SetOffset(opts.DeveloperFieldOffset)
+		}
+		act.DeveloperDataIds = []*mesgdef.DeveloperDataId{
+			mesgdef.NewDeveloperDataId(nil).
+				SetDeveloperDataIndex(0).
+				SetApplicationId([]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}),
+		}
+		act.FieldDescriptions = []*mesgdef.FieldDescription{fd}
+	}
+
 	// One degree of latitude is ~111.32 km everywhere; the course runs due
 	// north so no longitude convergence correction is needed.
 	const metresPerDegreeLat = 111320.0
@@ -139,14 +212,51 @@ func Build(opts Options) ([]byte, error) {
 			SetEnhancedAltitudeScaled(elevation).
 			SetHeartRate(uint8(math.Round(heartRate))).
 			SetCadence(uint8(math.Round(cadence)))
+
+		if opts.DeveloperField != "" {
+			act.Records[i].SetDeveloperFields(proto.DeveloperField{
+				DeveloperDataIndex: 0,
+				Num:                devFieldNum,
+				Value:              proto.Uint16(DeveloperFieldRaw(i)),
+			})
+		}
 	}
 
 	fit := act.ToFIT(nil)
+	if opts.OutOfOrder {
+		reverseRecordMessages(fit.Messages)
+	}
+
+	// Developer fields were added in FIT protocol 2.0, and the encoder enforces
+	// that: writing one under the default 1.0 fails validation rather than
+	// producing a file no decoder could read. The version is raised only for
+	// the fixtures that need it, so the ordinary fixture's bytes are unchanged.
+	var encOpts []encoder.Option
+	if opts.DeveloperField != "" {
+		encOpts = append(encOpts, encoder.WithProtocolVersion(proto.V2))
+	}
+
 	var buf bytes.Buffer
-	if err := encoder.New(&buf).Encode(&fit); err != nil {
+	if err := encoder.New(&buf, encOpts...).Encode(&fit); err != nil {
 		return nil, fmt.Errorf("fittest: encoding: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// reverseRecordMessages reverses the record messages in place, leaving every
+// other message where it is. It works on the encoded message slice rather than
+// on Activity.Records because ToFIT sorts by timestamp on its way out -- see
+// Options.OutOfOrder.
+func reverseRecordMessages(msgs []proto.Message) {
+	var at []int
+	for i := range msgs {
+		if msgs[i].Num == mesgnum.Record {
+			at = append(at, i)
+		}
+	}
+	for i, j := 0, len(at)-1; i < j; i, j = i+1, j-1 {
+		msgs[at[i]], msgs[at[j]] = msgs[at[j]], msgs[at[i]]
+	}
 }
 
 // WriteFile builds a synthetic activity and writes it to path.
