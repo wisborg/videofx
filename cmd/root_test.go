@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"videofx/internal/effects"
 	"videofx/internal/logging"
 	"videofx/internal/stabilize"
+	"videofx/internal/telemetry"
 )
 
 func TestWarnTelemetryNotLast(t *testing.T) {
@@ -623,40 +625,6 @@ func TestConfigureEffect_GoCVQuality(t *testing.T) {
 // TestConfigureEffect_TelemetryHUD pins that the telemetry-hud flags land on
 // a *effects.TelemetryHUD (fit/offset/quality shared, plus the HUD-only
 // timezone and elevation options).
-func TestConfigureEffect_TelemetryHUD(t *testing.T) {
-	orig := []interface{}{fitPath, offsetSeconds, quality, hudTimeZone, elevSmoothing, elevGain, elevLoss}
-	t.Cleanup(func() {
-		fitPath = orig[0].(string)
-		offsetSeconds = orig[1].(float64)
-		quality = orig[2].(int)
-		hudTimeZone = orig[3].(string)
-		elevSmoothing = orig[4].(float64)
-		elevGain = orig[5].(float64)
-		elevLoss = orig[6].(float64)
-	})
-
-	fitPath = "run.fit"
-	offsetSeconds = -2.5
-	quality = 60
-	hudTimeZone = "+10:00"
-	elevSmoothing = 12
-	elevGain = 80
-	elevLoss = 95
-
-	h := &effects.TelemetryHUD{}
-	if err := configureEffect(h, pflag.NewFlagSet("test", pflag.ContinueOnError)); err != nil {
-		t.Fatalf("configureEffect: %v", err)
-	}
-	if h.FitPath != "run.fit" || h.OffsetSeconds != -2.5 || h.Quality != 60 {
-		t.Errorf("shared fields wrong: %+v", h)
-	}
-	if h.TimeZone == nil {
-		t.Error("TimeZone not set from --hud-timezone")
-	}
-	if h.ElevationSmoothing != 12 || h.ElevationGain != 80 || h.ElevationLoss != 95 {
-		t.Errorf("elevation fields wrong: smoothing=%v gain=%v loss=%v", h.ElevationSmoothing, h.ElevationGain, h.ElevationLoss)
-	}
-}
 
 // TestNewRootCmd_ZoomTransitionFlagRegistered guards the --zoom-transition
 // flag's existence (a typo would otherwise surface only as a runtime error)
@@ -978,5 +946,205 @@ func TestNewRootCmd_LocationFlagDefaultsOn(t *testing.T) {
 	configureTelemetry(tel)
 	if tel.OmitLocation {
 		t.Error("the default --location=true still set OmitLocation, so the tag would be dropped by default")
+	}
+}
+
+// recordingRunner captures the ffmpeg invocations an effect makes, so a test in
+// this package can see what the flags turned into without reaching for the
+// effect's unexported fields.
+type recordingRunner struct{ args [][]string }
+
+func (r *recordingRunner) Run(_ context.Context, _ string, args ...string) error {
+	r.args = append(r.args, args)
+	return nil
+}
+
+// TestConfigureEffect_WarpStabilizerAllFields is the missing sibling of
+// TestConfigureEffect_GoCVAllFields, whose doc comment states the reasoning
+// this one inherits: configureEffect is a wiring layer, and wiring layers fail
+// silently. That reasoning had been applied to exactly one of the four effects.
+//
+// WarpStabilizer had no configureEffect test at all, and both of its setters
+// read as 0% covered from the cross-package profile -- warpstab's own tests set
+// the unexported fields directly and check that Apply uses them, which is the
+// other half of the wire. Delete SetAnalysisOptions from configureEffect and
+// --vidstab-accuracy, --vidstab-stepsize and --vidstab-mincontrast all revert to
+// defaults while the run still produces a stabilized video. Delete
+// SetPerfOptions and --preset, --crf, --threads and --hwaccel-decode disconnect
+// at once, with no symptom beyond the job taking a different amount of time.
+//
+// The assertion goes through Apply and a recording runner rather than through
+// the struct, because perf and analysis are unexported: what can be checked
+// from here is the ffmpeg command line, which is also the thing that actually
+// matters. The values are chosen to differ from every default, so a lost
+// assignment cannot pass as a correct one.
+func TestConfigureEffect_WarpStabilizerAllFields(t *testing.T) {
+	origs := struct {
+		preset             string
+		crf, threads       int
+		hwaccelDecode      bool
+		vidstabAccuracy    int
+		vidstabStepSize    int
+		vidstabMinContrast float64
+	}{preset, crf, threads, hwaccelDecode, vidstabAccuracy, vidstabStepSize, vidstabMinContrast}
+	t.Cleanup(func() {
+		preset, crf, threads, hwaccelDecode = origs.preset, origs.crf, origs.threads, origs.hwaccelDecode
+		vidstabAccuracy, vidstabStepSize = origs.vidstabAccuracy, origs.vidstabStepSize
+		vidstabMinContrast = origs.vidstabMinContrast
+	})
+
+	preset = "ultrafast"
+	crf = 29
+	threads = 7
+	hwaccelDecode = true
+	vidstabAccuracy = 13
+	vidstabStepSize = 5
+	vidstabMinContrast = 0.42
+
+	rr := &recordingRunner{}
+	ws := &effects.WarpStabilizer{Runner: rr}
+	if err := configureEffect(ws, pflag.NewFlagSet("test", pflag.ContinueOnError)); err != nil {
+		t.Fatalf("configureEffect: %v", err)
+	}
+	if err := ws.Apply(context.Background(), effects.Input{
+		SourcePath: "in.mp4", OutputPath: "out.mp4", Strength: 0.5,
+	}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(rr.args) != 2 {
+		t.Fatalf("expected the detect and transform passes, got %d invocations", len(rr.args))
+	}
+	detect := strings.Join(rr.args[0], " ")
+	transform := strings.Join(rr.args[1], " ")
+
+	// Analysis options: these reach the vidstabdetect filter string.
+	for _, want := range []string{"accuracy=13", "stepsize=5", "mincontrast=0.42"} {
+		if !strings.Contains(detect, want) {
+			t.Errorf("detect pass missing %q -- --vidstab-* did not reach the analysis: %s", want, detect)
+		}
+	}
+	// Perf options: preset and CRF land on the transform pass's encoder,
+	// threads and hwaccel on both.
+	for _, want := range []string{"-preset ultrafast", "-crf 29", "-threads 7"} {
+		if !strings.Contains(transform, want) {
+			t.Errorf("transform pass missing %q -- the perf flags did not reach the encoder: %s", want, transform)
+		}
+	}
+	if !strings.Contains(detect, "-hwaccel auto") {
+		t.Errorf("detect pass missing -hwaccel auto -- --hwaccel-decode did not reach ffmpeg: %s", detect)
+	}
+}
+
+// TestConfigureEffect_TelemetryHUDAllFields replaces a test that started from a
+// zero-valued struct and skipped two fields.
+//
+// Starting from the zero value is the trap this project already knows about: a
+// deleted assignment and a correct one are indistinguishable whenever the
+// expected value happens to be the zero value. PowerSource makes that concrete
+// -- PowerAuto IS the zero value, so even adding an assertion to the old test
+// would have proved nothing for the default case. Hence a poisoned target, and
+// hence a subtest that specifically checks --power-source auto.
+//
+// The two fields the old test omitted are both silent when they break:
+// --power-source native quietly shows Stryd power, and --hud-layout vertical
+// quietly renders the landscape arrangement on a portrait clip. Both produce a
+// HUD video and exit 0.
+func TestConfigureEffect_TelemetryHUDAllFields(t *testing.T) {
+	origs := struct {
+		fitPath                 string
+		offsetSeconds           float64
+		quality                 int
+		hudTimeZone             string
+		elevSmoothing, elevGain float64
+		elevLoss                float64
+		hudLayout, powerSource  string
+	}{fitPath, offsetSeconds, quality, hudTimeZone, elevSmoothing, elevGain, elevLoss, hudLayout, powerSource}
+	t.Cleanup(func() {
+		fitPath, offsetSeconds, quality = origs.fitPath, origs.offsetSeconds, origs.quality
+		hudTimeZone = origs.hudTimeZone
+		elevSmoothing, elevGain, elevLoss = origs.elevSmoothing, origs.elevGain, origs.elevLoss
+		hudLayout, powerSource = origs.hudLayout, origs.powerSource
+	})
+
+	fitPath = "run.fit"
+	offsetSeconds = -2.5
+	quality = 60
+	hudTimeZone = "+10:00"
+	elevSmoothing = 12
+	elevGain = 80
+	elevLoss = 95
+	hudLayout = "vertical"
+
+	// poisoned returns a target whose every field is something no assertion
+	// below expects, so a missing assignment leaves evidence.
+	poisoned := func() *effects.TelemetryHUD {
+		return &effects.TelemetryHUD{
+			FitPath:            "POISON",
+			OffsetSeconds:      -999,
+			Quality:            -1,
+			TimeZone:           time.UTC,
+			ElevationSmoothing: -1,
+			ElevationGain:      -1,
+			ElevationLoss:      -1,
+			LayoutMode:         "POISON",
+			PowerSource:        telemetry.PowerStryd,
+		}
+	}
+
+	t.Run("every field", func(t *testing.T) {
+		powerSource = "native"
+		h := poisoned()
+		if err := configureEffect(h, pflag.NewFlagSet("test", pflag.ContinueOnError)); err != nil {
+			t.Fatalf("configureEffect: %v", err)
+		}
+		if h.FitPath != "run.fit" {
+			t.Errorf("FitPath = %q, want %q", h.FitPath, "run.fit")
+		}
+		if h.OffsetSeconds != -2.5 {
+			t.Errorf("OffsetSeconds = %v, want -2.5", h.OffsetSeconds)
+		}
+		if h.Quality != 60 {
+			t.Errorf("Quality = %v, want 60", h.Quality)
+		}
+		if h.TimeZone == nil || h.TimeZone == time.UTC {
+			t.Errorf("TimeZone = %v, want the zone parsed from --hud-timezone", h.TimeZone)
+		}
+		if h.ElevationSmoothing != 12 || h.ElevationGain != 80 || h.ElevationLoss != 95 {
+			t.Errorf("elevation fields wrong: smoothing=%v gain=%v loss=%v", h.ElevationSmoothing, h.ElevationGain, h.ElevationLoss)
+		}
+		if h.LayoutMode != "vertical" {
+			t.Errorf("LayoutMode = %q, want %q -- --hud-layout did not reach the effect", h.LayoutMode, "vertical")
+		}
+		if h.PowerSource != telemetry.PowerNative {
+			t.Errorf("PowerSource = %v, want PowerNative -- --power-source did not reach the effect", h.PowerSource)
+		}
+	})
+
+	t.Run("power-source auto, whose expected value is the zero value", func(t *testing.T) {
+		powerSource = "auto"
+		h := poisoned() // starts at PowerStryd, so reaching PowerAuto proves an assignment happened
+		if err := configureEffect(h, pflag.NewFlagSet("test", pflag.ContinueOnError)); err != nil {
+			t.Fatalf("configureEffect: %v", err)
+		}
+		if h.PowerSource != telemetry.PowerAuto {
+			t.Errorf("PowerSource = %v, want PowerAuto", h.PowerSource)
+		}
+	})
+}
+
+// TestConfigureEffect_RotateAllFields completes the set. Small surface, same
+// failure mode: --rotate silently doing nothing still produces an output file,
+// and a lossless remux of an unrotated clip looks exactly like a successful run.
+func TestConfigureEffect_RotateAllFields(t *testing.T) {
+	orig := rotateDeg
+	t.Cleanup(func() { rotateDeg = orig })
+
+	rotateDeg = 270
+	rot := &effects.Rotate{Degrees: -1} // poisoned, and not a legal rotation
+	if err := configureEffect(rot, pflag.NewFlagSet("test", pflag.ContinueOnError)); err != nil {
+		t.Fatalf("configureEffect: %v", err)
+	}
+	if rot.Degrees != 270 {
+		t.Errorf("Degrees = %d, want 270 -- --rotate did not reach the effect", rot.Degrees)
 	}
 }
