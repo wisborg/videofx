@@ -374,6 +374,14 @@ func ReadSidecar(path string) (*MotionSeries, error) {
 		return nil, fmt.Errorf("stabilize: parsing sidecar %s header: %w", path, err)
 	}
 
+	// The header-length guard above stops at the JSON envelope, but the three
+	// fields INSIDE it are what drive the large allocations, and they come off
+	// the same corrupt disk. Checking them here keeps the whole "this file is
+	// nonsense" story in one place, before anything is sized from it.
+	if err := validateSidecarBody(path, f, headerLen, &h); err != nil {
+		return nil, err
+	}
+
 	series := &MotionSeries{
 		SourcePath:     h.SourcePath,
 		SourceWidth:    h.SourceWidth,
@@ -395,6 +403,70 @@ func ReadSidecar(path string) (*MotionSeries, error) {
 		}
 	}
 	return series, nil
+}
+
+// minTransitionBytes is the smallest a single transition record can be: the
+// 1-byte flags, four float64s of similarity, and two int32 counts. Every
+// optional field (RS, rotation, perspective, mesh) only adds to it. It is used
+// to bound NumTransitions against the bytes actually left in the file, so a
+// corrupt count cannot ask for more records than could possibly be there.
+const minTransitionBytes = 1 + 4*8 + 2*4
+
+// maxSidecarMeshSide bounds each mesh dimension. The writer derives these from
+// Options.MeshGrid, whose tuned default is 1 and whose useful range is single
+// digits, so this is orders of magnitude above anything real -- it rejects
+// corruption without constraining the format, exactly as maxSidecarHeaderLen
+// does for the header.
+const maxSidecarMeshSide = 4096
+
+// validateSidecarBody rejects header fields that would size an allocation
+// absurdly, before any of them is used to size one.
+//
+// maxSidecarHeaderLen already documents why this matters for the header: a
+// garbled four bytes must not become a multi-gigabyte allocation on a file
+// nothing has yet established is valid. The same reasoning was never carried
+// into the values the header CONTAINS, and they are worse, because two of them
+// are multiplied together:
+//
+//   - NumTransitions sizes a []Transition directly. A corrupt count of 2^31-1
+//     asks for roughly a hundred gigabytes.
+//   - MeshCols*MeshRows sizes four slices per transition. Two large ints
+//     multiply to a NEGATIVE product, and make() with a negative length is a
+//     runtime panic, not an error -- so the failure is not even the same shape
+//     as the one the header guard produces.
+//
+// A sidecar is a cache: it is explicitly documented as ephemeral and
+// regenerable, and a killed run or a bad disk truncating one is an ordinary
+// event, not an attack. That is precisely why this must produce the same
+// "delete it to re-analyze" error as the other corruption paths rather than
+// killing the process.
+func validateSidecarBody(path string, f *os.File, headerLen uint32, h *sidecarHeader) error {
+	if h.NumTransitions < 0 {
+		return fmt.Errorf("stabilize: sidecar %s declares %d transitions -- the file is corrupt; delete it to re-analyze", path, h.NumTransitions)
+	}
+	if h.MeshCols < 0 || h.MeshRows < 0 || h.MeshCols > maxSidecarMeshSide || h.MeshRows > maxSidecarMeshSide {
+		return fmt.Errorf("stabilize: sidecar %s declares a %dx%d mesh (max %d per side) -- the file is corrupt; delete it to re-analyze",
+			path, h.MeshCols, h.MeshRows, maxSidecarMeshSide)
+	}
+
+	// Bound the record count by what the file can actually hold. Stat rather
+	// than trusting the header: the whole point is that the header is suspect.
+	// A Stat failure is not fatal -- the per-record reads still error on a short
+	// file, which is the pre-existing behaviour this only tightens.
+	fi, err := f.Stat()
+	if err != nil {
+		return nil
+	}
+	const fixedPrefix = len(sidecarMagic) + 1 + 4 // magic, version byte, header length
+	remaining := fi.Size() - int64(fixedPrefix) - int64(headerLen)
+	if remaining < 0 {
+		remaining = 0
+	}
+	if maxRecords := remaining / minTransitionBytes; int64(h.NumTransitions) > maxRecords {
+		return fmt.Errorf("stabilize: sidecar %s declares %d transitions but holds at most %d -- the file is corrupt or truncated; delete it to re-analyze",
+			path, h.NumTransitions, maxRecords)
+	}
+	return nil
 }
 
 // readTransition reads one record written by writeTransition, reconstructing
