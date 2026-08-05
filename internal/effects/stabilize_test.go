@@ -943,3 +943,76 @@ func TestRenderOptions(t *testing.T) {
 		}
 	})
 }
+
+// TestRenderOptions_RollingShutter pins that the rolling-shutter correction
+// reaches the renderer, and that the two models take delivery of it differently.
+//
+// --rolling-shutter is ON by default, and everything below this point is well
+// covered: BuildRSRectifiers, DebiasRollingShutter, RSZoomMargin, and the plan
+// side that turns the rectifiers into a crop. What none of that establishes is
+// that the rectifiers are handed to Render at all. Remove them here and the
+// estimates are still debiased -- so the roll a shutter fakes is still removed
+// and the output still looks stabilized -- while the per-row un-skew, which is
+// the half that touches the picture, silently stops on every run. The only
+// stat that would show it is RSMargin, which nothing reads.
+//
+// What this cannot see: whether Apply builds the rectifiers in the first place.
+// That half needs a clip with a measurable readout, which the 64x48 synthetic
+// source used elsewhere in this file cannot provide.
+func TestRenderOptions_RollingShutter(t *testing.T) {
+	rect := []stabilize.RSRectifier{{KX: 0.01, KY: 0.02}, {KX: 0.03, KY: 0.04}}
+	const rho = 0.31
+
+	t.Run("similarity is handed the 2D rectifiers", func(t *testing.T) {
+		var buf bytes.Buffer
+		got := (&GoCVStabilizer{}).renderOptions(captureLog(&buf, false), rotationSeries(false),
+			stabilize.EdgeModeAdaptive, string(stabilize.WarpModelSimilarity), rect, rho)
+
+		if len(got.RS) != len(rect) {
+			t.Fatalf("RS = %v, want the %d rectifiers built for this clip", got.RS, len(rect))
+		}
+		if got.RS[0] != rect[0] {
+			t.Errorf("RS[0] = %+v, want %+v", got.RS[0], rect[0])
+		}
+	})
+
+	t.Run("rotation takes the ratio instead of the rectifiers", func(t *testing.T) {
+		var buf bytes.Buffer
+		got := (&GoCVStabilizer{}).renderOptions(captureLog(&buf, false), rotationSeries(true),
+			stabilize.EdgeModeAdaptive, string(stabilize.WarpModelRotation), rect, rho)
+
+		if !got.Rotation {
+			t.Fatal("Rotation = false on a calibrated series; the rest of this case is meaningless")
+		}
+		// The rotation path states the shutter properly -- each row saw a
+		// different camera orientation -- and needs the per-frame angular
+		// velocity, not a prebuilt 2D shear. Handing it both would apply the
+		// correction twice.
+		if got.RSRatio != rho {
+			t.Errorf("RSRatio = %v, want %v", got.RSRatio, rho)
+		}
+		if got.RS != nil {
+			t.Errorf("RS = %v, want nil once the rotation path owns the correction", got.RS)
+		}
+	})
+
+	t.Run("rotation that self-disables keeps the 2D rectifiers", func(t *testing.T) {
+		var buf bytes.Buffer
+		got := (&GoCVStabilizer{}).renderOptions(captureLog(&buf, false), rotationSeries(false),
+			stabilize.EdgeModeAdaptive, string(stabilize.WarpModelRotation), rect, rho)
+
+		// This is the case that is easy to break while "tidying": the render
+		// has fallen back to the similarity model, so it needs exactly what
+		// the similarity needs. Clearing RS alongside the rotation branch
+		// would turn the fallback into an uncorrected render.
+		if got.Rotation {
+			t.Fatal("Rotation = true on an uncalibratable series")
+		}
+		if len(got.RS) != len(rect) {
+			t.Errorf("RS = %v, want the rectifiers kept for the 2D fallback", got.RS)
+		}
+		if got.RSRatio != 0 {
+			t.Errorf("RSRatio = %v, want 0 when the rotation path is not used", got.RSRatio)
+		}
+	})
+}
