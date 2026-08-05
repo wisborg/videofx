@@ -255,3 +255,80 @@ func TestBuildRSRotations(t *testing.T) {
 		t.Errorf("frame 1 should fall back to its one good neighbour, got %v", got[1])
 	}
 }
+
+// TestBuildOrientationsAccumulatesInApplicationOrder pins the COMPOSITION ORDER
+// of the orientation integration, which nothing did before.
+//
+// The two existing tests over buildOrientations assert magnitude only, and both
+// are blind to this: TestBuildOrientationsComposes uses steps about a single
+// axis, where the order does not matter at all, and Angle() is in any case
+// invariant under conjugation. TestAnalyze_RotationModelFitsEveryPair
+// deliberately declines to pin the convention, on the honest grounds that it
+// does not itself establish one.
+//
+// This test establishes it from the documented meaning of the data rather than
+// from the code, so it is not merely a photograph of current behaviour.
+// Transition.Rotation3 is defined as "the rotation carrying the rays this frame
+// saw onto the rays the next frame sees". That fixes the truth without any
+// appeal to quaternion convention: whatever buildOrientations returns for frame
+// i must move a ray exactly where applying every step in turn moves it. The
+// assertion is therefore made on ROTATED VECTORS, not on quaternion components,
+// which is also how FitRotation's own sense is pinned.
+//
+// Why it matters: the correction the renderer applies is a smoothed-minus-raw
+// difference of this trajectory. Reversing the composition order does NOT
+// cancel out of that difference -- measured while writing this, the resulting
+// corrections differ by up to 1.7 degrees, which at a typical action-cam focal
+// length is several pixels of frame motion. The end-to-end pipeline test does
+// not catch it, because its no-op threshold has orders of magnitude of headroom
+// by design; this does.
+func TestBuildOrientationsAccumulatesInApplicationOrder(t *testing.T) {
+	// Deliberately large and non-commuting: each step turns about a
+	// substantially different axis from the last, so composing them in the
+	// wrong order lands somewhere else. Small steps about a slowly varying
+	// axis nearly commute, and would let a transposed integration pass.
+	steps := []Quat{
+		quatExp(Vec3{X: 0.40}),
+		quatExp(Vec3{Y: 0.35}),
+		quatExp(Vec3{Z: 0.30}),
+		quatExp(Vec3{X: 0.25, Y: -0.20}),
+		quatExp(Vec3{Y: -0.30, Z: 0.15}),
+	}
+
+	series := &MotionSeries{FrameCount: len(steps) + 1}
+	for i := range steps {
+		q := steps[i]
+		series.Transitions = append(series.Transitions, Transition{OK: true, Rotation3: &q})
+	}
+
+	got := buildOrientations(series)
+	if len(got) != len(steps)+1 {
+		t.Fatalf("buildOrientations returned %d orientations, want %d", len(got), len(steps)+1)
+	}
+
+	// Several rays, including off-axis ones: a single ray along a rotation axis
+	// would be unmoved by that step and could hide an ordering error.
+	rays := []Vec3{
+		{X: 0, Y: 0, Z: 1},
+		{X: 0.6, Y: 0.2, Z: 0.8},
+		{X: -0.3, Y: 0.7, Z: 0.65},
+	}
+
+	for i := 1; i < len(got); i++ {
+		for _, ray := range rays {
+			// Truth: apply the steps one at a time, in frame order, exactly as
+			// Rotation3's doc comment defines them.
+			want := ray
+			for s := 0; s < i; s++ {
+				want = steps[s].Matrix().Apply(want)
+			}
+			have := got[i].Matrix().Apply(ray)
+
+			const tol = 1e-9
+			if math.Abs(have.X-want.X) > tol || math.Abs(have.Y-want.Y) > tol || math.Abs(have.Z-want.Z) > tol {
+				t.Errorf("orientation %d moves ray %+v to %+v, but applying the %d steps in order gives %+v -- the integration composes in the wrong order or the wrong sense",
+					i, ray, have, i, want)
+			}
+		}
+	}
+}

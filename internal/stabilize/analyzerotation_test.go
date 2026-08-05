@@ -340,3 +340,144 @@ func TestStabilizePipelineActuallyReducesShake(t *testing.T) {
 			after, before)
 	}
 }
+
+// TestRotationPipelineActuallyReducesShake is
+// TestStabilizePipelineActuallyReducesShake for the model that actually ships.
+//
+// Two gaps close here, and neither is visible from any existing test.
+//
+// First, the render. Render's sphere branch never executed anything in the test
+// suite: TestRender_FrameCountAndDimensionInvariants uses DefaultRenderOptions
+// (Rotation false), and the effects-level end-to-end test does select the
+// default rotation model but feeds it a 64x48 source whose lens can never be
+// Reliable(), so it quietly runs the 2D similarity fallback while its name says
+// otherwise. Set rz = 1.0 or q = identityQuat in the frame loop and every test
+// in the repository still passes while every frame renders unstabilized.
+//
+// Second, the correction SENSE. buildOrientations integrates
+// out[i] = step.Mul(out[i-1]), and that composition order is the hinge of the
+// whole model. Nothing pinned it. The two tests over it assert magnitude only --
+// one uses steps about a single axis, where composition order does not matter
+// and Angle() is invariant under conjugation -- and
+// TestAnalyze_RotationModelFitsEveryPair explicitly declines to pin the sign,
+// on the honest grounds that it does not itself establish the convention.
+// FitRotation's sense is pinned, SmoothOrientations' is pinned relative to its
+// own input, and sphereWarpState.render's inverse is pinned; the joints between
+// them were not. Conjugate the step, or transpose the operands, and the
+// renderer DOUBLES the shake instead of removing it -- at plausible runtime,
+// with a valid output file.
+//
+// Running the real pipeline and re-measuring the output catches both, because
+// both turn a reduction into an increase.
+func TestRotationPipelineActuallyReducesShake(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	const (
+		w, h   = 320, 240
+		frames = lensCalibrationPairs + 25 // past the calibration window
+	)
+	truth := Lens{Kind: LensEquisolid, Focal: 0.52 * w, CX: w / 2, CY: h / 2}
+
+	// A wobble riding on a steady turn, stated as camera ORIENTATION rather than
+	// as a 2D transform of the picture -- which is the entire point of this
+	// model. The turn is what a stabilizer must preserve, so freezing the frame
+	// is not a winning strategy here any more than it is in the similarity
+	// version of this test; the wobble is what it must remove. Amplitudes are
+	// chosen to put the input well clear of this setup's residual floor: at
+	// focal 166 px, 0.05 rad is ~8 px of frame motion.
+	orientationAt := func(i int) Quat {
+		fi := float64(i)
+		return quatExp(Vec3{
+			X: 0.00040*fi + 0.050*math.Sin(fi*2.1),
+			Y: 0.00025*fi + 0.045*math.Cos(fi*1.9),
+			Z: 0.012 * math.Sin(fi*2.3),
+		})
+	}
+
+	base := newSyntheticFrameSized(23, w, h)
+	defer base.Close()
+
+	mats := make([]gocv.Mat, frames)
+	for i := range mats {
+		mats[i] = warpFrameByRotation(base, truth, orientationAt(i))
+	}
+	defer func() {
+		for i := range mats {
+			_ = mats[i].Close()
+		}
+	}()
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "rotational-shake.mp4")
+	encodeGrayFrames(t, src, mats, w, h, 30)
+
+	ctx := context.Background()
+	opts := DefaultOptions()
+	opts.WarpModel = WarpModelRotation
+	opts.AnalysisWidth = w // native size, so no rescale sits between truth and fit
+
+	inSeries, err := Analyze(ctx, src, opts)
+	if err != nil {
+		t.Fatalf("analyzing source: %v", err)
+	}
+
+	// Setup guards. If either of these fails the clip never reached the rotation
+	// path at all, and the residual comparison below would be measuring the 2D
+	// fallback while reporting it as the rotation model -- exactly the confusion
+	// this test exists to end.
+	if inSeries.Lens == nil || !inSeries.Lens.Reliable() {
+		t.Fatalf("test setup: no reliable lens calibrated (%v), so the render would silently fall back to the similarity", inSeries.Lens)
+	}
+	if !inSeries.hasRotations() {
+		t.Fatal("test setup: analysis recorded no per-pair rotations, so there is nothing for the rotation render to apply")
+	}
+
+	before := inSeries.ResidualShake().MedianTranslation
+	if before <= 0.5 {
+		t.Fatalf("test setup: source residual %.3f px is too small to measure a reduction against", before)
+	}
+
+	smoothOpts := DefaultSmoothOptions()
+	smoothOpts.Sigma = 15
+	result := Smooth(inSeries, smoothOpts)
+
+	out := filepath.Join(dir, "stabilized.mp4")
+	renderOpts := DefaultRenderOptions()
+	renderOpts.EdgeMode = EdgeModeAdaptive
+	renderOpts.ZoomTransitionSeconds = 0 // one clip-wide crop, per CLAUDE.md's comparison rule
+	renderOpts.Rotation = true           // the branch nothing else in the suite executes
+	stats, err := Render(ctx, src, inSeries, result, renderOpts, out)
+	if err != nil {
+		t.Fatalf("rendering: %v", err)
+	}
+
+	// The stats are the proof that the rotation path, not the fallback, owned
+	// this render: Lens is assigned only inside Render's len(rotCorr) > 0 block.
+	if stats.Lens == nil {
+		t.Fatal("RenderStats.Lens = nil: the render took the 2D similarity path, so the rest of this test proves nothing about the rotation model")
+	}
+
+	outSeries, err := Analyze(ctx, out, opts)
+	if err != nil {
+		t.Fatalf("analyzing output: %v", err)
+	}
+	after := outSeries.ResidualShake().MedianTranslation
+
+	t.Logf("median frame-to-frame translation: %.3f px in, %.3f px out (%.0f%% reduction); crop %.1f%%",
+		before, after, 100*(1-after/before), 100*stats.TotalZoom())
+
+	// Same loose threshold, and the same reasoning, as the similarity version of
+	// this test: this is a no-op guard, not a quality benchmark. vidiobench and
+	// the probe tests own quality, at matched crop, on real footage. Do not read
+	// the absolute numbers here as a quality figure -- the floor under them
+	// belongs to a 320x240 synthetic clip with a lossy re-encode between the two
+	// analyses, not to the stabilizer.
+	//
+	// A no-op scores 1.0 and an inverted correction scores worse than 1.0, so
+	// one threshold catches both failure modes this test was written for.
+	if after >= 0.5*before {
+		t.Errorf("median frame-to-frame motion %.3f px after rotation stabilization vs %.3f px before -- expected at least a halving; the rotation path may be a no-op, or its correction may be applied in the wrong sense",
+			after, before)
+	}
+}
