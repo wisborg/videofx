@@ -44,7 +44,8 @@ type ProcessorConfig struct {
 	// "clip - gocv-stabilized - telemetry.mp4"); a non-empty value replaces
 	// the WHOLE chain with that one word ("clip - <suffix>.mp4"). Either
 	// way the " - " separator and collision-counter handling are still
-	// naming.Resolve's, applied consistently across the batch.
+	// naming.ResolveBatch's, applied consistently across the batch -- including
+	// between two inputs that share a basename.
 	Suffix      string
 	Concurrency int // <=0 means sequential (concurrency of 1)
 
@@ -105,6 +106,27 @@ func Run(ctx context.Context, jobs []Job, cfg ProcessorConfig) []Result {
 		concurrency = 1
 	}
 
+	// Output names are claimed for the whole batch here, BEFORE any worker
+	// starts, because naming.Resolve answers from the filesystem: two jobs
+	// resolving concurrently both see the unsuffixed name free and both take
+	// it. Doing it up front also makes the assignment independent of dispatch
+	// order and of how fast each job runs, so the same batch produces the same
+	// names at any --concurrency.
+	sources := make([]string, len(jobs))
+	for i, job := range jobs {
+		sources[i] = job.SourcePath
+	}
+	finalPaths, err := naming.ResolveBatch(sources, outputSlugs(cfg), cfg.OutputDir)
+	if err != nil {
+		// A naming failure is a property of the slugs or the output directory,
+		// not of any one input, so it fails the whole batch identically rather
+		// than picking a job to blame.
+		for i, job := range jobs {
+			results[i] = Result{SourcePath: job.SourcePath, Err: err}
+		}
+		return results
+	}
+
 	order := make([]int, len(jobs))
 	for i := range order {
 		order[i] = i
@@ -123,8 +145,9 @@ func Run(ctx context.Context, jobs []Job, cfg ProcessorConfig) []Result {
 	// pulls are the largest, and each worker pulls the next-largest
 	// remaining job as soon as it frees up.
 	type item struct {
-		idx int
-		job Job
+		idx       int
+		job       Job
+		finalPath string
 	}
 	ch := make(chan item)
 
@@ -144,7 +167,7 @@ func Run(ctx context.Context, jobs []Job, cfg ProcessorConfig) []Result {
 					progressMu.Unlock()
 				}
 				started := time.Now()
-				res := processOne(ctx, it.job, cfg)
+				res := processOne(ctx, it.job, it.finalPath, cfg)
 				res.Duration = time.Since(started)
 				results[it.idx] = res
 				if cfg.OnResult != nil {
@@ -157,7 +180,7 @@ func Run(ctx context.Context, jobs []Job, cfg ProcessorConfig) []Result {
 	}
 
 	for _, idx := range order {
-		ch <- item{idx: idx, job: jobs[idx]}
+		ch <- item{idx: idx, job: jobs[idx], finalPath: finalPaths[idx]}
 	}
 	close(ch)
 
@@ -213,7 +236,11 @@ func estimateCost(ctx context.Context, path string) float64 {
 	return frames * float64(info.Width) * float64(info.Height)
 }
 
-func processOne(ctx context.Context, job Job, cfg ProcessorConfig) Result {
+// processOne runs the effect pipeline for one job. finalPath is the output
+// name Run claimed for it before any worker started -- see naming.ResolveBatch
+// for why it cannot be derived here: two workers deriving it independently
+// would both pick the same free name.
+func processOne(ctx context.Context, job Job, finalPath string, cfg ProcessorConfig) Result {
 	res := Result{SourcePath: job.SourcePath}
 
 	if _, err := os.Stat(job.SourcePath); err != nil {
@@ -221,13 +248,6 @@ func processOne(ctx context.Context, job Job, cfg ProcessorConfig) Result {
 		return res
 	}
 
-	// The final filename chains every effect's slug (or a --suffix override
-	// collapses the whole chain to one word) -- see outputSlugs.
-	finalPath, err := naming.Resolve(job.SourcePath, outputSlugs(cfg), cfg.OutputDir)
-	if err != nil {
-		res.Err = err
-		return res
-	}
 	res.OutputPath = finalPath
 
 	ext := filepath.Ext(job.SourcePath)
@@ -263,11 +283,12 @@ func processOne(ctx context.Context, job Job, cfg ProcessorConfig) Result {
 	// read, never written.
 	var tmpDir string
 	if len(cfg.Effects) > 1 {
-		tmpDir, err = os.MkdirTemp("", "videofx-chain-*")
+		dir, err := os.MkdirTemp("", "videofx-chain-*")
 		if err != nil {
 			res.Err = fmt.Errorf("creating temp dir for effect chain: %w", err)
 			return res
 		}
+		tmpDir = dir
 		// Backstop cleanup for the intermediates (and any sidecar an
 		// intermediate effect wrote); the per-step removal below handles the
 		// common case, this catches whatever it doesn't.

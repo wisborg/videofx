@@ -1,6 +1,13 @@
 // Package naming derives non-destructive output filenames for processed
 // videos: it never reuses the input path, and never overwrites an
 // existing file.
+//
+// "Existing" has to include names this same batch has already handed out, not
+// just names already on disk. Resolve alone cannot know that -- it answers one
+// question against the filesystem as it stands -- so a caller processing
+// several inputs at once must go through ResolveBatch. Resolving each job
+// independently at the moment its worker starts is what let two clips with the
+// same basename both be told "clip - stabilized.mp4" and write over each other.
 package naming
 
 import (
@@ -41,7 +48,47 @@ const separator = " - "
 // slug containing a path separator would break the invariant that the
 // result is a sibling filename (it could redirect the output into another
 // directory entirely), so that is rejected with an error.
+// Resolve is ResolveBatch for a single input. Use ResolveBatch when processing
+// more than one, so the names cannot collide with each other.
 func Resolve(inputPath string, slugs []string, outputDir string) (string, error) {
+	return resolve(inputPath, slugs, outputDir, nil)
+}
+
+// ResolveBatch derives one output path per input, in order, such that no two
+// results are the same name and none overwrites a file already on disk.
+//
+// Resolving a batch one job at a time is not equivalent, and the difference is
+// not theoretical: Resolve picks a name by asking the filesystem what exists,
+// so two inputs with the same basename both get the unsuffixed name whenever
+// neither output has been written yet. Under --concurrency 1 that never showed,
+// because each job's output landed on disk before the next job asked. Under
+// --concurrency 2 both workers asked before either wrote, two ffmpeg processes
+// opened the same path, one clip was silently lost, and both jobs reported
+// success -- a data-loss bug that appeared only at the setting the flag exists
+// to enable.
+//
+// Names are claimed in the order given, so the caller's job order determines
+// who gets the unsuffixed name. A job that later fails still holds its claim
+// for the life of the batch; that costs a same-named successor a collision
+// counter it would not strictly have needed, which is a much better trade than
+// re-introducing the race by trying to release it.
+func ResolveBatch(inputPaths []string, slugs []string, outputDir string) ([]string, error) {
+	out := make([]string, len(inputPaths))
+	claimed := make(map[string]bool, len(inputPaths))
+	for i, in := range inputPaths {
+		path, err := resolve(in, slugs, outputDir, claimed)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = path
+		claimed[path] = true
+	}
+	return out, nil
+}
+
+// resolve is the shared implementation. claimed may be nil; when non-nil, a
+// candidate already in it is treated exactly as one that exists on disk.
+func resolve(inputPath string, slugs []string, outputDir string, claimed map[string]bool) (string, error) {
 	for _, slug := range slugs {
 		if strings.ContainsAny(slug, `/\`) {
 			return "", fmt.Errorf("naming: suffix %q must not contain a path separator", slug)
@@ -61,14 +108,18 @@ func Resolve(inputPath string, slugs []string, outputDir string) (string, error)
 	// "clip" + ["gocv-stabilized","telemetry"] -> "clip - gocv-stabilized - telemetry".
 	name := strings.Join(append([]string{stem}, slugs...), separator)
 
+	taken := func(candidate string) bool {
+		return exists(candidate) || claimed[candidate]
+	}
+
 	candidate := filepath.Join(dir, name+ext)
-	if !exists(candidate) {
+	if !taken(candidate) {
 		return candidate, nil
 	}
 
 	for i := 1; i <= maxAttempts; i++ {
 		candidate = filepath.Join(dir, fmt.Sprintf("%s%s%d%s", name, separator, i, ext))
-		if !exists(candidate) {
+		if !taken(candidate) {
 			return candidate, nil
 		}
 	}

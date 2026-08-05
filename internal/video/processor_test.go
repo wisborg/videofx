@@ -352,3 +352,160 @@ func TestRun_OneFailureDoesNotStopOthers(t *testing.T) {
 		}
 	}
 }
+
+// barrierEffect blocks every Apply until all of them have arrived, then writes.
+// It exists to make the output-naming race deterministic instead of a coin
+// flip: the bug is that two workers both CHOOSE a name before either WRITES
+// one, so a test that lets the first job finish before the second starts
+// cannot see it, and would pass against the broken code most of the time.
+type barrierEffect struct {
+	arrive chan struct{}
+	open   chan struct{}
+	once   sync.Once
+	n      int
+}
+
+func newBarrierEffect(n int) *barrierEffect {
+	return &barrierEffect{arrive: make(chan struct{}, n), open: make(chan struct{}), n: n}
+}
+
+func (b *barrierEffect) Name() string                     { return "barrier" }
+func (b *barrierEffect) FilenameSlug() string             { return "barrier" }
+func (b *barrierEffect) ValidateStrength(_ float64) error { return nil }
+func (b *barrierEffect) Apply(_ context.Context, in effects.Input) error {
+	b.arrive <- struct{}{}
+	if len(b.arrive) == b.n {
+		b.once.Do(func() { close(b.open) })
+	}
+	<-b.open
+	return os.WriteFile(in.OutputPath, []byte(in.SourcePath), 0o644)
+}
+
+// TestRun_SameBasenameInputsGetDistinctOutputs is the regression test for a
+// silent data-loss bug that only appeared at --concurrency > 1.
+//
+// Two inputs sharing a basename both resolved to the same output path, because
+// each job picked its name when its worker started and neither output existed
+// yet. Two ffmpeg processes then wrote the same file: one clip survived, the
+// other was lost, and both jobs reported OK. At --concurrency 1 the same
+// invocation was correct, because each output landed on disk before the next
+// job asked -- so the bug was invisible at the default and appeared only when
+// the flag that exists to speed things up was used.
+//
+// The barrier is what makes this deterministic. Without it the two workers may
+// serialize by luck and the test passes against the broken code.
+func TestRun_SameBasenameInputsGetDistinctOutputs(t *testing.T) {
+	root := t.TempDir()
+	outDir := filepath.Join(root, "out")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same basename, different directories -- the shape a user hits by globbing
+	// footage laid out one folder per shoot.
+	var jobs []Job
+	for _, sub := range []string{"a", "b"} {
+		dir := filepath.Join(root, sub)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, "clip.mp4")
+		if err := os.WriteFile(p, []byte(sub), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		jobs = append(jobs, Job{SourcePath: p})
+	}
+
+	results := Run(context.Background(), jobs, ProcessorConfig{
+		Effects:     []effects.Effect{newBarrierEffect(len(jobs))},
+		OutputDir:   outDir,
+		Concurrency: len(jobs),
+	})
+
+	for i, res := range results {
+		if res.Err != nil {
+			t.Fatalf("job %d failed: %v", i, res.Err)
+		}
+	}
+	if results[0].OutputPath == results[1].OutputPath {
+		t.Fatalf("both jobs were given the same output path %q -- one clip overwrites the other", results[0].OutputPath)
+	}
+
+	// The paths differing is not enough: both files must actually be on disk,
+	// each holding its own source's content. A run that reported two names but
+	// wrote one file is exactly the failure being guarded against.
+	seen := map[string]string{}
+	for i, res := range results {
+		data, err := os.ReadFile(res.OutputPath)
+		if err != nil {
+			t.Fatalf("job %d output %q not readable: %v", i, res.OutputPath, err)
+		}
+		if prev, dup := seen[string(data)]; dup {
+			t.Errorf("outputs %q and %q both hold %q -- one source was processed twice", prev, res.OutputPath, data)
+		}
+		seen[string(data)] = res.OutputPath
+		if string(data) != results[i].SourcePath {
+			t.Errorf("output %q holds %q, want the content written for %q", res.OutputPath, data, results[i].SourcePath)
+		}
+	}
+
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != len(jobs) {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("output dir holds %d files %v, want %d", len(entries), names, len(jobs))
+	}
+}
+
+// TestRun_OutputNamesDoNotDependOnConcurrency pins that the naming is a
+// property of the job list, not of how fast the workers happen to run. Names
+// are claimed before dispatch, so the same batch produces the same names at any
+// concurrency -- including under the largest-first dispatch reordering, which
+// would otherwise be free to hand the unsuffixed name to whichever clip
+// happened to be biggest.
+func TestRun_OutputNamesDoNotDependOnConcurrency(t *testing.T) {
+	run := func(concurrency int) []string {
+		root := t.TempDir()
+		outDir := filepath.Join(root, "out")
+		if err := os.MkdirAll(outDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		var jobs []Job
+		for _, sub := range []string{"a", "b", "c"} {
+			dir := filepath.Join(root, sub)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			p := filepath.Join(dir, "clip.mp4")
+			if err := os.WriteFile(p, []byte(sub), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			jobs = append(jobs, Job{SourcePath: p})
+		}
+		results := Run(context.Background(), jobs, ProcessorConfig{
+			Effects:     []effects.Effect{&recordingEffect{}},
+			OutputDir:   outDir,
+			Concurrency: concurrency,
+		})
+		out := make([]string, len(results))
+		for i, r := range results {
+			if r.Err != nil {
+				t.Fatalf("job %d failed: %v", i, r.Err)
+			}
+			out[i] = filepath.Base(r.OutputPath)
+		}
+		return out
+	}
+
+	seq, par := run(1), run(3)
+	for i := range seq {
+		if seq[i] != par[i] {
+			t.Errorf("job %d: named %q at concurrency 1 but %q at concurrency 3", i, seq[i], par[i])
+		}
+	}
+}
