@@ -3,14 +3,18 @@ package video
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
 	"videofx/internal/effects"
+	"videofx/internal/vidio"
 )
 
 // TestDispatchOrder pins the Longest-Processing-Time-first scheduling
@@ -507,5 +511,127 @@ func TestRun_OutputNamesDoNotDependOnConcurrency(t *testing.T) {
 		if seq[i] != par[i] {
 			t.Errorf("job %d: named %q at concurrency 1 but %q at concurrency 3", i, seq[i], par[i])
 		}
+	}
+}
+
+// genClip writes a small real clip, so a test can exercise the paths that need
+// an actual video rather than a placeholder file.
+func genClip(t *testing.T, path string, durationSec int) {
+	t.Helper()
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc=size=64x48:rate=10:duration="+strconv.Itoa(durationSec),
+		"-c:v", "libx264", "-g", "1", "-pix_fmt", "yuv420p",
+		"-y", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generating clip: %v\n%s", err, out)
+	}
+}
+
+// trimObservingEffect records what it was actually handed, and how long that
+// input was, MEASURED INSIDE Apply. The measurement has to happen there: the
+// trimmed clip lives in a temp dir that processOne removes as it returns, so
+// inspecting it afterwards is not possible.
+type trimObservingEffect struct {
+	mu       sync.Mutex
+	source   string
+	duration float64
+}
+
+func (e *trimObservingEffect) Name() string                     { return "trimobserver" }
+func (e *trimObservingEffect) FilenameSlug() string             { return "trimobserver" }
+func (e *trimObservingEffect) ValidateStrength(_ float64) error { return nil }
+func (e *trimObservingEffect) Apply(ctx context.Context, in effects.Input) error {
+	info, err := vidio.Probe(ctx, in.SourcePath)
+	if err != nil {
+		return fmt.Errorf("probing the input handed to the effect: %w", err)
+	}
+	e.mu.Lock()
+	e.source, e.duration = in.SourcePath, info.Duration
+	e.mu.Unlock()
+	return os.WriteFile(in.OutputPath, []byte("ok"), 0o644)
+}
+
+// TestProcessOne_TrimsBeforeTheEffectsRun covers the --start/--end wiring.
+//
+// vidio.TrimClip is well tested on its own -- span, end<=0, the creation_time
+// shift, the past-the-end error. What was untested is processOne's half:
+// deciding to trim at all, and handing the TRIMMED clip to the effect chain
+// rather than the original.
+//
+// Both halves fail silently. Change the guard to require both bounds and
+// --start 30 on its own quietly processes the whole clip. Drop the reassignment
+// that swaps in the trimmed file and the trim still runs, still writes its temp
+// file, still deletes it -- and the effects read the original. Either way the
+// run succeeds and the output is simply longer than was asked for, which nobody
+// notices until they watch it.
+func TestProcessOne_TrimsBeforeTheEffectsRun(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	const clipSeconds = 6
+
+	tests := []struct {
+		name         string
+		start, end   float64
+		wantTrimmed  bool
+		wantDuration float64 // only checked when wantTrimmed
+	}{{
+		name: "start and end", start: 1, end: 4,
+		wantTrimmed: true, wantDuration: 3,
+	}, {
+		// The case a `&&` guard silently drops.
+		name: "start only", start: 2,
+		wantTrimmed: true, wantDuration: clipSeconds - 2,
+	}, {
+		name: "end only", end: 2,
+		wantTrimmed: true, wantDuration: 2,
+	}, {
+		// The other direction: with no span asked for there must be no trim
+		// step at all, and the effect must see the user's own file.
+		name: "neither", wantTrimmed: false,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := filepath.Join(dir, "clip.mp4")
+			genClip(t, src, clipSeconds)
+
+			obs := &trimObservingEffect{}
+			results := Run(context.Background(), []Job{{SourcePath: src}}, ProcessorConfig{
+				Effects:      []effects.Effect{obs},
+				OutputDir:    dir,
+				StartSeconds: tc.start,
+				EndSeconds:   tc.end,
+			})
+			if results[0].Err != nil {
+				t.Fatalf("Run: %v", results[0].Err)
+			}
+			if obs.source == "" {
+				t.Fatal("the effect never ran")
+			}
+
+			if !tc.wantTrimmed {
+				if obs.source != src {
+					t.Errorf("effect was handed %q, want the original %q -- a trim happened with no span asked for", obs.source, src)
+				}
+				return
+			}
+
+			if obs.source == src {
+				t.Fatalf("effect was handed the original %q -- the trimmed clip never reached the effect chain", src)
+			}
+			// The span itself, not merely that some trim occurred: a trim to
+			// the wrong bounds is as wrong as no trim, and reads identically
+			// from the path alone.
+			if math.Abs(obs.duration-tc.wantDuration) > 0.5 {
+				t.Errorf("effect was handed a %.2fs clip, want ~%.2fs for start=%v end=%v",
+					obs.duration, tc.wantDuration, tc.start, tc.end)
+			}
+			// The output name still comes from the user's file, not the temp.
+			if base := filepath.Base(results[0].OutputPath); !strings.HasPrefix(base, "clip - ") {
+				t.Errorf("output %q is not named after the original input", results[0].OutputPath)
+			}
+		})
 	}
 }
