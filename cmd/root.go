@@ -480,16 +480,8 @@ func validateTrim(start, end cliutil.TimeSpec) error {
 // process, because that is what a wrong timestamp (or a wrong --offset) looks
 // like, and clamping it would hide the mistake behind a successful-looking run.
 func resolveTrimWindow(path string, start, end cliutil.TimeSpec, info vidio.Info, offset time.Duration) (startSec, endSec float64, warnings []string, err error) {
-	// resolve maps one spec to seconds into this clip. The value may fall
-	// outside the clip; the caller sorts out clamping and overlap below.
 	resolve := func(flag string, spec cliutil.TimeSpec) (float64, error) {
-		if !spec.IsAbsolute() {
-			return spec.Seconds, nil
-		}
-		if !info.HasCreationTime {
-			return 0, fmt.Errorf("%s %s is an absolute timestamp, but %s has no creation_time tag to resolve it against; use a relative time (e.g. 90s) for this file", flag, spec, path)
-		}
-		return spec.Absolute.Sub(info.CreationTime).Seconds() - offset.Seconds(), nil
+		return resolveInstant(flag, path, spec, info, offset)
 	}
 
 	absolute := start.IsAbsolute() || end.IsAbsolute()
@@ -544,6 +536,24 @@ func resolveTrimWindow(path string, start, end cliutil.TimeSpec, info vidio.Info
 	}
 
 	return startSec, endSec, warnings, nil
+}
+
+// resolveInstant maps one time spec onto seconds into a particular clip: a
+// relative spec is already that, and an absolute one is measured from the
+// clip's creation_time (less the clock-skew offset, per telemetry.Resolve's
+// fit_time = creation_time + offset + pts).
+//
+// The result may fall outside the clip -- negative, or past its end. Deciding
+// what that means is the caller's, because it differs by flag: the trim window
+// clamps to the clip, while a single seek point does not.
+func resolveInstant(flag, path string, spec cliutil.TimeSpec, info vidio.Info, offset time.Duration) (float64, error) {
+	if !spec.IsAbsolute() {
+		return spec.Seconds, nil
+	}
+	if !info.HasCreationTime {
+		return 0, fmt.Errorf("%s %s is an absolute timestamp, but %s has no creation_time tag to resolve it against; use a relative time (e.g. 90s) for this file", flag, spec, path)
+	}
+	return spec.Absolute.Sub(info.CreationTime).Seconds() - offset.Seconds(), nil
 }
 
 // clipWindow describes what a clip covers, in absolute time when it carries a

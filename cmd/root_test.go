@@ -75,6 +75,112 @@ func TestCalibrateSubcommandRegistered(t *testing.T) {
 			t.Errorf("calibrate flag --%s not registered", name)
 		}
 	}
+
+	// --ss and --duration take the time grammar (seconds, h/m/s, and for --ss
+	// a timestamp), so they must be strings rather than floats again. The
+	// --duration default still has to be calibrate's own, spelled as a number
+	// a user could have typed: the flag is documented as defaulting to 2s and
+	// `--help` is where that is read.
+	ss, dur := found.Flags().Lookup("ss"), found.Flags().Lookup("duration")
+	if ss.Value.Type() != "string" || dur.Value.Type() != "string" {
+		t.Errorf("--ss is %s and --duration is %s; both must be string flags to accept 1h23m45s",
+			ss.Value.Type(), dur.Value.Type())
+	}
+	if ss.DefValue != "" {
+		t.Errorf("--ss default = %q, want \"\" (from the beginning)", ss.DefValue)
+	}
+	if got, err := parseSegmentDuration(dur.DefValue); err != nil || got != calibrate.DefaultDuration {
+		t.Errorf("--duration default %q parses to %v (err %v), want calibrate.DefaultDuration %v",
+			dur.DefValue, got, err, calibrate.DefaultDuration)
+	}
+}
+
+// TestResolveCalibrateStart covers --ss's three forms and the policy that
+// differs from a trim's: a seek past the end of the source is an error (there
+// is no segment there to measure, and letting it through fails later inside
+// VMAF with a far less obvious message), while a timestamp before the
+// recording starts clamps to the beginning.
+func TestResolveCalibrateStart(t *testing.T) {
+	creation := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	clip := vidio.Info{Duration: 600, CreationTime: creation, HasCreationTime: true}
+
+	cases := []struct {
+		name     string
+		ss       string
+		info     vidio.Info
+		want     float64
+		wantWarn bool
+		wantErr  bool
+	}{
+		{name: "plain seconds", ss: "12.5", info: clip, want: 12.5},
+		{name: "h/m/s duration", ss: "1m30s", info: clip, want: 90},
+		{name: "timestamp", ss: "2026-08-01T09:03:12Z", info: clip, want: 192},
+		{name: "timestamp in another zone", ss: "2026-08-01T10:03:12+01:00", info: clip, want: 192},
+		{name: "timestamp before the clip clamps and warns", ss: "2026-08-01T08:58:00Z", info: clip, want: 0, wantWarn: true},
+		{name: "timestamp past the end", ss: "2026-08-01T09:30:00Z", info: clip, wantErr: true},
+		{name: "seconds past the end", ss: "700", info: clip, wantErr: true},
+		{name: "exactly at the end", ss: "600", info: clip, wantErr: true},
+		{name: "timestamp with no creation_time", ss: "2026-08-01T09:03:12Z", info: vidio.Info{Duration: 600}, wantErr: true},
+		{name: "seconds need no creation_time", ss: "12", info: vidio.Info{Duration: 600}, want: 12},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			spec, err := cliutil.ParseTimeSpec(c.ss)
+			if err != nil {
+				t.Fatalf("parsing --ss %q: %v", c.ss, err)
+			}
+			got, warnings, err := resolveCalibrateStart("clip.mp4", spec, c.info)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("resolveCalibrateStart = %v, want an error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveCalibrateStart: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("resolveCalibrateStart = %v, want %v", got, c.want)
+			}
+			if hasWarn := len(warnings) > 0; hasWarn != c.wantWarn {
+				t.Errorf("warnings = %v, want a warning: %v", warnings, c.wantWarn)
+			}
+		})
+	}
+}
+
+// TestParseSegmentDuration pins that --duration takes a LENGTH. The case worth
+// the test is the timestamp: it parses perfectly well as a time spec, and
+// accepting it here would mean inventing a meaning for "a segment 2026-08-01
+// long" -- most likely a silent 0 that then becomes calibrate's default while
+// the user believes their value took effect.
+func TestParseSegmentDuration(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    float64
+		wantErr bool
+	}{
+		{in: "2", want: 2},
+		{in: "2.5", want: 2.5},
+		{in: "90s", want: 90},
+		{in: "2m", want: 120},
+		{in: "", want: 0},  // unset -> calibrate's own default
+		{in: "0", want: 0}, // as before: 0 means the default
+		{in: "2026-08-01T09:03:12Z", wantErr: true},
+		{in: "-5", wantErr: true},
+		{in: "2ms", wantErr: true},
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			got, err := parseSegmentDuration(c.in)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("parseSegmentDuration(%q) = %v, %v; wantErr %v", c.in, got, err, c.wantErr)
+			}
+			if err == nil && got != c.want {
+				t.Errorf("parseSegmentDuration(%q) = %v, want %v", c.in, got, c.want)
+			}
+		})
+	}
 }
 
 // TestPrintCalibration covers the two report shapes: a target that was met

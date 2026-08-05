@@ -463,9 +463,17 @@ Notes:
   stabilized result to the source with VMAF would measure the *warp*, not the
   encode. The transparent quality transfers to the stabilized render anyway.
 - Point `--ss` at a **busy** (motion/detail-heavy) stretch — a static opening
-  under-estimates the quality busier footage needs. Tune the sweep with
-  `--candidates`, the segment length with `--duration`, and strictness with
-  `--target-vmaf`.
+  under-estimates the quality busier footage needs. It takes the same three
+  forms as `--start`: plain seconds (`12`), an h/m/s duration (`1h23m45s`), or
+  an absolute timestamp with a timezone (`2026-08-01T09:03:12+01:00`), resolved
+  against the source's own `creation_time` — so a busy moment noted by
+  wall-clock time can be handed over as-is. A timestamp before the recording
+  starts measures from the beginning (with a warning); one past its end is an
+  error, since there is no segment there to score. There is no `--offset` on
+  this subcommand.
+- Tune the sweep with `--candidates`, strictness with `--target-vmaf`, and the
+  segment length with `--duration` — which takes seconds or an h/m/s duration
+  (`2`, `90s`, `2m`) but **not** a timestamp: it is a length, not a point.
 
 ## Performance
 
