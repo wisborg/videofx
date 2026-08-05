@@ -340,58 +340,7 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 	smoothOpts.Sigma = sigma
 	result := stabilize.Smooth(series, smoothOpts)
 
-	renderOpts := stabilize.RenderOptions{
-		EdgeMode:              edgeMode,
-		FixedZoom:             g.FixedZoom,
-		MaxZoom:               g.MaxZoom,
-		Quality:               g.Quality,
-		ZoomTransitionSeconds: g.ZoomTransition,
-		RS:                    rsRect,
-	}
-	if homography {
-		reg := g.PerspectiveRegularize
-		if reg <= 0 {
-			reg = 1.0 // full perspective correction by default
-		}
-		renderOpts.PerspectiveRegularize = reg
-		renderOpts.PerspectiveZoomMargin = 0.03 // small extra crop to cover perspective corner excursion
-	}
-	if rotationMode {
-		renderOpts.Rotation = g.reportLens(log, series)
-		if renderOpts.Rotation {
-			// The rotation path rectifies from the ratio directly rather than
-			// from prebuilt 2D rectifiers: its correction needs the per-frame
-			// angular velocity, which Render reads out of the series itself.
-			renderOpts.RSRatio = rho
-			renderOpts.RS = nil
-		}
-	}
-	if meshMode {
-		strength := g.MeshStrength
-		if strength < 0 {
-			strength = DefaultMeshStrength
-		}
-		if strength > 1 {
-			strength = 1
-		}
-		renderOpts.Mesh = true
-		renderOpts.MeshStrength = strength
-		// Small safety cushion on top of the crop Render measures to the mesh's
-		// actual exposed border. Raised from 0.02 to 0.04 after a visual A/B on
-		// test_very_shaken: the measured crop is the 95th percentile of the
-		// per-frame requirement (see meshCoverageCrop), so the frames past it
-		// fall back to the mesh remap's BORDER_REPLICATE fill, and at the
-		// default grid-1 settings that smeared band was visibly streaking at
-		// the frame edges. Roughly two extra percent of crop removes it.
-		//
-		// This is a cushion on a percentile, not a measurement -- 0.04 is the
-		// value confirmed to clear the streaking by eye, not a computed
-		// minimum. Raising the percentile instead would be the principled fix,
-		// but the per-frame crop distribution on this footage is broad rather
-		// than outlier-driven (p95 needs ~38%, the worst frame ~74%), so it
-		// would cost several times more picture than this does.
-		renderOpts.MeshZoomMargin = 0.04
-	}
+	renderOpts := g.renderOptions(log, series, edgeMode, warpModel, rsRect, rho)
 
 	stats, err := stabilize.Render(ctx, in.SourcePath, series, result, renderOpts, in.OutputPath)
 	if err != nil {
@@ -529,6 +478,91 @@ func (g *GoCVStabilizer) loadOrAnalyze(ctx context.Context, log *logging.Logger,
 	}
 
 	return series, nil
+}
+
+// renderOptions builds the RenderOptions for one run: everything that steers
+// the render pass, as opposed to the analysis that produced series.
+//
+// It is a method rather than inline code in Apply because it is the only place
+// where a shipped feature can be disconnected from the renderer without any
+// other symptom. Every piece below the surface is separately unit-tested --
+// BuildRSRectifiers, reportLens, the mesh strength mapping -- and none of that
+// covers whether the result reaches Render. Drop RS here and the rolling-shutter
+// estimates are still debiased, the log still says nothing (it only warns when
+// the readout is unmeasurable), and the pixel un-skew simply stops happening on
+// every run. Having a pure function to assert against is what makes that
+// testable without an ffmpeg round trip.
+//
+// The three model branches are mutually exclusive because warpModel is a single
+// resolved value; they were independent ifs before this became a switch, which
+// reads the same and cannot silently combine.
+//
+// log is taken because reportLens reports through it: whether the rotation model
+// engages is a decision the user needs to see, not a silent internal one.
+func (g *GoCVStabilizer) renderOptions(
+	log *logging.Logger,
+	series *stabilize.MotionSeries,
+	edgeMode stabilize.EdgeMode,
+	warpModel string,
+	rsRect []stabilize.RSRectifier,
+	rho float64,
+) stabilize.RenderOptions {
+	opts := stabilize.RenderOptions{
+		EdgeMode:              edgeMode,
+		FixedZoom:             g.FixedZoom,
+		MaxZoom:               g.MaxZoom,
+		Quality:               g.Quality,
+		ZoomTransitionSeconds: g.ZoomTransition,
+		RS:                    rsRect,
+	}
+
+	switch stabilize.WarpModel(warpModel) {
+	case stabilize.WarpModelHomography:
+		reg := g.PerspectiveRegularize
+		if reg <= 0 {
+			reg = 1.0 // full perspective correction by default
+		}
+		opts.PerspectiveRegularize = reg
+		opts.PerspectiveZoomMargin = 0.03 // small extra crop to cover perspective corner excursion
+
+	case stabilize.WarpModelRotation:
+		opts.Rotation = g.reportLens(log, series)
+		if opts.Rotation {
+			// The rotation path rectifies from the ratio directly rather than
+			// from prebuilt 2D rectifiers: its correction needs the per-frame
+			// angular velocity, which Render reads out of the series itself.
+			opts.RSRatio = rho
+			opts.RS = nil
+		}
+
+	case stabilize.WarpModelMesh:
+		strength := g.MeshStrength
+		if strength < 0 {
+			strength = DefaultMeshStrength
+		}
+		if strength > 1 {
+			strength = 1
+		}
+		opts.Mesh = true
+		opts.MeshStrength = strength
+		// Small safety cushion on top of the crop Render measures to the mesh's
+		// actual exposed border. Raised from 0.02 to 0.04 after a visual A/B on
+		// test_very_shaken: the measured crop is the 95th percentile of the
+		// per-frame requirement (see meshCoverageCrop), so the frames past it
+		// fall back to the mesh remap's BORDER_REPLICATE fill, and at the
+		// default grid-1 settings that smeared band was visibly streaking at
+		// the frame edges. Roughly two extra percent of crop removes it.
+		//
+		// This is a cushion on a percentile, not a measurement -- 0.04 is the
+		// value confirmed to clear the streaking by eye, not a computed
+		// minimum. Raising the percentile instead would be the principled fix,
+		// but the per-frame crop distribution on this footage is broad rather
+		// than outlier-driven (p95 needs ~38%, the worst frame ~74%), so it
+		// would cost several times more picture than this does.
+		opts.MeshZoomMargin = 0.04
+	}
+
+	return opts
 }
 
 // analysisOptionMismatch is one option, rendered as the flag that sets it,

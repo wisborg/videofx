@@ -817,3 +817,129 @@ func TestLoadOrAnalyze_WarnsOnBakedInOptionChange(t *testing.T) {
 		}
 	})
 }
+
+// TestRenderOptions covers the wiring between a configured GoCVStabilizer and
+// the RenderOptions the renderer is actually handed.
+//
+// This layer had no test before, and it is the one place where a shipped
+// feature can be disconnected with no other symptom: every field below is
+// produced by machinery that is separately and well tested, so removing the
+// assignment leaves all of that green while the run silently stops doing it.
+// The assertions are therefore on the struct, not on any downstream effect.
+func TestRenderOptions(t *testing.T) {
+	// Poisoned target: every field set to something that is neither the zero
+	// value nor the package default, so an assignment that stops happening
+	// cannot be mistaken for one that produced a default.
+	g := func() *GoCVStabilizer {
+		return &GoCVStabilizer{
+			FixedZoom:      1.11,
+			MaxZoom:        1.44,
+			Quality:        73,
+			ZoomTransition: 2.5,
+		}
+	}
+
+	t.Run("passthrough fields reach RenderOptions", func(t *testing.T) {
+		var buf bytes.Buffer
+		got := g().renderOptions(captureLog(&buf, false), rotationSeries(false),
+			stabilize.EdgeModeFixed, string(stabilize.WarpModelSimilarity), nil, 0)
+
+		if got.EdgeMode != stabilize.EdgeModeFixed {
+			t.Errorf("EdgeMode = %v, want %v", got.EdgeMode, stabilize.EdgeModeFixed)
+		}
+		if got.FixedZoom != 1.11 {
+			t.Errorf("FixedZoom = %v, want 1.11", got.FixedZoom)
+		}
+		if got.MaxZoom != 1.44 {
+			t.Errorf("MaxZoom = %v, want 1.44", got.MaxZoom)
+		}
+		if got.Quality != 73 {
+			t.Errorf("Quality = %v, want 73", got.Quality)
+		}
+		if got.ZoomTransitionSeconds != 2.5 {
+			t.Errorf("ZoomTransitionSeconds = %v, want 2.5", got.ZoomTransitionSeconds)
+		}
+	})
+
+	t.Run("similarity asks for no model-specific correction", func(t *testing.T) {
+		var buf bytes.Buffer
+		got := g().renderOptions(captureLog(&buf, false), rotationSeries(true),
+			stabilize.EdgeModeAdaptive, string(stabilize.WarpModelSimilarity), nil, 0)
+
+		// A series can carry a perfectly good lens and still be rendered as a
+		// similarity -- the model is chosen by the caller, not inferred from
+		// what the analysis happens to hold.
+		if got.Rotation || got.Mesh || got.PerspectiveRegularize != 0 {
+			t.Errorf("similarity enabled a model correction: %+v", got)
+		}
+	})
+
+	t.Run("rotation engages on a calibrated lens", func(t *testing.T) {
+		var buf bytes.Buffer
+		got := g().renderOptions(captureLog(&buf, false), rotationSeries(true),
+			stabilize.EdgeModeAdaptive, string(stabilize.WarpModelRotation), nil, 0)
+
+		if !got.Rotation {
+			t.Error("Rotation = false on a series with a reliable lens")
+		}
+	})
+
+	t.Run("rotation self-disables on an uncalibratable clip", func(t *testing.T) {
+		var buf bytes.Buffer
+		got := g().renderOptions(captureLog(&buf, false), rotationSeries(false),
+			stabilize.EdgeModeAdaptive, string(stabilize.WarpModelRotation), nil, 0)
+
+		// The fallback is the whole reason the rotation model can be the
+		// default: on a clip whose motion does not determine a lens it must
+		// ask for nothing rather than warp by a guess.
+		if got.Rotation {
+			t.Error("Rotation = true on a series with no reliable lens")
+		}
+	})
+
+	t.Run("mesh carries its strength and crop cushion", func(t *testing.T) {
+		var buf bytes.Buffer
+		gs := g()
+		gs.MeshStrength = -1 // the documented "use the default" sentinel
+		got := gs.renderOptions(captureLog(&buf, false), rotationSeries(false),
+			stabilize.EdgeModeAdaptive, string(stabilize.WarpModelMesh), nil, 0)
+
+		if !got.Mesh {
+			t.Error("Mesh = false under --warp-model mesh")
+		}
+		if got.MeshStrength != DefaultMeshStrength {
+			t.Errorf("MeshStrength = %v, want the default %v", got.MeshStrength, DefaultMeshStrength)
+		}
+		// The cushion is what keeps the mesh remap's replicated border out of
+		// the picture; it is a tuned value, so losing it is a visible
+		// regression rather than a rounding difference.
+		if got.MeshZoomMargin <= 0 {
+			t.Errorf("MeshZoomMargin = %v, want the tuned cushion", got.MeshZoomMargin)
+		}
+	})
+
+	t.Run("mesh strength is clamped to 1", func(t *testing.T) {
+		var buf bytes.Buffer
+		gs := g()
+		gs.MeshStrength = 4
+		got := gs.renderOptions(captureLog(&buf, false), rotationSeries(false),
+			stabilize.EdgeModeAdaptive, string(stabilize.WarpModelMesh), nil, 0)
+
+		if got.MeshStrength != 1 {
+			t.Errorf("MeshStrength = %v, want it clamped to 1", got.MeshStrength)
+		}
+	})
+
+	t.Run("homography defaults its regularization and adds a margin", func(t *testing.T) {
+		var buf bytes.Buffer
+		got := g().renderOptions(captureLog(&buf, false), rotationSeries(false),
+			stabilize.EdgeModeAdaptive, string(stabilize.WarpModelHomography), nil, 0)
+
+		if got.PerspectiveRegularize != 1.0 {
+			t.Errorf("PerspectiveRegularize = %v, want the 1.0 default", got.PerspectiveRegularize)
+		}
+		if got.PerspectiveZoomMargin <= 0 {
+			t.Errorf("PerspectiveZoomMargin = %v, want a positive margin", got.PerspectiveZoomMargin)
+		}
+	})
+}
