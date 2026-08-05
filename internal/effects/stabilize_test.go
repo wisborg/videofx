@@ -632,3 +632,188 @@ func TestWarnIfShortAnalysis(t *testing.T) {
 		})
 	}
 }
+
+// TestWarnIfOptionsDiffer covers the guard on reusing a cached sidecar across a
+// change to an option its analysis baked in.
+//
+// The failure this is written against is not a broken render. It is a wrong
+// measurement: reusing a grid-1 sidecar under --mesh-grid 8 renders grid 1 and
+// reports its crop and residual as grid 8's, and this project settles arguments
+// with exactly those numbers. So the assertions below are not just "a warning
+// fired" -- each one requires the message to name BOTH values, since a warning
+// that does not say what the sidecar actually holds cannot be acted on.
+//
+// The silent rows carry as much weight as the noisy ones. A guard that fires on
+// --analysis-width 0 vs 960 (the same analysis, spelled twice) or on an option
+// the sidecar's model ignores would be trained away within a day.
+func TestWarnIfOptionsDiffer(t *testing.T) {
+	mesh := func(grid int) stabilize.Options {
+		return stabilize.Options{WarpModel: stabilize.WarpModelMesh, MeshGrid: grid}
+	}
+	rotation := func(l *stabilize.Lens) stabilize.Options {
+		return stabilize.Options{WarpModel: stabilize.WarpModelRotation, Lens: l}
+	}
+	lens := &stabilize.Lens{Kind: stabilize.LensEquisolid, Focal: 450}
+
+	tests := []struct {
+		name string
+		was  stabilize.Options // what the sidecar was analyzed with
+		now  stabilize.Options // what this run asked for
+		want []string          // substrings the warning must contain; nil means silence
+	}{{
+		name: "identical options: silent",
+		was:  rotation(nil), now: rotation(nil),
+	}, {
+		name: "analysis width 0 and 960 are the same analysis: silent",
+		was:  stabilize.Options{AnalysisWidth: 0}, now: stabilize.Options{AnalysisWidth: 960},
+	}, {
+		name: "mesh grid 0 and 1 are the same analysis: silent",
+		was:  mesh(0), now: mesh(1),
+	}, {
+		name: "warp model changed: names both models",
+		was:  rotation(nil), now: mesh(0),
+		want: []string{"--warp-model rotation", "--warp-model mesh"},
+	}, {
+		name: "analysis width changed: names both widths",
+		was:  stabilize.Options{AnalysisWidth: 960}, now: stabilize.Options{AnalysisWidth: 1920},
+		want: []string{"--analysis-width 960", "--analysis-width 1920"},
+	}, {
+		name: "mesh grid changed under a mesh sidecar: names both grids",
+		was:  mesh(1), now: mesh(8),
+		want: []string{"--mesh-grid 1", "--mesh-grid 8"},
+	}, {
+		name: "forced lens changed under a rotation sidecar: names both",
+		was:  rotation(lens), now: rotation(&stabilize.Lens{Kind: stabilize.LensEquisolid, Focal: 500}),
+		want: []string{"--lens-focal 450", "--lens-focal 500"},
+	}, {
+		name: "lens forced where the sidecar calibrated its own: says so",
+		was:  rotation(nil), now: rotation(lens),
+		want: []string{"calibrated from the clip", "--lens-focal 450"},
+	}, {
+		// --mesh-grid did not change what a rotation analysis measured, so
+		// saying it changed would be false, not merely noisy.
+		name: "mesh grid changed under a rotation sidecar: silent, it is inert there",
+		was:  rotation(nil), now: stabilize.Options{WarpModel: stabilize.WarpModelRotation, MeshGrid: 8},
+	}, {
+		name: "forced lens changed under a mesh sidecar: silent, it is inert there",
+		was:  mesh(1), now: stabilize.Options{WarpModel: stabilize.WarpModelMesh, MeshGrid: 1, Lens: lens},
+	}, {
+		// Deliberate scope: the tracking/RANSAC knobs are baked in too, but
+		// they have no flags and no documented change-with-sidecar contract.
+		// This row exists so widening the scope is a decision someone makes on
+		// purpose, having first made this test fail.
+		name: "a tracking option with no flag: silent",
+		was:  stabilize.Options{MaxCorners: 500}, now: stabilize.Options{MaxCorners: 200},
+	}, {
+		name: "several changed at once: one message naming all of them",
+		was:  mesh(1), now: stabilize.Options{WarpModel: stabilize.WarpModelMesh, MeshGrid: 8, AnalysisWidth: 1920},
+		want: []string{"--mesh-grid 1", "--mesh-grid 8", "--analysis-width 960", "--analysis-width 1920"},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			warnIfOptionsDiffer(captureLog(&buf, false), "s.vfx", tc.was, tc.now)
+			out := buf.String()
+
+			if len(tc.want) == 0 {
+				if out != "" {
+					t.Errorf("expected silence, got %q", out)
+				}
+				return
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("message omits %q: %q", want, out)
+				}
+			}
+			// Level and identity: this has to be a warning (it reports that
+			// the run is not doing what was asked), and it has to name the
+			// sidecar, since the fix is to delete that specific file.
+			if !strings.Contains(out, warnTag) {
+				t.Errorf("not logged as a warning: %q", out)
+			}
+			if !strings.Contains(out, "sidecar=s.vfx") {
+				t.Errorf("message does not carry the sidecar field: %q", out)
+			}
+			// One message, not one per option: several mismatches at once is
+			// the common case after a flag edit, and N warnings would bury it.
+			if n := strings.Count(out, warnTag); n != 1 {
+				t.Errorf("got %d warnings, want exactly 1: %q", n, out)
+			}
+		})
+	}
+}
+
+// TestLoadOrAnalyze_WarnsOnBakedInOptionChange pins that loadOrAnalyze actually
+// CALLS the mismatch guard on the sidecar-reuse path.
+//
+// This exists because TestWarnIfOptionsDiffer cannot see the call site: delete
+// the warnIfOptionsDiffer line from loadOrAnalyze and every row of that table
+// still passes while real runs go back to silently rendering a stale analysis.
+// That was the state of the WarpModel check before this test -- it was reachable
+// only through a reportLens row asserting the ABSENCE of a second warning, which
+// is not the same as asserting the first one fires.
+//
+// It runs without ffmpeg: with a sidecar present, loadOrAnalyze reads it and
+// returns before Analyze is ever reached.
+func TestLoadOrAnalyze_WarnsOnBakedInOptionChange(t *testing.T) {
+	const source = "clip.mp4"
+
+	newSidecar := func(t *testing.T, opts stabilize.Options) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "s.vfx")
+		series := &stabilize.MotionSeries{
+			SourcePath:    source,
+			SourceWidth:   3840,
+			SourceHeight:  2160,
+			AnalysisWidth: 960, AnalysisHeight: 540,
+			FPS: 60, FrameCount: 2,
+			Options:     opts,
+			Transitions: []stabilize.Transition{{OK: true}},
+		}
+		if err := stabilize.WriteSidecar(path, series); err != nil {
+			t.Fatalf("WriteSidecar: %v", err)
+		}
+		return path
+	}
+
+	t.Run("mesh grid changed: warns", func(t *testing.T) {
+		path := newSidecar(t, stabilize.Options{WarpModel: stabilize.WarpModelMesh, MeshGrid: 1})
+		g := &GoCVStabilizer{SidecarPath: path}
+
+		var buf bytes.Buffer
+		series, err := g.loadOrAnalyze(t.Context(), captureLog(&buf, false), source,
+			stabilize.Options{WarpModel: stabilize.WarpModelMesh, MeshGrid: 8})
+		if err != nil {
+			t.Fatalf("loadOrAnalyze: %v", err)
+		}
+		// The sidecar's analysis is what gets rendered -- that is the whole
+		// reason a warning rather than a silent upgrade is correct.
+		if got := series.Options.MeshGrid; got != 1 {
+			t.Errorf("rendered grid = %d, want the sidecar's 1", got)
+		}
+		out := buf.String()
+		if !strings.Contains(out, warnTag) {
+			t.Fatalf("reusing a grid-1 sidecar under --mesh-grid 8 warned nothing: %q", out)
+		}
+		for _, want := range []string{"--mesh-grid 1", "--mesh-grid 8"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("warning omits %q: %q", want, out)
+			}
+		}
+	})
+
+	t.Run("options match: silent", func(t *testing.T) {
+		opts := stabilize.Options{WarpModel: stabilize.WarpModelMesh, MeshGrid: 1}
+		g := &GoCVStabilizer{SidecarPath: newSidecar(t, opts)}
+
+		var buf bytes.Buffer
+		if _, err := g.loadOrAnalyze(t.Context(), captureLog(&buf, false), source, opts); err != nil {
+			t.Fatalf("loadOrAnalyze: %v", err)
+		}
+		if out := buf.String(); out != "" {
+			t.Errorf("expected silence on a matching sidecar, got %q", out)
+		}
+	})
+}

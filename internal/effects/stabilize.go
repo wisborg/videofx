@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"videofx/internal/logging"
 	"videofx/internal/stabilize"
+	"videofx/internal/vidio"
 )
 
 func init() {
@@ -508,17 +510,7 @@ func (g *GoCVStabilizer) loadOrAnalyze(ctx context.Context, log *logging.Logger,
 				return nil, fmt.Errorf("sidecar %s was analyzed from %q, not %q -- refusing to apply another clip's motion data (use a different -sidecar, or delete this one to re-analyze)",
 					g.SidecarPath, series.SourcePath, sourcePath)
 			}
-			// The motion model is baked into the analysis, not the render: a
-			// sidecar recorded under one model carries none of the per-frame
-			// data another needs. Falling back silently would hand back the old
-			// model's output under the new model's name -- which is precisely
-			// what a cached sidecar from before the default became "rotation"
-			// would do, on a machine where everything appears to be up to date.
-			if series.Options.WarpModel != opts.WarpModel {
-				log.WithField("sidecar", g.SidecarPath).Warnf(
-					"sidecar was analyzed with --warp-model %s, but this run asked for %s -- rendering with %s, since the model is baked into the analysis; delete the sidecar to re-analyze",
-					modelName(series.Options.WarpModel), modelName(opts.WarpModel), modelName(series.Options.WarpModel))
-			}
+			warnIfOptionsDiffer(log, g.SidecarPath, series.Options, opts)
 			warnIfShortAnalysis(log, sourcePath, series)
 			return series, nil
 		}
@@ -537,6 +529,129 @@ func (g *GoCVStabilizer) loadOrAnalyze(ctx context.Context, log *logging.Logger,
 	}
 
 	return series, nil
+}
+
+// analysisOptionMismatch is one option, rendered as the flag that sets it,
+// whose value in a cached sidecar differs from what this run asked for.
+type analysisOptionMismatch struct {
+	was string // how the sidecar's analysis was configured
+	now string // how this run asked to be configured
+}
+
+// analysisOptionMismatches reports every option that Analyze baked into a
+// cached MotionSeries and that this run asked to change.
+//
+// "Baked into" means the option changed what Analyze *measured*, so a render
+// from the cached series cannot honor a new value however it is asked for.
+// Every option here is documented on its own flag as something to change
+// together with --sidecar, and this is the check that makes those notes
+// enforceable rather than advisory. The failure it exists to catch is not a
+// broken render but a wrong conclusion: reusing a sidecar across a --mesh-grid
+// change renders the old grid and reports its crop and residual under the new
+// grid's name, and a measurement this project trusts (CLAUDE.md: configurations
+// are comparable only at matched crop) is then quietly about something else.
+//
+// Options that only steer the render pass are deliberately absent -- sigma,
+// edge mode, the zoom flags, --rs-ratio -- because they are re-read on every
+// run, and sweeping them against one cached analysis is the entire reason
+// --sidecar exists. Adding one of those here would make the warning fire on
+// correct usage, which is worse than not warning at all.
+//
+// Relevance is judged against the model the SIDECAR carries, because that is
+// the model the render will actually use: --mesh-grid means nothing to a
+// rotation analysis and --lens-focal means nothing to a mesh one. Reporting
+// inert options would train the reader to skip the whole message.
+func analysisOptionMismatches(was, now stabilize.Options) []analysisOptionMismatch {
+	var out []analysisOptionMismatch
+	add := func(format string, wasVal, nowVal any) {
+		out = append(out, analysisOptionMismatch{
+			was: fmt.Sprintf(format, wasVal),
+			now: fmt.Sprintf(format, nowVal),
+		})
+	}
+
+	if was.WarpModel != now.WarpModel {
+		add("--warp-model %s", modelName(was.WarpModel), modelName(now.WarpModel))
+	}
+	// Compared at their effective values, not as written: --analysis-width 0
+	// and --analysis-width 960 select the same analysis, and warning that they
+	// differ would be a lie. Same for --mesh-grid 0 and 1 below.
+	if effectiveAnalysisWidth(was) != effectiveAnalysisWidth(now) {
+		add("--analysis-width %d", effectiveAnalysisWidth(was), effectiveAnalysisWidth(now))
+	}
+	if was.WarpModel == stabilize.WarpModelMesh && effectiveMeshGrid(was) != effectiveMeshGrid(now) {
+		add("--mesh-grid %d", effectiveMeshGrid(was), effectiveMeshGrid(now))
+	}
+	if was.WarpModel == stabilize.WarpModelRotation && !sameForcedLens(was.Lens, now.Lens) {
+		out = append(out, analysisOptionMismatch{was: forcedLensDesc(was.Lens), now: forcedLensDesc(now.Lens)})
+	}
+	return out
+}
+
+// effectiveAnalysisWidth resolves Options.AnalysisWidth's 0 to the width
+// vidio would actually pick, so two spellings of the same analysis compare
+// equal. Note this is the REQUESTED width, not MotionSeries.AnalysisWidth:
+// the emitted frame size is resolved from ffprobe and can differ from the
+// request by libswscale's rounding (see vidio.OpenAnalysisDecoder), so
+// comparing the actual size against a request would warn about arithmetic
+// rather than about a changed option.
+func effectiveAnalysisWidth(o stabilize.Options) int {
+	if o.AnalysisWidth <= 0 {
+		return vidio.AnalysisWidth
+	}
+	return o.AnalysisWidth
+}
+
+// effectiveMeshGrid resolves Options.MeshGrid's 0 to DefaultMeshGrid.
+func effectiveMeshGrid(o stabilize.Options) int {
+	if o.MeshGrid <= 0 {
+		return stabilize.DefaultMeshGrid
+	}
+	return o.MeshGrid
+}
+
+// sameForcedLens compares two --lens/--lens-focal settings, either of which
+// may be absent (nil, meaning the lens was calibrated from the clip).
+func sameForcedLens(was, now *stabilize.Lens) bool {
+	switch {
+	case was == nil && now == nil:
+		return true
+	case was == nil || now == nil:
+		return false
+	default:
+		return *was == *now
+	}
+}
+
+// forcedLensDesc renders a --lens/--lens-focal pair for the mismatch warning.
+// The two flags must be given together, so they are reported as one item.
+func forcedLensDesc(l *stabilize.Lens) string {
+	if l == nil {
+		return "no --lens (calibrated from the clip)"
+	}
+	return fmt.Sprintf("--lens %s --lens-focal %g", l.Kind, l.Focal)
+}
+
+// warnIfOptionsDiffer warns when a cached sidecar is being reused across a
+// change to an option its analysis baked in. It warns rather than fails: unlike
+// a SourcePath mismatch, which would apply another clip's motion data, every
+// option here still describes THIS clip -- the render is coherent, just not the
+// one that was asked for, and refusing outright would break the legitimate case
+// of rendering an old sidecar on purpose.
+func warnIfOptionsDiffer(log *logging.Logger, sidecarPath string, was, now stabilize.Options) {
+	mismatches := analysisOptionMismatches(was, now)
+	if len(mismatches) == 0 {
+		return
+	}
+	wasList := make([]string, len(mismatches))
+	nowList := make([]string, len(mismatches))
+	for i, m := range mismatches {
+		wasList[i] = m.was
+		nowList[i] = m.now
+	}
+	log.WithField("sidecar", sidecarPath).Warnf(
+		"sidecar was analyzed with %s, but this run asked for %s -- rendering with the sidecar's analysis, since these options change what Analyze measured and cannot be applied at render time; delete the sidecar to re-analyze",
+		strings.Join(wasList, ", "), strings.Join(nowList, ", "))
 }
 
 // warnIfShortAnalysis reports an analysis that decoded materially fewer frames
