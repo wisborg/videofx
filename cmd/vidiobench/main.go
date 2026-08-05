@@ -61,6 +61,16 @@
 //	           the whole point of this mode is the file it produces).
 //	           -max-frames is ignored, as in -mode=stabilize/-mode=smooth.
 //
+//	           It renders the SHIPPED pipeline by default: the model the
+//	           analysis was run under (a sidecar's baked-in model, or
+//	           stabilize.DefaultWarpModel for a fresh pass) with
+//	           rolling-shutter correction on, exactly as the CLI does.
+//	           The correction path that owned the render is printed on
+//	           every run, because "total crop" is only interpretable
+//	           against the path that produced it -- and this project
+//	           compares configurations at matched crop. Override with
+//	           -warp-model / -rolling-shutter when that is the experiment.
+//
 // Usage:
 //
 //	go run ./cmd/vidiobench -mode=analysis -file=test_videos/test_small.mp4
@@ -104,8 +114,11 @@ func main() {
 	edgeMode := flag.String("edge-mode", "fixed", "render mode: edge handling -- fixed, adaptive, or flow-fill (EXPERIMENTAL, see stabilize.EdgeModeFlowFill doc comment)")
 	fixedZoom := flag.Float64("fixed-zoom", 0.12, "render mode: -edge-mode=fixed's zoom fraction (0.12 = 12%)")
 	maxZoomFrac := flag.Float64("max-zoom", 0, "render mode: -edge-mode=adaptive's zoom cap fraction (0 = uncapped); when it binds, offending frames' corrections are scaled back rather than exposing a black border")
-	meshRender := flag.Bool("mesh", false, "render mode: apply the mesh (MeshFlow) correction; requires a sidecar analyzed with --warp-model mesh")
-	meshStrengthFlag := flag.Float64("mesh-strength", 0.3, "render mode, with -mesh: correction gain 0-1")
+	warpModelFlag := flag.String("warp-model", "", "render mode: correction to render with -- rotation, similarity, mesh, or homography. EMPTY (the default) renders whatever the analysis was run under: the model baked into -sidecar, or stabilize.DefaultWarpModel for a fresh pass, i.e. what the CLI ships. Name one only to override, and note a sidecar carries only the per-frame data ITS model needed -- asking for a model the analysis did not record is reported and falls back rather than silently rendering something else")
+	meshGridFlag := flag.Int("mesh-grid", 0, "render mode, fresh analysis with -warp-model=mesh: grid size (0 = stabilize.DefaultMeshGrid). Baked into the analysis, so it is ignored when reading a -sidecar")
+	meshStrengthFlag := flag.Float64("mesh-strength", 0.3, "render mode, with -warp-model=mesh: correction gain 0-1")
+	rollingShutterFlag := flag.Bool("rolling-shutter", true, "render mode: correct rolling-shutter skew (ON by default, matching the CLI). It costs crop, so turn it off when comparing against a render that did not have it")
+	rsRatioFlag := flag.Float64("rs-ratio", 0, "render mode, with -rolling-shutter: force the readout ratio (0 = measure it from the clip, as the CLI does)")
 	zoomTransition := flag.Float64("zoom-transition", 0, "render mode, -edge-mode=adaptive: seconds over which the per-frame zoom envelope eases between calm and shaky sections. 0 (the default here, unlike the CLI's 0.5) gives ONE constant clip-wide zoom -- which is what you want when comparing configurations, since an envelope makes the crop vary per frame and there is then no single crop to match on")
 	predFile := flag.String("pred-file", "", "rs mode: take the driving accelerations from this frame-aligned clip instead of -file. Pass the RAW source here when -file is a RENDERED output, to measure how much rolling shutter the render still carries -- a stabilized output has had the accelerations smoothed out of it and cannot reveal its own")
 	flag.Parse()
@@ -178,8 +191,11 @@ func main() {
 			edgeMode:       *edgeMode,
 			fixedZoom:      *fixedZoom,
 			maxZoom:        *maxZoomFrac,
-			mesh:           *meshRender,
+			warpModel:      *warpModelFlag,
+			meshGrid:       *meshGridFlag,
 			meshStrength:   *meshStrengthFlag,
+			rollingShutter: *rollingShutterFlag,
+			rsRatio:        *rsRatioFlag,
 			zoomTransition: *zoomTransition,
 		})
 	default:
@@ -381,7 +397,7 @@ func buildSmoothOptions(p smoothParams, series *stabilize.MotionSeries) (stabili
 // tuning iteration defeats the entire purpose of the sidecar — see
 // internal/stabilize's MotionSeries doc comment.
 func runSmooth(ctx context.Context, p smoothParams) error {
-	series, analyzeElapsed, err := loadMotionSeries(ctx, p)
+	series, analyzeElapsed, err := loadMotionSeries(ctx, p, stabilize.DefaultOptions())
 	if err != nil {
 		return err
 	}
@@ -475,13 +491,13 @@ func runSmooth(ctx context.Context, p smoothParams) error {
 // the same ratio every time, and a ratio that moves around from clip to clip is
 // noise being fitted, not a readout time being measured.
 func runRS(ctx context.Context, p smoothParams, predFile string) error {
-	series, _, err := loadMotionSeries(ctx, p)
+	series, _, err := loadMotionSeries(ctx, p, stabilize.DefaultOptions())
 	if err != nil {
 		return err
 	}
 	predictors := series
 	if predFile != "" {
-		predictors, _, err = loadMotionSeries(ctx, smoothParams{file: predFile})
+		predictors, _, err = loadMotionSeries(ctx, smoothParams{file: predFile}, stabilize.DefaultOptions())
 		if err != nil {
 			return fmt.Errorf("analyzing -pred-file: %w", err)
 		}
@@ -557,7 +573,62 @@ const rsMinAxisCorrelation = 0.3
 // either read from p.sidecar (analyzeElapsed 0, since no analysis ran),
 // or a fresh stabilize.Analyze pass over p.file (optionally persisted to
 // p.writeSidecar for reuse on the next tuning iteration).
-func loadMotionSeries(ctx context.Context, p smoothParams) (*stabilize.MotionSeries, time.Duration, error) {
+// requestedRenderModel settles the model BEFORE the analysis runs, because the
+// model decides what the analysis records: a pass run as a similarity has no
+// rotations in it, and no render option can put them back.
+//
+// An empty -warp-model means "what the CLI ships", which is
+// stabilize.DefaultWarpModel. It is deliberately NOT stabilize.DefaultOptions',
+// whose WarpModel is the zero value (the similarity) -- that difference is the
+// whole reason a fresh -mode=render pass used to be unable to render the
+// default model however it was asked.
+func requestedRenderModel(p renderParams) (stabilize.WarpModel, stabilize.Options) {
+	requested := stabilize.WarpModel(p.warpModel)
+	if p.warpModel == "" {
+		requested = stabilize.DefaultWarpModel
+	}
+	opts := stabilize.DefaultOptions()
+	opts.WarpModel = requested
+	opts.MeshGrid = p.meshGrid
+	return requested, opts
+}
+
+// resolveRenderModel reports the model the render will actually use, and
+// whether that overrode an explicit -warp-model.
+//
+// A sidecar's model always wins, because the per-frame data another model needs
+// is simply not in the file. Honoring the flag instead would print a crop for a
+// path the run did not take, which is the specific way this tool used to
+// mislead: it had no rotation field at all, so every rotation sidecar rendered
+// as a 2D similarity and reported that render's crop as if it were the shipped
+// model's.
+func resolveRenderModel(p renderParams, requested stabilize.WarpModel, series *stabilize.MotionSeries) (stabilize.WarpModel, bool) {
+	model := series.Options.WarpModel
+	overridden := p.sidecar != "" && p.warpModel != "" && model != requested
+	return model, overridden
+}
+
+// modelLabel names a warp model for printing. The similarity is the empty
+// string in the type, which would otherwise print as nothing at all in the
+// middle of a sentence about which model won.
+func modelLabel(m stabilize.WarpModel) string {
+	if m == stabilize.WarpModelSimilarity {
+		return "similarity"
+	}
+	return string(m)
+}
+
+// analysisOpts is the configuration a fresh Analyze runs under. It is a
+// parameter rather than stabilize.DefaultOptions() inline because that
+// function's WarpModel is the ZERO value (similarity), not DefaultWarpModel --
+// its own doc comment says so. Hardcoding it here meant -mode=render could not
+// record the rotations the shipped default model needs, so a fresh analysis
+// could only ever produce a similarity render however it was asked for.
+//
+// The modes that only read the similarity fit or the rolling-shutter
+// observables (-mode=smooth, -mode=rs, -mode=residual) pass DefaultOptions and
+// are unaffected: those quantities are recorded for every model.
+func loadMotionSeries(ctx context.Context, p smoothParams, analysisOpts stabilize.Options) (*stabilize.MotionSeries, time.Duration, error) {
 	if p.sidecar != "" {
 		series, err := stabilize.ReadSidecar(p.sidecar)
 		if err != nil {
@@ -575,7 +646,7 @@ func loadMotionSeries(ctx context.Context, p smoothParams) (*stabilize.MotionSer
 	fmt.Printf("source: %s (%dx%d, %.3f fps, %d frames reported)\n", p.file, info.Width, info.Height, info.FPS, info.NBFrames)
 
 	start := time.Now()
-	series, err := stabilize.Analyze(ctx, p.file, stabilize.DefaultOptions())
+	series, err := stabilize.Analyze(ctx, p.file, analysisOpts)
 	if err != nil {
 		return nil, 0, fmt.Errorf("analyzing %s: %w", p.file, err)
 	}
@@ -599,12 +670,20 @@ func loadMotionSeries(ctx context.Context, p smoothParams) (*stabilize.MotionSer
 // with Render bolted on at the end instead of a statistics printout.
 type renderParams struct {
 	smoothParams
-	out            string
-	edgeMode       string
-	fixedZoom      float64
-	maxZoom        float64 // fraction; 0 = uncapped
-	mesh           bool
+	out       string
+	edgeMode  string
+	fixedZoom float64
+	maxZoom   float64 // fraction; 0 = uncapped
+	// warpModel names the correction to render with. Empty means "whatever the
+	// analysis was run under", which for a sidecar is the model baked into it
+	// and for a fresh pass is stabilize.DefaultWarpModel -- i.e. the model the
+	// CLI ships. Naming one explicitly is for experimentation and can fail: a
+	// sidecar carries only the per-frame data its own model needed.
+	warpModel      string
+	meshGrid       int
 	meshStrength   float64
+	rollingShutter bool
+	rsRatio        float64 // 0 = measure it from the clip, as the CLI does
 	zoomTransition float64 // seconds; 0 = one constant clip-wide zoom
 }
 
@@ -640,9 +719,17 @@ func runRender(ctx context.Context, p renderParams) error {
 	fmt.Printf("source: %s (%dx%d, %.3f fps, %d frames reported, audio=%v)\n",
 		p.file, sourceInfo.Width, sourceInfo.Height, sourceInfo.FPS, sourceInfo.NBFrames, sourceInfo.HasAudio)
 
-	series, analyzeElapsed, err := loadMotionSeries(ctx, p.smoothParams)
+	requested, analysisOpts := requestedRenderModel(p)
+
+	series, analyzeElapsed, err := loadMotionSeries(ctx, p.smoothParams, analysisOpts)
 	if err != nil {
 		return err
+	}
+
+	model, overridden := resolveRenderModel(p, requested, series)
+	if overridden {
+		fmt.Printf("note: -warp-model=%s was asked for, but the sidecar was analyzed with %s -- rendering %s, since the model is baked into the analysis\n",
+			modelLabel(requested), modelLabel(model), modelLabel(model))
 	}
 
 	opts, _ := buildSmoothOptions(p.smoothParams, series)
@@ -664,10 +751,59 @@ func runRender(ctx context.Context, p renderParams) error {
 		MaxZoom:               p.maxZoom,
 		ZoomTransitionSeconds: p.zoomTransition,
 	}
-	if p.mesh {
+
+	// Rolling shutter, mirroring the effect: the ratio is measured from the
+	// clip unless forced, the rotation path takes the ratio directly (it needs
+	// the per-frame angular velocity, not a prebuilt 2D shear), and every other
+	// model takes prebuilt rectifiers.
+	var rho float64
+	if p.rollingShutter {
+		rho = p.rsRatio
+		if rho == 0 {
+			if cal := stabilize.EstimateReadoutRatio(series); cal.Reliable() {
+				rho = cal.Ratio
+				fmt.Printf("rolling shutter: measured rho=%.3f\n", rho)
+			} else {
+				fmt.Printf("rolling shutter: not measurable on this clip (best fit %.3f, correlation %+.3f) -- rendering without it\n", cal.Ratio, cal.Corr)
+			}
+		} else {
+			fmt.Printf("rolling shutter: forced rho=%.3f\n", rho)
+		}
+	}
+
+	// The correction path that owns the render. Printed unconditionally, and
+	// resolved here rather than from the flags, because the crop reported below
+	// is only interpretable against the path that actually produced it.
+	switch model {
+	case stabilize.WarpModelRotation:
+		// Lens is nil for every model but rotation, and nil even for rotation
+		// when calibration failed. Reliable() has a value receiver, so the nil
+		// check is load-bearing, not defensive.
+		if series.Lens != nil && series.Lens.Reliable() {
+			renderOpts.Rotation = true
+			renderOpts.RSRatio = rho
+			fmt.Printf("correction: rotation (%s lens, focal %.1f, fit error %.2f px over %d pairs)\n",
+				series.Lens.Lens.Kind, series.Lens.Lens.Focal, series.Lens.Error, series.Lens.Pairs)
+		} else {
+			// Same self-disable the effect does, and it must be as loud here as
+			// it is there: a rotation render that quietly became a similarity
+			// render is a crop measurement filed under the wrong model.
+			fmt.Println("correction: similarity (the rotation model's lens is not reliable on this clip, so it self-disabled -- the same fallback the CLI takes)")
+		}
+	case stabilize.WarpModelMesh:
 		renderOpts.Mesh = true
 		renderOpts.MeshStrength = p.meshStrength
 		renderOpts.MeshZoomMargin = 0.04 // matches the effect's cushion
+		fmt.Printf("correction: mesh (grid %d, strength %.2f)\n", series.Options.MeshGrid, p.meshStrength)
+	case stabilize.WarpModelHomography:
+		renderOpts.PerspectiveRegularize = 1.0
+		renderOpts.PerspectiveZoomMargin = 0.03
+		fmt.Println("correction: homography (EXPERIMENTAL; measured WORSE than similarity)")
+	default:
+		fmt.Println("correction: similarity")
+	}
+	if !renderOpts.Rotation && rho > 0 {
+		renderOpts.RS = stabilize.BuildRSRectifiers(series, rho)
 	}
 
 	start := time.Now()
@@ -921,7 +1057,7 @@ func peakRSSBytes() (int64, bool) {
 // but see stabilize.ResidualShake's doc comment for what the number cannot see
 // before treating a small move in it as a verdict.
 func runResidual(ctx context.Context, p smoothParams) error {
-	series, _, err := loadMotionSeries(ctx, p)
+	series, _, err := loadMotionSeries(ctx, p, stabilize.DefaultOptions())
 	if err != nil {
 		return err
 	}
