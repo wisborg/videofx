@@ -18,6 +18,22 @@ import (
 // Job describes a single video to process.
 type Job struct {
 	SourcePath string
+
+	// StartSeconds, EndSeconds optionally restrict processing to a span of
+	// this input: the clip is trimmed to [StartSeconds, EndSeconds) once, up
+	// front, and the effects run on that trimmed clip (see processOne /
+	// vidio.TrimClip). StartSeconds <= 0 means from the beginning;
+	// EndSeconds <= 0 means to the end. Both zero (the default) processes
+	// the whole clip with no trim step at all.
+	//
+	// This is per-job rather than one span on ProcessorConfig because the
+	// CLI's --start/--end also accept an absolute timestamp, which lands at
+	// a DIFFERENT offset in each file of a batch (it resolves against that
+	// file's own creation_time). Resolving happens in the CLI layer, which
+	// is where the clock-skew --offset and the "clip doesn't cover that
+	// instant" reporting live; by the time a Job gets here the span is
+	// always plain seconds into this one file.
+	StartSeconds, EndSeconds float64
 }
 
 // Result is the outcome of processing one Job.
@@ -48,14 +64,6 @@ type ProcessorConfig struct {
 	// between two inputs that share a basename.
 	Suffix      string
 	Concurrency int // <=0 means sequential (concurrency of 1)
-
-	// StartSeconds, EndSeconds optionally restrict processing to a span of
-	// each input: the clip is trimmed to [StartSeconds, EndSeconds) once, up
-	// front, and the effects run on that trimmed clip (see processOne /
-	// vidio.TrimClip). StartSeconds <= 0 means from the beginning; EndSeconds
-	// <= 0 means to the end. Both zero (the default) processes the whole clip
-	// with no trim step at all.
-	StartSeconds, EndSeconds float64
 
 	// OnStart, if non-nil, is called just before each job begins processing;
 	// OnResult, if non-nil, as soon as each job finishes. They exist so a
@@ -258,7 +266,7 @@ func processOne(ctx context.Context, job Job, finalPath string, cfg ProcessorCon
 	// the original is never modified, and the output filename is still derived
 	// from the original (naming.Resolve above), not the temp.
 	source := job.SourcePath
-	if cfg.StartSeconds > 0 || cfg.EndSeconds > 0 {
+	if job.StartSeconds > 0 || job.EndSeconds > 0 {
 		trimDir, err := os.MkdirTemp("", "videofx-trim-*")
 		if err != nil {
 			res.Err = fmt.Errorf("creating temp dir for trim: %w", err)
@@ -267,7 +275,7 @@ func processOne(ctx context.Context, job Job, finalPath string, cfg ProcessorCon
 		defer os.RemoveAll(trimDir)
 
 		trimmed := filepath.Join(trimDir, "trimmed"+ext)
-		if err := vidio.TrimClip(ctx, job.SourcePath, trimmed, cfg.StartSeconds, cfg.EndSeconds); err != nil {
+		if err := vidio.TrimClip(ctx, job.SourcePath, trimmed, job.StartSeconds, job.EndSeconds); err != nil {
 			res.Err = err
 			return res
 		}

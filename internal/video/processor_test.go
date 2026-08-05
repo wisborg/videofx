@@ -598,11 +598,13 @@ func TestProcessOne_TrimsBeforeTheEffectsRun(t *testing.T) {
 			genClip(t, src, clipSeconds)
 
 			obs := &trimObservingEffect{}
-			results := Run(context.Background(), []Job{{SourcePath: src}}, ProcessorConfig{
-				Effects:      []effects.Effect{obs},
-				OutputDir:    dir,
+			results := Run(context.Background(), []Job{{
+				SourcePath:   src,
 				StartSeconds: tc.start,
 				EndSeconds:   tc.end,
+			}}, ProcessorConfig{
+				Effects:   []effects.Effect{obs},
+				OutputDir: dir,
 			})
 			if results[0].Err != nil {
 				t.Fatalf("Run: %v", results[0].Err)
@@ -633,5 +635,78 @@ func TestProcessOne_TrimsBeforeTheEffectsRun(t *testing.T) {
 				t.Errorf("output %q is not named after the original input", results[0].OutputPath)
 			}
 		})
+	}
+}
+
+// spanRecordingEffect records the duration of the clip it was handed, keyed by
+// the OUTPUT name -- the only thing an effect sees that still identifies which
+// input it came from, since the trimmed source is an anonymous temp file.
+type spanRecordingEffect struct {
+	mu        sync.Mutex
+	durations map[string]float64
+}
+
+func (e *spanRecordingEffect) Name() string                     { return "spanrecorder" }
+func (e *spanRecordingEffect) FilenameSlug() string             { return "spanrecorder" }
+func (e *spanRecordingEffect) ValidateStrength(_ float64) error { return nil }
+func (e *spanRecordingEffect) Apply(ctx context.Context, in effects.Input) error {
+	info, err := vidio.Probe(ctx, in.SourcePath)
+	if err != nil {
+		return fmt.Errorf("probing the input handed to the effect: %w", err)
+	}
+	e.mu.Lock()
+	if e.durations == nil {
+		e.durations = map[string]float64{}
+	}
+	e.durations[filepath.Base(in.OutputPath)] = info.Duration
+	e.mu.Unlock()
+	return os.WriteFile(in.OutputPath, []byte("ok"), 0o644)
+}
+
+// TestRun_TrimSpanIsPerJob pins that each job's span applies to THAT job. The
+// span used to be one pair of numbers on ProcessorConfig, shared by the whole
+// batch; it moved onto Job so the CLI can resolve an absolute --start
+// timestamp against each file's own creation_time, which lands at a different
+// offset in every clip.
+//
+// The failure this catches is the natural regression: reading the span from
+// somewhere batch-wide again, or from the wrong job. Both leave a run that
+// succeeds and produces output of plausible length -- here, every clip coming
+// out the same length instead of the two different lengths asked for.
+func TestRun_TrimSpanIsPerJob(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first.mp4")
+	second := filepath.Join(dir, "second.mp4")
+	genClip(t, first, 6)
+	genClip(t, second, 6)
+
+	obs := &spanRecordingEffect{}
+	results := Run(context.Background(), []Job{
+		{SourcePath: first, StartSeconds: 1, EndSeconds: 2},  // 1s
+		{SourcePath: second, StartSeconds: 1, EndSeconds: 5}, // 4s
+	}, ProcessorConfig{Effects: []effects.Effect{obs}, OutputDir: dir})
+
+	for i, r := range results {
+		if r.Err != nil {
+			t.Fatalf("job %d: %v", i, r.Err)
+		}
+	}
+
+	want := map[string]float64{
+		"first - spanrecorder.mp4":  1,
+		"second - spanrecorder.mp4": 4,
+	}
+	for name, wantDur := range want {
+		got, ok := obs.durations[name]
+		if !ok {
+			t.Fatalf("no effect run recorded for %q (recorded: %v)", name, obs.durations)
+		}
+		if math.Abs(got-wantDur) > 0.5 {
+			t.Errorf("%s: effect was handed a %.2fs clip, want ~%.2fs -- this job got another job's span",
+				name, got, wantDur)
+		}
 	}
 }

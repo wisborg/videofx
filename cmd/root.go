@@ -20,6 +20,7 @@ import (
 	"videofx/internal/stabilize"
 	"videofx/internal/telemetry"
 	"videofx/internal/video"
+	"videofx/internal/vidio"
 )
 
 var (
@@ -28,8 +29,8 @@ var (
 	outputDir   string
 	suffix      string
 	concurrency int
-	trimStart   float64
-	trimEnd     float64
+	trimStart   string
+	trimEnd     string
 	debugMode   bool
 	logLevel    string
 	rotateDeg   int
@@ -99,10 +100,10 @@ func NewRootCmd() *cobra.Command {
 		"override the filename suffix added before the extension (default: the effect's own, e.g. gocv-stabilizer uses \"gocv-stabilized\" to produce \"clip - gocv-stabilized.mp4\"). Joined to the name with \" - \"; must not contain a path separator")
 	root.Flags().IntVar(&concurrency, "concurrency", 1,
 		"number of videos to process in parallel")
-	root.Flags().Float64Var(&trimStart, "start", 0,
-		"only process from this time (seconds) into each input; default 0 = from the beginning. The clip is trimmed to [--start, --end) up front (a lossless copy; the start snaps to the nearest keyframe), and creation_time is shifted so telemetry still syncs")
-	root.Flags().Float64Var(&trimEnd, "end", 0,
-		"only process up to this time (seconds) of each input; default 0 = to the end. See --start")
+	root.Flags().StringVar(&trimStart, "start", "",
+		"only process from this time into each input; unset = from the beginning. Accepts plain seconds (12, 12.5), an h/m/s duration (12s, 3H, 1h23m45s) or an absolute timestamp WITH a timezone (2026-08-01T09:03:12+01:00), which is resolved per file against that file's creation_time (and --offset, if given). The clip is trimmed to [--start, --end) up front (a lossless copy; the start snaps to the nearest keyframe), and creation_time is shifted so telemetry still syncs")
+	root.Flags().StringVar(&trimEnd, "end", "",
+		"only process up to this time of each input; unset (or 0) = to the end. Takes the same three forms as --start; a relative value is measured from the beginning of the untrimmed clip, not from --start")
 	root.Flags().BoolVar(&debugMode, "debug", false,
 		"print extra diagnostic output that a successful run otherwise keeps to itself: the telemetry and rotate effects' underlying ffmpeg logs (banner, stream info), and gocv-stabilizer's lens calibration under --warp-model rotation. Shorthand for --log-level debug, and it wins if both are given")
 	root.Flags().StringVar(&logLevel, "log-level", "info",
@@ -430,21 +431,176 @@ func validateWarpModel(model string) error {
 	}
 }
 
-// validateTrim rejects a nonsensical --start/--end range up front: negative
-// times, or an --end at or before --start. An --end past the actual clip
-// length isn't an error here (it's clamped per file to each clip's duration in
-// vidio.TrimClip, since durations aren't known until each file is probed).
-func validateTrim(start, end float64) error {
-	if start < 0 {
-		return fmt.Errorf("--start %v is invalid; it must be >= 0", start)
+// validateTrim rejects a nonsensical --start/--end range up front, before any
+// file is opened. Negative times are already rejected by cliutil.ParseTimeSpec,
+// so what is left is the ordering: an --end at or before --start.
+//
+// That check can only be made here when both bounds are the same KIND. A
+// relative bound is an offset into a clip and an absolute one is a wall-clock
+// instant; which of "--start 2026-08-01T09:03:12Z --end 30s" comes first
+// depends on the clip's creation_time, so the mixed case is necessarily
+// deferred to resolveTrimWindow, which has the probed file in hand.
+//
+// An --end past the actual clip length isn't an error either (it's clamped per
+// file to each clip's duration -- see resolveTrimWindow and vidio.TrimClip).
+func validateTrim(start, end cliutil.TimeSpec) error {
+	if !start.Set || !end.Set {
+		return nil
 	}
-	if end < 0 {
-		return fmt.Errorf("--end %v is invalid; it must be >= 0 (0 means to the end)", end)
-	}
-	if end > 0 && end <= start {
-		return fmt.Errorf("--end %v must be greater than --start %v", end, start)
+	switch {
+	case start.IsAbsolute() && end.IsAbsolute():
+		if !end.Absolute.After(start.Absolute) {
+			return fmt.Errorf("--end %s must be after --start %s", end, start)
+		}
+	case !start.IsAbsolute() && !end.IsAbsolute():
+		// A relative --end of 0 keeps its original meaning, "to the end of
+		// the clip", so it is not compared against --start at all.
+		if end.Seconds > 0 && end.Seconds <= start.Seconds {
+			return fmt.Errorf("--end %s must be greater than --start %s", end, start)
+		}
 	}
 	return nil
+}
+
+// resolveTrimWindow turns one file's --start/--end specs into the plain
+// seconds-into-this-clip span that video.Job carries, given that file's probed
+// info and the --offset clock skew. It returns any warnings for the caller to
+// log (it does no logging of its own, so it stays a pure function to test).
+//
+// An absolute timestamp resolves through the same clock model the telemetry
+// sync uses -- fit_time = creation_time + offset + pts, so
+// pts = timestamp - creation_time - offset (see telemetry.Resolve). That makes
+// a timestamp read off a HUD or a watch mean the same instant here as it does
+// there, which is the whole point of honoring --offset.
+//
+// The window is clamped to the clip rather than rejected whenever it overlaps
+// it at all: in a batch, one wall-clock window legitimately spans several
+// clips, catching the tail of one and the head of the next. A clip lying
+// ENTIRELY outside the window is an error instead of a silent whole-clip
+// process, because that is what a wrong timestamp (or a wrong --offset) looks
+// like, and clamping it would hide the mistake behind a successful-looking run.
+func resolveTrimWindow(path string, start, end cliutil.TimeSpec, info vidio.Info, offset time.Duration) (startSec, endSec float64, warnings []string, err error) {
+	// resolve maps one spec to seconds into this clip. The value may fall
+	// outside the clip; the caller sorts out clamping and overlap below.
+	resolve := func(flag string, spec cliutil.TimeSpec) (float64, error) {
+		if !spec.IsAbsolute() {
+			return spec.Seconds, nil
+		}
+		if !info.HasCreationTime {
+			return 0, fmt.Errorf("%s %s is an absolute timestamp, but %s has no creation_time tag to resolve it against; use a relative time (e.g. 90s) for this file", flag, spec, path)
+		}
+		return spec.Absolute.Sub(info.CreationTime).Seconds() - offset.Seconds(), nil
+	}
+
+	absolute := start.IsAbsolute() || end.IsAbsolute()
+	if absolute && info.HasCreationTime && info.CreationTimeNaive {
+		warnings = append(warnings, fmt.Sprintf("%s's creation_time tag has no timezone marker; treating it as UTC, which may be wrong -- the resolved --start/--end could be hours off", path))
+	}
+
+	if start.Set {
+		if startSec, err = resolve("--start", start); err != nil {
+			return 0, 0, warnings, err
+		}
+	}
+	hasEnd := end.Set
+	if hasEnd {
+		if endSec, err = resolve("--end", end); err != nil {
+			return 0, 0, warnings, err
+		}
+		// A relative --end of 0 has always meant "to the end of the clip".
+		// An ABSOLUTE end resolving to 0 or less means something entirely
+		// different -- the window closes before this clip opens -- and falls
+		// through to the no-overlap check below.
+		if !end.IsAbsolute() && endSec <= 0 {
+			hasEnd = false
+			endSec = 0
+		}
+	}
+
+	duration := info.Duration
+	if duration > 0 && (startSec >= duration || (hasEnd && endSec <= 0)) {
+		return 0, 0, warnings, fmt.Errorf("the requested span lies entirely outside %s: the clip covers %s, and the span resolves to %s",
+			path, clipWindow(info), spanDescription(startSec, endSec, hasEnd))
+	}
+	if hasEnd && endSec <= startSec {
+		return 0, 0, warnings, fmt.Errorf("--end %s resolves to %.3fs of %s, at or before --start %s at %.3fs", end, endSec, path, start, startSec)
+	}
+
+	// Clamp to the clip. Silent for relative bounds -- an --end past the clip
+	// length has always been clamped, and the clamp is documented -- but an
+	// absolute bound that had to be moved is worth saying out loud, since the
+	// user asked for a specific instant and is not getting it.
+	if startSec < 0 {
+		if start.IsAbsolute() {
+			warnings = append(warnings, fmt.Sprintf("--start %s is %.3fs before %s begins; starting from the beginning of it instead", start, -startSec, path))
+		}
+		startSec = 0
+	}
+	if hasEnd && duration > 0 && endSec > duration {
+		if end.IsAbsolute() {
+			warnings = append(warnings, fmt.Sprintf("--end %s is %.3fs past the end of %s; running to the end of it instead", end, endSec-duration, path))
+		}
+		endSec = duration
+	}
+
+	return startSec, endSec, warnings, nil
+}
+
+// clipWindow describes what a clip covers, in absolute time when it carries a
+// creation_time and in plain duration when it doesn't -- so the no-overlap
+// error can be read against the timestamp the user actually typed.
+func clipWindow(info vidio.Info) string {
+	if !info.HasCreationTime {
+		return fmt.Sprintf("0.000s..%.3fs (no creation_time)", info.Duration)
+	}
+	start := info.CreationTime
+	end := start.Add(time.Duration(info.Duration * float64(time.Second)))
+	return fmt.Sprintf("%s..%s", start.Format(time.RFC3339), end.Format(time.RFC3339))
+}
+
+// spanDescription renders a resolved span for an error message. An unset --end
+// is spelled out rather than substituted with the clip's duration, which would
+// read as a bound the user asked for.
+func spanDescription(startSec, endSec float64, hasEnd bool) string {
+	if hasEnd {
+		return fmt.Sprintf("%.3fs..%.3fs", startSec, endSec)
+	}
+	return fmt.Sprintf("%.3fs..the end of the clip", startSec)
+}
+
+// applyTrimWindows resolves --start/--end onto every job, probing each file
+// (durations and creation_times are per file, and an absolute timestamp lands
+// at a different offset in each). It returns the jobs that resolved, having
+// logged one error line per file that did not.
+//
+// A file whose span doesn't intersect it is dropped rather than failing the
+// whole batch: in a batch spanning a wall-clock window, the clips outside that
+// window are exactly the ones the user is asking to leave out. They are still
+// counted as failures by the caller's summary, so a --start that misses every
+// file is a non-zero exit and not a quiet no-op.
+func applyTrimWindows(ctx context.Context, jobs []video.Job, start, end cliutil.TimeSpec, offset time.Duration, log *logging.Logger) []video.Job {
+	// A fresh slice rather than a jobs[:0] filter in place: the caller's slice
+	// keeps its own contents, so nothing depends on whether this function
+	// happened to drop anything.
+	kept := make([]video.Job, 0, len(jobs))
+	for _, job := range jobs {
+		info, err := vidio.Probe(ctx, job.SourcePath)
+		if err != nil {
+			log.WithField("file", job.SourcePath).Errorf("cannot resolve --start/--end: %v", err)
+			continue
+		}
+		startSec, endSec, warnings, err := resolveTrimWindow(job.SourcePath, start, end, info, offset)
+		for _, w := range warnings {
+			log.Warnf("%s", w)
+		}
+		if err != nil {
+			log.WithField("file", job.SourcePath).Errorf("%v", err)
+			continue
+		}
+		job.StartSeconds, job.EndSeconds = startSec, endSec
+		kept = append(kept, job)
+	}
+	return kept
 }
 
 // validateSRTOptions rejects an unknown --srt-format up front (rather than
@@ -703,7 +859,15 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	if err := validateSRTOptions(srtFormat, srtSidecar); err != nil {
 		return err
 	}
-	if err := validateTrim(trimStart, trimEnd); err != nil {
+	startSpec, err := cliutil.ParseTimeSpec(trimStart)
+	if err != nil {
+		return fmt.Errorf("--start %w", err)
+	}
+	endSpec, err := cliutil.ParseTimeSpec(trimEnd)
+	if err != nil {
+		return fmt.Errorf("--end %w", err)
+	}
+	if err := validateTrim(startSpec, endSpec); err != nil {
 		return err
 	}
 	if err := validateHUDLayout(hudLayout); err != nil {
@@ -742,16 +906,23 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	for i, path := range args {
 		jobs[i] = video.Job{SourcePath: path}
 	}
+	// The trim span is resolved per file, before any worker starts: --start
+	// and --end may be absolute timestamps, which land at a different offset
+	// in each clip, and a file the span misses entirely is reported here
+	// rather than half a batch later. Files with no span asked for skip the
+	// probe entirely, so the default path costs nothing.
+	if startSpec.Set || endSpec.Set {
+		offset := time.Duration(offsetSeconds * float64(time.Second))
+		jobs = applyTrimWindows(cmd.Context(), jobs, startSpec, endSpec, offset, log)
+	}
 
 	cfg := video.ProcessorConfig{
-		Effects:      effs,
-		Strength:     strength,
-		OutputDir:    outputDir,
-		Suffix:       suffix,
-		Concurrency:  concurrency,
-		StartSeconds: trimStart,
-		EndSeconds:   trimEnd,
-		Log:          log,
+		Effects:     effs,
+		Strength:    strength,
+		OutputDir:   outputDir,
+		Suffix:      suffix,
+		Concurrency: concurrency,
+		Log:         log,
 	}
 
 	// Stream progress as the batch runs rather than printing everything at
@@ -765,8 +936,13 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	// --log-level warn able to silence progress while keeping warnings. That
 	// also puts the OK line on stderr with everything else, where it used to
 	// go to stdout.
-	total := len(jobs)
-	completed := 0
+	//
+	// The counter is denominated in INPUT FILES, not jobs, and starts at
+	// however many files applyTrimWindows already rejected -- so a batch where
+	// one file fell outside the --start/--end span still counts up to the same
+	// total the final summary reports.
+	total := len(args)
+	completed := total - len(jobs)
 	cfg.OnStart = func(job video.Job) {
 		log.WithField("file", job.SourcePath).Infof("processing")
 	}
@@ -785,7 +961,10 @@ func runRoot(cmd *cobra.Command, args []string) error {
 
 	results := video.Run(cmd.Context(), jobs, cfg)
 
-	failed := 0
+	// Files applyTrimWindows dropped count as failures too (their error was
+	// already logged): a --start that resolves outside every input must exit
+	// non-zero, not report a successful run that processed nothing.
+	failed := total - len(results)
 	for _, r := range results {
 		if r.Err != nil {
 			failed++
@@ -793,7 +972,7 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	}
 
 	if failed > 0 {
-		return fmt.Errorf("%d of %d file(s) failed", failed, len(results))
+		return fmt.Errorf("%d of %d file(s) failed", failed, total)
 	}
 	return nil
 }

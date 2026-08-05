@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -12,10 +15,13 @@ import (
 	"github.com/spf13/pflag"
 
 	"videofx/internal/calibrate"
+	"videofx/internal/cliutil"
 	"videofx/internal/effects"
 	"videofx/internal/logging"
 	"videofx/internal/stabilize"
 	"videofx/internal/telemetry"
+	"videofx/internal/video"
+	"videofx/internal/vidio"
 )
 
 func TestWarnTelemetryNotLast(t *testing.T) {
@@ -133,25 +139,172 @@ func TestValidateZoomTransition(t *testing.T) {
 	}
 }
 
+// TestValidateTrim covers the up-front ordering check. The two forms that
+// can't be compared without a file -- one bound absolute, the other relative --
+// must pass here rather than be guessed at; resolveTrimWindow catches them per
+// file, and TestResolveTrimWindow covers that.
 func TestValidateTrim(t *testing.T) {
 	cases := []struct {
 		name       string
-		start, end float64
+		start, end string
 		wantErr    bool
 	}{
-		{"defaults (whole video)", 0, 0, false},
-		{"start only", 5, 0, false},
-		{"start and end", 5, 10, false},
-		{"end only", 0, 10, false},
-		{"negative start", -1, 0, true},
-		{"negative end", 0, -1, true},
-		{"end == start", 5, 5, true},
-		{"end < start", 8, 3, true},
+		{"defaults (whole video)", "", "", false},
+		{"start only", "5", "", false},
+		{"start and end", "5", "10", false},
+		{"end only", "", "10", false},
+		{"explicit 0 end still means to the end", "5", "0", false},
+		{"end == start", "5", "5", true},
+		{"end < start", "8", "3", true},
+
+		{"units, ordered", "1m", "1h", false},
+		{"units, end before start", "1h", "1m", true},
+
+		{"timestamps, ordered", "2026-08-01T09:00:00Z", "2026-08-01T09:10:00Z", false},
+		{"timestamps, end before start", "2026-08-01T09:10:00Z", "2026-08-01T09:00:00Z", true},
+		{"timestamps, end == start", "2026-08-01T09:00:00Z", "2026-08-01T09:00:00Z", true},
+
+		// Mixed kinds: not decidable here, whichever way round they are.
+		{"absolute start, relative end", "2026-08-01T09:10:00Z", "30s", false},
+		{"relative start, absolute end", "30s", "2026-08-01T09:10:00Z", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if err := validateTrim(c.start, c.end); (err != nil) != c.wantErr {
-				t.Errorf("validateTrim(%v, %v) = %v, wantErr %v", c.start, c.end, err, c.wantErr)
+			start, err := cliutil.ParseTimeSpec(c.start)
+			if err != nil {
+				t.Fatalf("parsing --start %q: %v", c.start, err)
+			}
+			end, err := cliutil.ParseTimeSpec(c.end)
+			if err != nil {
+				t.Fatalf("parsing --end %q: %v", c.end, err)
+			}
+			if err := validateTrim(start, end); (err != nil) != c.wantErr {
+				t.Errorf("validateTrim(%q, %q) = %v, wantErr %v", c.start, c.end, err, c.wantErr)
+			}
+		})
+	}
+}
+
+// TestResolveTrimWindow covers turning --start/--end into one file's span.
+//
+// The cases that matter are the ones that fail QUIETLY if the arithmetic is
+// wrong: --offset applied with the wrong sign (a plausible-looking span an
+// offset's worth away from the one asked for), an absolute bound resolving
+// outside the clip (which must clamp or fail, never silently become the whole
+// clip), and a relative --end of 0 keeping its "to the end" meaning while an
+// absolute one resolving to <= 0 means the opposite.
+func TestResolveTrimWindow(t *testing.T) {
+	// A 600s clip whose recording started at 09:00:00Z.
+	creation := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	clip := vidio.Info{Duration: 600, CreationTime: creation, HasCreationTime: true}
+
+	cases := []struct {
+		name       string
+		start, end string
+		info       vidio.Info
+		offset     time.Duration
+		wantStart  float64
+		wantEnd    float64
+		wantWarn   bool
+		wantErr    bool
+	}{{
+		name: "relative bounds pass straight through", start: "90", end: "2m30s", info: clip,
+		wantStart: 90, wantEnd: 150,
+	}, {
+		name: "relative end of 0 still means to the end", start: "90", end: "0", info: clip,
+		wantStart: 90, wantEnd: 0,
+	}, {
+		name:  "relative end past the clip clamps silently, as it always has",
+		start: "90", end: "9999", info: clip,
+		wantStart: 90, wantEnd: 600,
+	}, {
+		name:  "absolute start resolves against creation_time",
+		start: "2026-08-01T09:03:12Z", info: clip,
+		wantStart: 192, wantEnd: 0,
+	}, {
+		// The same instant written in another zone is the same instant.
+		name:  "absolute start in a non-UTC zone",
+		start: "2026-08-01T10:03:12+01:00", info: clip,
+		wantStart: 192, wantEnd: 0,
+	}, {
+		name: "absolute span", start: "2026-08-01T09:01:00Z", end: "2026-08-01T09:02:00Z", info: clip,
+		wantStart: 60, wantEnd: 120,
+	}, {
+		// fit_time = creation_time + offset + pts, so pts = t - creation - offset:
+		// a +10s offset (camera clock reading behind) moves the resolved point
+		// 10s EARLIER in the file, not later.
+		name:  "positive offset shifts the resolved point earlier in the clip",
+		start: "2026-08-01T09:03:12Z", info: clip, offset: 10 * time.Second,
+		wantStart: 182, wantEnd: 0,
+	}, {
+		name:  "negative offset shifts it later",
+		start: "2026-08-01T09:03:12Z", info: clip, offset: -10 * time.Second,
+		wantStart: 202, wantEnd: 0,
+	}, {
+		name: "mixed absolute start and relative end", start: "2026-08-01T09:03:12Z", end: "300", info: clip,
+		wantStart: 192, wantEnd: 300,
+	}, {
+		// The mixed case validateTrim cannot check: this only turns out to be
+		// backwards once the clip is in hand.
+		name: "mixed bounds that resolve backwards", start: "2026-08-01T09:03:12Z", end: "100", info: clip,
+		wantErr: true,
+	}, {
+		name:  "absolute start before the clip clamps to 0 and warns",
+		start: "2026-08-01T08:59:00Z", end: "2026-08-01T09:02:00Z", info: clip,
+		wantStart: 0, wantEnd: 120, wantWarn: true,
+	}, {
+		name:  "absolute end past the clip clamps to its duration and warns",
+		start: "2026-08-01T09:08:00Z", end: "2026-08-01T09:20:00Z", info: clip,
+		wantStart: 480, wantEnd: 600, wantWarn: true,
+	}, {
+		name: "window entirely before the clip", start: "2026-08-01T08:00:00Z", end: "2026-08-01T08:30:00Z", info: clip,
+		wantErr: true,
+	}, {
+		name: "window entirely after the clip", start: "2026-08-01T09:30:00Z", info: clip,
+		wantErr: true,
+	}, {
+		name: "relative start past the end of the clip", start: "700", info: clip,
+		wantErr: true,
+	}, {
+		name:  "absolute bound against a clip with no creation_time",
+		start: "2026-08-01T09:03:12Z", info: vidio.Info{Duration: 600},
+		wantErr: true,
+	}, {
+		name: "relative bounds need no creation_time", start: "90", end: "150",
+		info: vidio.Info{Duration: 600}, wantStart: 90, wantEnd: 150,
+	}, {
+		name:      "a naive creation_time is honored but warned about",
+		start:     "2026-08-01T09:03:12Z",
+		info:      vidio.Info{Duration: 600, CreationTime: creation, HasCreationTime: true, CreationTimeNaive: true},
+		wantStart: 192, wantWarn: true,
+	}}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			start, err := cliutil.ParseTimeSpec(c.start)
+			if err != nil {
+				t.Fatalf("parsing --start %q: %v", c.start, err)
+			}
+			end, err := cliutil.ParseTimeSpec(c.end)
+			if err != nil {
+				t.Fatalf("parsing --end %q: %v", c.end, err)
+			}
+
+			gotStart, gotEnd, warnings, err := resolveTrimWindow("clip.mp4", start, end, c.info, c.offset)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("resolveTrimWindow = %.3f..%.3f, want an error", gotStart, gotEnd)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveTrimWindow: %v", err)
+			}
+			if gotStart != c.wantStart || gotEnd != c.wantEnd {
+				t.Errorf("resolveTrimWindow = %.3f..%.3f, want %.3f..%.3f", gotStart, gotEnd, c.wantStart, c.wantEnd)
+			}
+			if got := len(warnings) > 0; got != c.wantWarn {
+				t.Errorf("warnings = %v, want a warning: %v", warnings, c.wantWarn)
 			}
 		})
 	}
@@ -175,6 +328,98 @@ func TestValidateHUDLayout(t *testing.T) {
 				t.Errorf("validateHUDLayout(%q) = %v, wantErr %v", c.mode, err, c.wantErr)
 			}
 		})
+	}
+}
+
+// genClipAt writes a short clip carrying a specific creation_time, so an
+// absolute --start has something real to resolve against.
+func genClipAt(t *testing.T, path string, seconds int, creation time.Time) {
+	t.Helper()
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc=size=64x48:rate=10:duration="+strconv.Itoa(seconds),
+		"-c:v", "libx264", "-g", "1", "-pix_fmt", "yuv420p",
+		"-metadata", "creation_time="+creation.UTC().Format(time.RFC3339),
+		"-y", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generating clip: %v\n%s", err, out)
+	}
+}
+
+// TestApplyTrimWindows_PerFileResolution is the wiring test for an absolute
+// --start/--end across a batch: one wall-clock window, three real files, each
+// resolving to its own span.
+//
+// This is the behavior that cannot be checked from resolveTrimWindow alone --
+// that every job gets ITS OWN span, and that a file the window misses is
+// dropped rather than processed whole. A regression that resolved once and
+// reused the answer for the batch, or that kept the missed file, still exits 0
+// and still writes plausible-looking output.
+func TestApplyTrimWindows_PerFileResolution(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	dir := t.TempDir()
+	base := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+
+	first := filepath.Join(dir, "first.mp4")   // covers 09:00:00 .. 09:00:06
+	second := filepath.Join(dir, "second.mp4") // covers 09:00:10 .. 09:00:16
+	missed := filepath.Join(dir, "missed.mp4") // covers 09:05:00 .. 09:05:06
+	genClipAt(t, first, 6, base)
+	genClipAt(t, second, 6, base.Add(10*time.Second))
+	genClipAt(t, missed, 6, base.Add(5*time.Minute))
+
+	// 09:00:04 .. 09:00:12 -- the tail of the first clip and the head of the
+	// second, and nothing at all of the third.
+	start, err := cliutil.ParseTimeSpec("2026-08-01T09:00:04Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	end, err := cliutil.ParseTimeSpec("2026-08-01T09:00:12Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	log := logging.New(&buf, logging.LevelInfo).Named("videofx")
+	jobs := []video.Job{{SourcePath: first}, {SourcePath: second}, {SourcePath: missed}}
+	kept := applyTrimWindows(context.Background(), jobs, start, end, 0, log)
+
+	if len(kept) != 2 {
+		t.Fatalf("kept %d job(s), want 2 (the third clip is outside the window): %+v", len(kept), kept)
+	}
+	if kept[0].SourcePath != first || kept[1].SourcePath != second {
+		t.Fatalf("kept the wrong jobs: %+v", kept)
+	}
+	// The first clip is entered 4s in and runs to its own end; the second is
+	// entered at its beginning and left 2s in. Same flags, different spans.
+	if kept[0].StartSeconds != 4 || kept[0].EndSeconds < 5.9 || kept[0].EndSeconds > 6.2 {
+		t.Errorf("first.mp4 span = %.3f..%.3f, want 4.000..~6.000", kept[0].StartSeconds, kept[0].EndSeconds)
+	}
+	if kept[1].StartSeconds != 0 || kept[1].EndSeconds != 2 {
+		t.Errorf("second.mp4 span = %.3f..%.3f, want 0.000..2.000", kept[1].StartSeconds, kept[1].EndSeconds)
+	}
+	if out := buf.String(); !strings.Contains(out, "missed.mp4") {
+		t.Errorf("the dropped file must be reported by name, got:\n%s", out)
+	}
+}
+
+// TestNewRootCmd_TrimFlagsAreStrings pins that --start/--end take the whole
+// grammar (seconds, h/m/s, timestamp) rather than a bare float again, and that
+// their default is "unset" -- not "0", which for --end would be a valid value
+// meaning something else entirely.
+func TestNewRootCmd_TrimFlagsAreStrings(t *testing.T) {
+	flags := NewRootCmd().Flags()
+	for _, name := range []string{"start", "end"} {
+		f := flags.Lookup(name)
+		if f == nil {
+			t.Fatalf("flag --%s not registered", name)
+		}
+		if f.Value.Type() != "string" {
+			t.Errorf("--%s is a %s flag; it must be a string to accept 1h23m45s and timestamps", name, f.Value.Type())
+		}
+		if f.DefValue != "" {
+			t.Errorf("--%s default = %q, want \"\" (unset)", name, f.DefValue)
+		}
 	}
 }
 
