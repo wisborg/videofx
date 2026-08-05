@@ -28,6 +28,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"videofx/internal/vidio"
 )
 
 // DefaultCandidates is the -q:v sweep used when Options.Candidates is empty.
@@ -163,10 +165,29 @@ func pickSuggested(points []Point, target float64) (int, bool) {
 }
 
 // encodeSegment encodes [StartSeconds, StartSeconds+Duration] of src to out
-// with hevc_videotoolbox at -q:v q -- the same encoder and quality control
-// the real gocv-stabilizer render uses (internal/vidio.encoderArgs), so the
-// measured number transfers to that pipeline.
+// with hevc_videotoolbox at -q:v q. The encoder settings come from
+// vidio.VideoEncodeArgs, the same builder the real gocv-stabilizer render uses,
+// so the measured number transfers to that pipeline by construction rather than
+// by two copies happening to agree.
 func encodeSegment(ctx context.Context, src, out string, q int, opts Options) error {
+	if out, err := runFFmpeg(ctx, encodeSegmentArgs(src, out, q, opts)...); err != nil {
+		return fmt.Errorf("%w\n%s", err, strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// encodeSegmentArgs builds encodeSegment's command line. Split out as a pure
+// function so it can be asserted on, following the same shape as
+// vidio.encoderArgs and the effects' own argv builders -- calibrate was the one
+// ffmpeg-invoking site in the tree with no argv test, and it is the one whose
+// entire output is a number the user then trusts.
+//
+// The encoder settings come from vidio.VideoEncodeArgs rather than being
+// written out again here. That is the whole point: this measures a quality
+// value to hand back to a real render, so if the two encoder configurations
+// ever diverged, calibration would confidently recommend a --quality that does
+// not transfer to the pipeline it is supposed to describe.
+func encodeSegmentArgs(src, out string, q int, opts Options) []string {
 	args := []string{"-y", "-hide_banner"}
 	if opts.StartSeconds > 0 {
 		args = append(args, "-ss", ftoa(opts.StartSeconds))
@@ -175,15 +196,9 @@ func encodeSegment(ctx context.Context, src, out string, q int, opts Options) er
 		"-t", ftoa(opts.Duration),
 		"-i", src,
 		"-an",
-		"-c:v", "hevc_videotoolbox",
-		"-q:v", strconv.Itoa(q),
-		"-tag:v", "hvc1",
-		out,
 	)
-	if out, err := runFFmpeg(ctx, args...); err != nil {
-		return fmt.Errorf("%w\n%s", err, strings.TrimSpace(out))
-	}
-	return nil
+	args = append(args, vidio.VideoEncodeArgs(q)...)
+	return append(args, vidio.PositionalPath(out))
 }
 
 // scoreVMAF computes distorted's VMAF against the same source segment. Both
@@ -192,6 +207,18 @@ func encodeSegment(ctx context.Context, src, out string, q int, opts Options) er
 // segment, the distorted input (already just that segment) is read whole.
 // libvmaf's first pad is the distorted stream, the second the reference.
 func scoreVMAF(ctx context.Context, src, distorted string, opts Options) (float64, error) {
+	out, err := runFFmpeg(ctx, vmafArgs(src, distorted, opts)...)
+	if err != nil {
+		return 0, fmt.Errorf("%w\n%s", err, strings.TrimSpace(out))
+	}
+	return parseVMAFScore(out)
+}
+
+// vmafArgs builds scoreVMAF's command line. Split out for the same reason as
+// encodeSegmentArgs: the pad order and the setpts resets are the difference
+// between a real measurement and a plausible wrong number, and neither is
+// visible in the score itself.
+func vmafArgs(src, distorted string, opts Options) []string {
 	filter := fmt.Sprintf(
 		"[0:v]setpts=PTS-STARTPTS[r];[1:v]setpts=PTS-STARTPTS[d];[d][r]libvmaf=n_threads=%d",
 		opts.Threads)
@@ -199,18 +226,13 @@ func scoreVMAF(ctx context.Context, src, distorted string, opts Options) (float6
 	if opts.StartSeconds > 0 {
 		args = append(args, "-ss", ftoa(opts.StartSeconds))
 	}
-	args = append(args,
+	return append(args,
 		"-t", ftoa(opts.Duration),
 		"-i", src,
 		"-i", distorted,
 		"-lavfi", filter,
 		"-f", "null", "-",
 	)
-	out, err := runFFmpeg(ctx, args...)
-	if err != nil {
-		return 0, fmt.Errorf("%w\n%s", err, strings.TrimSpace(out))
-	}
-	return parseVMAFScore(out)
 }
 
 var vmafScoreRe = regexp.MustCompile(`VMAF score:\s*([0-9]+(?:\.[0-9]+)?)`)

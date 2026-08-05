@@ -106,23 +106,38 @@ func encoderArgs(cfg EncoderConfig) []string {
 			"-map_metadata:s:v:0", "1:s:v:0",
 		)
 	}
-	// -tag:v hvc1 is not cosmetic. ffmpeg's default HEVC-in-MP4 tag is
-	// "hev1", which Apple's players (QuickTime, Finder preview, Photos,
-	// Safari) refuse to render — they play the audio and show nothing,
-	// looking exactly like a video-less file even though the frames are
-	// present and decode fine everywhere else. "hvc1" is the tag Apple
-	// requires, and is what the source footage itself uses. See
-	// https://trac.ffmpeg.org/ticket/6389.
-	args = append(args, "-c:v", "hevc_videotoolbox")
-	// -q:v engages VideoToolbox constant-quality mode (see
-	// EncoderConfig.Quality). It must follow -c:v so it binds to this
-	// encoder; omitted when Quality is 0 so the default-rate-control path is
-	// exactly the pre-existing argument list.
-	if cfg.Quality > 0 {
-		args = append(args, "-q:v", strconv.Itoa(cfg.Quality))
-	}
-	args = append(args, "-tag:v", "hvc1", PositionalPath(cfg.OutputPath))
+	args = append(args, VideoEncodeArgs(cfg.Quality)...)
+	args = append(args, PositionalPath(cfg.OutputPath))
 	return args
+}
+
+// VideoEncodeArgs returns the video encoder selection, its quality control and
+// its container tag: the settings that decide what the output actually looks
+// like, as opposed to how frames are fed in or what metadata rides along.
+//
+// It is exported and shared because `videofx calibrate` has to encode with the
+// SAME configuration this renderer uses -- its entire product is a --quality
+// number the user then passes back to a real render, and a number measured
+// against a different encoder does not transfer. Keeping one builder makes that
+// agreement structural instead of something a test has to keep noticing.
+//
+// -tag:v hvc1 is not cosmetic. ffmpeg's default HEVC-in-MP4 tag is "hev1",
+// which Apple's players (QuickTime, Finder preview, Photos, Safari) refuse to
+// render — they play the audio and show nothing, looking exactly like a
+// video-less file even though the frames are present and decode fine everywhere
+// else. "hvc1" is the tag Apple requires, and is what the source footage itself
+// uses. See https://trac.ffmpeg.org/ticket/6389.
+//
+// -q:v engages VideoToolbox constant-quality mode (see EncoderConfig.Quality).
+// It must follow -c:v so it binds to this encoder; it is omitted when quality
+// is 0 so the default-rate-control path is exactly the pre-existing argument
+// list.
+func VideoEncodeArgs(quality int) []string {
+	args := []string{"-c:v", "hevc_videotoolbox"}
+	if quality > 0 {
+		args = append(args, "-q:v", strconv.Itoa(quality))
+	}
+	return append(args, "-tag:v", "hvc1")
 }
 
 // OpenEncoder starts an ffmpeg subprocess configured per cfg and returns
