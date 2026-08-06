@@ -206,6 +206,21 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	if err != nil {
 		return err
 	}
+	// Every error path out of this function has to close the encoder, or its
+	// ffmpeg is left blocked on an open stdin pipe -- holding a write handle on
+	// an output file the caller has already deleted -- until the whole process
+	// exits. One deferred close discharges that obligation for all of them at
+	// once, including the ones that do not exist yet. This is the same shape,
+	// for the same reason, as stabilize.Render's; read its comment for the leak
+	// that shape was introduced to make impossible, having already happened
+	// once there when the per-return calls were counted by hand.
+	//
+	// The successful path still calls Close explicitly, below, because there its
+	// error matters -- that is where ffmpeg finalizes the container, and a
+	// failure there means the output is not a valid file. OverlayEncoder.Close
+	// is idempotent via closeOnce and returns the same result each time, so the
+	// two calls do not conflict.
+	defer func() { _ = enc.Close() }()
 
 	// Render the HUD's static layer (route outline, elevation profile, ticks,
 	// axis labels) ONCE; those polyline strokes and filled bands at 4K are the
@@ -221,7 +236,6 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	for i := 0; i < frameCount; i++ {
 		if i%256 == 0 {
 			if err := ctx.Err(); err != nil {
-				_ = enc.Close()
 				return err
 			}
 		}
@@ -246,7 +260,6 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 			Course:      course,
 		})
 		if err := enc.WriteFrame(img); err != nil {
-			_ = enc.Close()
 			return fmt.Errorf("rendering frame %d: %w", i, err)
 		}
 	}
