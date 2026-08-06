@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"videofx/internal/logging"
@@ -357,11 +358,20 @@ func srtSidecarPath(outputPath string) string {
 // Close's error is checked rather than deferred away: these are buffered
 // writes, so a full disk typically fails at the final flush, and ignoring it
 // reports a truncated GPX or SRT as a success.
+//
+// The open refuses to follow a symlink. Because the sidecar path is derived,
+// not Resolve'd, it is the one output this program will write over -- so a
+// symlink planted at "clip - telemetry.gpx" would have had its TARGET truncated
+// and filled with GPX instead. Planting it needs write access to the output
+// directory, which already allows replacing the video, so this matters only for
+// a shared or world-writable --output-dir; O_NOFOLLOW costs nothing and removes
+// the case, turning it into an ELOOP error rather than silent collateral
+// damage. (This project is macOS/Unix only, so the syscall constant is fine.)
 func writeSidecar(log *logging.Logger, kind, path string, render func(io.Writer) error) error {
 	if _, err := os.Stat(path); err == nil {
 		log.Warnf("overwriting an existing %s sidecar: %s", kind, filepath.Base(path))
 	}
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o644)
 	if err != nil {
 		return fmt.Errorf("creating %s sidecar %s: %w", kind, path, err)
 	}

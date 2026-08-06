@@ -754,6 +754,50 @@ func TestWriteSidecar_AnnouncesAnOverwrite(t *testing.T) {
 		}
 	})
 
+	// A symlink occupying the sidecar's name must not become a way to write
+	// through to its target. The sidecar path is the one output this program
+	// deliberately does not run through naming.Resolve (see above), so it is
+	// also the one that will happily write over what is already there -- and
+	// os.Create follows a symlink, so "clip - telemetry.gpx" -> somewhere else
+	// meant truncating and filling somewhere else. It needs write access to the
+	// output directory, which already allows replacing the video, so this is
+	// only interesting for a shared --output-dir; the fix costs one open flag.
+	t.Run("a symlink at the sidecar path is refused, not followed", func(t *testing.T) {
+		linkDir := t.TempDir()
+		target := filepath.Join(linkDir, "important.txt")
+		const treasure = "a file the user cares about\n"
+		if err := os.WriteFile(target, []byte(treasure), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(linkDir, "clip - telemetry.gpx")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+
+		var buf bytes.Buffer
+		log := logging.New(&buf, logging.LevelInfo)
+		err := writeGPXFile(log, link, points, telemetry.DefaultFieldOptions())
+		if err == nil {
+			t.Error("writing through a symlinked sidecar path succeeded, want a refusal")
+		}
+
+		// The assertion that matters: whatever happened, the symlink's target
+		// still holds what it held.
+		got, readErr := os.ReadFile(target)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if string(got) != treasure {
+			t.Errorf("the symlink's target was written through: it now holds %d bytes starting %q",
+				len(got), string(got[:min(40, len(got))]))
+		}
+		// The overwrite warning must still fire on a symlink -- something is
+		// occupying the name, which is exactly what it reports.
+		if !strings.Contains(buf.String(), "overwriting an existing GPX sidecar") {
+			t.Errorf("no overwrite warning for an occupied sidecar name; log was: %q", buf.String())
+		}
+	})
+
 	// The sidecar's name must still be derived from the video, not resolved
 	// away from it: this is the property that makes it a sidecar at all.
 	t.Run("the path still tracks the video's stem", func(t *testing.T) {

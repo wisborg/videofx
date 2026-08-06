@@ -131,6 +131,57 @@ func TestResolve_RejectsSlugWithPathSeparator(t *testing.T) {
 	}
 }
 
+// TestResolve_SymlinkOccupiesTheName covers what "existing" has to mean for a
+// package whose stated promise is that it never overwrites an existing file.
+//
+// A symlink occupies a name whether or not its target is there, and the
+// dangling case is the one that bites: os.Stat resolves the link and reports
+// "does not exist", so the name looks free, Resolve hands it out, and ffmpeg --
+// which follows the link when it opens the path for writing -- creates and
+// fills the link's TARGET, somewhere else entirely. The counter exists exactly
+// so a name in use is left alone.
+func TestResolve_SymlinkOccupiesTheName(t *testing.T) {
+	tests := []struct {
+		name    string
+		dangles bool
+	}{
+		// A symlink to a real file: os.Stat sees the target, so this case was
+		// already handled. Here so the fix is not free to answer "taken" to
+		// everything.
+		{name: "symlink to an existing file"},
+		// A symlink to nothing: the case os.Stat got wrong.
+		{name: "dangling symlink", dangles: true},
+	}
+
+	for _, tt := range tests {
+		dir := t.TempDir()
+		input := filepath.Join(dir, "clip.mp4")
+		occupied := filepath.Join(dir, "clip - stabilized.mp4")
+
+		target := filepath.Join(dir, "target.mp4")
+		if !tt.dangles {
+			mustCreate(t, target)
+		}
+		if err := os.Symlink(target, occupied); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := Resolve(input, []string{"stabilized"}, "")
+		if err != nil {
+			t.Errorf("%s: Resolve returned error: %v", tt.name, err)
+			continue
+		}
+		if got == occupied {
+			t.Errorf("%s: Resolve handed out %q, which is a symlink -- writing there writes %q",
+				tt.name, got, target)
+		}
+		if want := filepath.Join(dir, "clip - stabilized - 1.mp4"); got != want {
+			t.Errorf("%s: Resolve = %q, want %q (the counter should step past the occupied name)",
+				tt.name, got, want)
+		}
+	}
+}
+
 func mustCreate(t *testing.T, path string) {
 	t.Helper()
 	f, err := os.Create(path)

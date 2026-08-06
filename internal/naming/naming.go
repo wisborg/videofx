@@ -127,7 +127,16 @@ func resolve(inputPath string, slugs []string, outputDir string, claimed map[str
 	return "", fmt.Errorf("naming: could not find a free filename for %q after %d attempts", inputPath, maxAttempts)
 }
 
+// exists reports whether anything at all occupies path.
+//
+// Lstat, not Stat: this package's promise is that it never hands out a name
+// something else is already using, and a symlink uses the name whether or not
+// its target is there. os.Stat resolves the link, so a DANGLING symlink at a
+// derived output name reported "free"; the name was handed out, and ffmpeg --
+// which follows the link on open -- created and wrote the link's target
+// instead, at whatever path that pointed to. Lstat answers the question this
+// package is actually asking.
 func exists(path string) bool {
-	_, err := os.Stat(path)
+	_, err := os.Lstat(path)
 	return err == nil
 }
