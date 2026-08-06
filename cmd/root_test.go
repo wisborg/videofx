@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -506,6 +507,187 @@ func TestApplyTrimWindows_PerFileResolution(t *testing.T) {
 	}
 	if out := buf.String(); !strings.Contains(out, "missed.mp4") {
 		t.Errorf("the dropped file must be reported by name, got:\n%s", out)
+	}
+}
+
+// runRootCmd executes the whole root command the way main does, returning its
+// error and whatever it logged. A fresh NewRootCmd per call is what resets the
+// package-level flag variables: pflag assigns each default at registration, so
+// building the command again is the only thing standing between one test's
+// --offset and the next test's.
+func runRootCmd(t *testing.T, args ...string) (error, string) {
+	t.Helper()
+	root := NewRootCmd()
+	var logged bytes.Buffer
+	root.SetArgs(args)
+	root.SetOut(&logged)
+	root.SetErr(&logged)
+	return root.ExecuteContext(context.Background()), logged.String()
+}
+
+// soleOutput returns the duration of the one file in dir, failing if there is
+// not exactly one. Reading the directory rather than predicting the output
+// filename keeps this test about the trim and not about naming.Resolve.
+func soleOutput(t *testing.T, dir string) float64 {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading output dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("output dir holds %d file(s), want exactly 1: %v", len(entries), entries)
+	}
+	return probeDuration(t, filepath.Join(dir, entries[0].Name()))
+}
+
+func probeDuration(t *testing.T, path string) float64 {
+	t.Helper()
+	out, err := exec.Command("ffprobe", "-v", "error",
+		"-show_entries", "format=duration", "-of", "csv=p=0", path).Output()
+	if err != nil {
+		t.Fatalf("ffprobe %s: %v", path, err)
+	}
+	secs, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+	if err != nil {
+		t.Fatalf("parsing duration of %s: %v", path, err)
+	}
+	return secs
+}
+
+// TestRunRoot_TrimSpanReachesTheOutput is the end-to-end wiring test for
+// --start/--end/--offset: it runs the actual command and measures the actual
+// output file, because every layer BELOW this one is already covered and the
+// join between them was not.
+//
+// resolveTrimWindow proves the arithmetic, applyTrimWindows proves the
+// per-file resolution, and processOne proves the trim runs before the effects.
+// What none of them can see is runRoot's four-line hand-off -- and each of the
+// plausible ways to break it produces a valid video of the wrong length and a
+// zero exit status, which is invisible to any assertion about errors:
+//
+//   - the guard reading && instead of || silently ignores --start on its own
+//     (the same bug that was fixed one layer down in processOne);
+//   - dropping the "jobs =" reassignment discards every resolved span while
+//     still logging as though it had applied them;
+//   - passing 0 instead of offset silently stops --offset shifting a timestamp;
+//   - building the offset as time.Duration(offsetSeconds) * time.Second
+//     truncates the fractional part of a flag documented as fractional.
+//
+// The rotate effect is deliberate: it is a lossless metadata-only ffmpeg call,
+// so the output duration is the trim's duration and nothing else, and no
+// OpenCV or encoder is involved. genClipAt writes with -g 1, so every frame is
+// a keyframe and the "start snaps to the nearest keyframe" copy lands exactly
+// where it was asked to -- which is what lets these bounds be tight.
+func TestRunRoot_TrimSpanReachesTheOutput(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	src := filepath.Join(t.TempDir(), "clip.mp4")
+	// 6 seconds long, covering 09:00:00 .. 09:00:06.
+	genClipAt(t, src, 6, time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC))
+
+	cases := []struct {
+		name string
+		args []string
+		want float64
+		why  string
+	}{
+		{
+			name: "relative start alone",
+			args: []string{"--start", "2s"},
+			want: 4,
+			why:  "--start with no --end must still trim; this is what an && guard breaks",
+		},
+		{
+			name: "clock start alone",
+			args: []string{"--start", "0:02"},
+			want: 4,
+			why:  "the clock grammar has to survive the whole way down, not just the parser",
+		},
+		{
+			name: "relative end alone",
+			args: []string{"--end", "2s"},
+			want: 2,
+			why:  "--end with no --start is the other half the guard can drop",
+		},
+		{
+			name: "absolute start",
+			args: []string{"--start", "2026-08-01T09:00:02Z"},
+			want: 4,
+			why:  "resolved against the clip's own creation_time",
+		},
+		{
+			name: "absolute start with fractional offset",
+			args: []string{"--start", "2026-08-01T09:00:04Z", "--offset", "2.5"},
+			want: 4.5,
+			why:  "pts = timestamp - creation - offset = 4 - 2.5 = 1.5s in, so 4.5s out",
+		},
+		{
+			name: "both bounds",
+			args: []string{"--start", "1s", "--end", "3s"},
+			want: 2,
+			why:  "--end is measured from the start of the untrimmed clip, not from --start",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			outDir := t.TempDir()
+			args := append([]string{"--effect", "rotate", "--rotate", "90",
+				"--output-dir", outDir}, c.args...)
+			err, logged := runRootCmd(t, append(args, src)...)
+			if err != nil {
+				t.Fatalf("videofx %v = %v\n%s", args, err, logged)
+			}
+			got := soleOutput(t, outDir)
+			// One frame at this clip's 10fps is 0.1s; anything inside that is
+			// container rounding, anything outside is a span that did not
+			// arrive.
+			if got < c.want-0.15 || got > c.want+0.15 {
+				t.Errorf("output is %.3fs, want %.3fs (%s)\nsource is 6s; a full-length output means the span never reached the job", got, c.want, c.why)
+			}
+		})
+	}
+}
+
+// TestRunRoot_SpanMissingEveryFileExitsNonZero pins the promise the README
+// makes in as many words: "a span that misses everything exits non-zero".
+//
+// The accounting behind it is arithmetic over three numbers in runRoot, none
+// of it covered. Both plausible slips -- counting jobs instead of input files,
+// or dropping the skipped files from the failure tally -- leave the error
+// lines on stderr exactly as they are now and change only the exit status,
+// which is the one thing a shell script actually reads.
+func TestRunRoot_SpanMissingEveryFileExitsNonZero(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	dir, outDir := t.TempDir(), t.TempDir()
+	base := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	first := filepath.Join(dir, "first.mp4")
+	second := filepath.Join(dir, "second.mp4")
+	genClipAt(t, first, 6, base)
+	genClipAt(t, second, 6, base.Add(10*time.Second))
+
+	// An hour after both clips end.
+	err, logged := runRootCmd(t, "--effect", "rotate", "--rotate", "90",
+		"--output-dir", outDir,
+		"--start", "2026-08-01T10:00:00Z", "--end", "2026-08-01T10:00:05Z",
+		first, second)
+
+	if err == nil {
+		t.Fatalf("a span outside every input exited 0; a scripted batch would read that as success\n%s", logged)
+	}
+	if !strings.Contains(err.Error(), "2 of 2") {
+		t.Errorf("error = %q, want both skipped files counted (\"2 of 2\")", err)
+	}
+	// The distinguishing check: "correctly skipped" and "processed anyway and
+	// then miscounted" produce the same exit status but different directories.
+	entries, readErr := os.ReadDir(outDir)
+	if readErr != nil {
+		t.Fatalf("reading output dir: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Errorf("output dir holds %d file(s), want none: a skipped file must not be processed", len(entries))
 	}
 }
 
