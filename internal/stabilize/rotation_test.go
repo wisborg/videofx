@@ -128,21 +128,22 @@ func TestAttenuateRotation(t *testing.T) {
 
 func TestMinZoomForRotation(t *testing.T) {
 	lens := Lens{Kind: LensEquisolid, Focal: 500, CX: 480, CY: 360}
-	if z := minZoomForRotation(identityQuat, lens, 960, 720, Vec3{}); z != 1.0 {
+	canvas := newRotationCanvas(960, 720)
+	if z := minZoomForRotation(identityQuat, lens, canvas, Vec3{}); z != 1.0 {
 		t.Errorf("identity correction needs zoom %g, want 1.0", z)
 	}
 	prev := 1.0
 	for _, ang := range []float64{0.01, 0.02, 0.04} {
-		z := minZoomForRotation(quatExp(Vec3{0, ang, 0}), lens, 960, 720, Vec3{})
+		z := minZoomForRotation(quatExp(Vec3{0, ang, 0}), lens, canvas, Vec3{})
 		if z <= prev {
 			t.Errorf("zoom for a %g rad correction is %g, not more than %g for the smaller one", ang, z, prev)
 		}
 		// And it must actually be sufficient, with nothing to spare worth
 		// speaking of -- this is the containment guarantee the crop rests on.
-		if !rotationFitsAtZoom(quatExp(Vec3{0, ang, 0}), lens, 960, 720, z, Vec3{}) {
+		if !rotationFitsAtZoom(quatExp(Vec3{0, ang, 0}), lens, canvas, z, Vec3{}) {
 			t.Errorf("computed zoom %g does not actually fit a %g rad correction", z, ang)
 		}
-		if rotationFitsAtZoom(quatExp(Vec3{0, ang, 0}), lens, 960, 720, z*0.99, Vec3{}) {
+		if rotationFitsAtZoom(quatExp(Vec3{0, ang, 0}), lens, canvas, z*0.99, Vec3{}) {
 			t.Errorf("zoom %g for a %g rad correction is more than needed", z, ang)
 		}
 		prev = z
@@ -168,7 +169,7 @@ func TestPlanRotationZoomEnvelopeCoversEveryFrame(t *testing.T) {
 		t.Fatalf("got %d zooms for %d corrections", len(plan.Zooms), len(corr))
 	}
 	for i := range corr {
-		if !rotationFitsAtZoom(plan.Corrections[i], lens, 960, 720, plan.Zooms[i], Vec3{}) {
+		if !rotationFitsAtZoom(plan.Corrections[i], lens, newRotationCanvas(960, 720), plan.Zooms[i], Vec3{}) {
 			t.Fatalf("frame %d exposes a border at its planned zoom %g", i, plan.Zooms[i])
 		}
 	}
@@ -198,9 +199,45 @@ func TestPlanRotationZoomHonorsMaxZoom(t *testing.T) {
 		if plan.Zooms[i] > cap+1e-9 {
 			t.Errorf("frame %d rendered at zoom %g, above the cap %g", i, plan.Zooms[i], cap)
 		}
-		if !rotationFitsAtZoom(plan.Corrections[i], lens, 960, 720, plan.Zooms[i], Vec3{}) {
+		if !rotationFitsAtZoom(plan.Corrections[i], lens, newRotationCanvas(960, 720), plan.Zooms[i], Vec3{}) {
 			t.Errorf("frame %d exposes a border despite being clamped", i)
 		}
+	}
+}
+
+// BenchmarkPlanRotationZoom exists to keep the crop planner's allocation
+// behaviour visible, because its cost is structural rather than obvious.
+//
+// The planner runs a bisection per frame -- 40 iterations in minZoomForRotation
+// and 30 more in scaleBackRotationToZoom whenever the cap binds -- and each
+// iteration is one full containment test over 4*rotationBoundarySamples points.
+// Whether those points are built once per clip or once per containment test is
+// invisible in the geometry and worth two orders of magnitude in allocation, so
+// it is measured here rather than asserted in a comment.
+//
+// The fixture is shaped like real footage the cap actually bites on: a calm
+// clip with a shaky burst, an eased envelope, and a maxZoom low enough that the
+// burst frames are scaled back, so both bisections are counted.
+//
+// Measured on an M1 Pro when the boundary was hoisted out of the bisections:
+// 14525 -> 5 allocs/op and 44.6 MB -> 18.6 KB/op for these 300 frames. Wall
+// clock moved much less (~201 -> ~195 ms/op, i.e. the GC traffic, not the point
+// arithmetic), so read this benchmark as an allocation guard rather than a
+// speed one -- what it catches is the boundary construction sliding back inside
+// the loop, not a slow containment test.
+func BenchmarkPlanRotationZoom(b *testing.B) {
+	lens := Lens{Kind: LensEquisolid, Focal: 500, CX: 480, CY: 360}
+	corr := make([]Quat, 300)
+	for i := range corr {
+		ang := 0.002
+		if i >= 100 && i < 160 {
+			ang = 0.06
+		}
+		corr[i] = quatExp(Vec3{0, ang, 0})
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		PlanRotationZoom(corr, lens, 960, 720, 1.05, 15, nil)
 	}
 }
 

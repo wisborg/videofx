@@ -279,12 +279,12 @@ func TestSphereBackwardMapNoRSIsUnchanged(t *testing.T) {
 func TestRotationZoomAccountsForRollingShutter(t *testing.T) {
 	lens := Lens{Kind: LensEquisolid, Focal: 500, CX: 480, CY: 360}
 	q := quatExp(Vec3{0, 0.01, 0})
-	plain := minZoomForRotation(q, lens, 960, 720, Vec3{})
-	withRS := minZoomForRotation(q, lens, 960, 720, Vec3{0.01, 0.008, 0})
+	plain := minZoomForRotation(q, lens, newRotationCanvas(960, 720), Vec3{})
+	withRS := minZoomForRotation(q, lens, newRotationCanvas(960, 720), Vec3{0.01, 0.008, 0})
 	if withRS < plain {
 		t.Errorf("rectified frame asked for LESS crop (%g) than unrectified (%g)", withRS, plain)
 	}
-	if !rotationFitsAtZoom(q, lens, 960, 720, withRS, Vec3{0.01, 0.008, 0}) {
+	if !rotationFitsAtZoom(q, lens, newRotationCanvas(960, 720), withRS, Vec3{0.01, 0.008, 0}) {
 		t.Error("the planned zoom does not actually contain the rectified frame")
 	}
 }

@@ -214,50 +214,68 @@ func attenuateRotation(q Quat, alpha float64) Quat {
 // output maps inside the source rectangle the interior does too.
 const rotationBoundarySamples = 48
 
-// rotationFitsAtZoom reports whether output frame content warped by correction
-// q, at the given zoom, samples entirely from inside the w x h source frame.
-func rotationFitsAtZoom(q Quat, lens Lens, w, h int, zoom float64, rsRot Vec3) bool {
-	inv := q.Matrix().Transpose()
+// rotationCanvas is one clip's containment-test geometry: the source frame's
+// dimensions and the sampled output boundary those dimensions imply.
+//
+// The two travel together as one value rather than as (w, h, pts) arguments for
+// two reasons. The boundary is derived ENTIRELY from w, h and
+// rotationBoundarySamples, all fixed for a clip, so building it per containment
+// test was pure waste -- the bisections below run it up to 70 times per frame,
+// each rebuilding the same 192 points. And once the points are hoisted out, a
+// caller passing points computed for different dimensions than the bounds check
+// uses would silently test the wrong rectangle and hand back a crop that leaves
+// a border; keeping them in one value constructed by one function makes that
+// mismatch unrepresentable rather than merely unlikely.
+type rotationCanvas struct {
+	w, h     float64
+	boundary []point2
+}
+
+// newRotationCanvas samples the perimeter of a w x h frame,
+// rotationBoundarySamples points per edge.
+func newRotationCanvas(w, h int) rotationCanvas {
 	fw, fh := float64(w), float64(h)
+	const n = rotationBoundarySamples
+	pts := make([]point2, 0, 4*n)
+	for i := 0; i < n; i++ {
+		t := float64(i) / float64(n-1)
+		pts = append(pts,
+			point2{X: t * fw, Y: 0},
+			point2{X: t * fw, Y: fh},
+			point2{X: 0, Y: t * fh},
+			point2{X: fw, Y: t * fh},
+		)
+	}
+	return rotationCanvas{w: fw, h: fh, boundary: pts}
+}
+
+// rotationFitsAtZoom reports whether output frame content warped by correction
+// q, at the given zoom, samples entirely from inside c's source frame.
+func rotationFitsAtZoom(q Quat, lens Lens, c rotationCanvas, zoom float64, rsRot Vec3) bool {
+	inv := q.Matrix().Transpose()
 	const eps = 1e-6
-	for _, p := range boundaryPoints(fw, fh, rotationBoundarySamples) {
-		sx, sy, ok := sphereBackwardMap(lens, inv, zoom, rsRot, fh, p.X, p.Y)
-		if !ok || sx < -eps || sx > fw+eps || sy < -eps || sy > fh+eps {
+	for _, p := range c.boundary {
+		sx, sy, ok := sphereBackwardMap(lens, inv, zoom, rsRot, c.h, p.X, p.Y)
+		if !ok || sx < -eps || sx > c.w+eps || sy < -eps || sy > c.h+eps {
 			return false
 		}
 	}
 	return true
 }
 
-// boundaryPoints returns points spread around the perimeter of a w x h canvas,
-// n per edge.
-func boundaryPoints(w, h float64, n int) []point2 {
-	pts := make([]point2, 0, 4*n)
-	for i := 0; i < n; i++ {
-		t := float64(i) / float64(n-1)
-		pts = append(pts,
-			point2{X: t * w, Y: 0},
-			point2{X: t * w, Y: h},
-			point2{X: 0, Y: t * h},
-			point2{X: w, Y: t * h},
-		)
-	}
-	return pts
-}
-
 // minZoomForRotation is minZoomForCorrection's spherical counterpart: the
 // smallest zoom at which correction q exposes no border.
-func minZoomForRotation(q Quat, lens Lens, w, h int, rsRot Vec3) float64 {
-	if rotationFitsAtZoom(q, lens, w, h, 1.0, rsRot) {
+func minZoomForRotation(q Quat, lens Lens, c rotationCanvas, rsRot Vec3) float64 {
+	if rotationFitsAtZoom(q, lens, c, 1.0, rsRot) {
 		return 1.0
 	}
-	if !rotationFitsAtZoom(q, lens, w, h, maxZoomSearchBound, rsRot) {
+	if !rotationFitsAtZoom(q, lens, c, maxZoomSearchBound, rsRot) {
 		return maxZoomSearchBound
 	}
 	lo, hi := 1.0, maxZoomSearchBound
 	for i := 0; i < 40; i++ {
 		mid := (lo + hi) / 2
-		if rotationFitsAtZoom(q, lens, w, h, mid, rsRot) {
+		if rotationFitsAtZoom(q, lens, c, mid, rsRot) {
 			hi = mid
 		} else {
 			lo = mid
@@ -269,14 +287,14 @@ func minZoomForRotation(q Quat, lens Lens, w, h int, rsRot Vec3) float64 {
 // scaleBackRotationToZoom weakens a correction just enough to fit at
 // targetZoom, mirroring scaleBackToZoom: a frame that would need more crop than
 // allowed is stabilized less, never shown with a hole in it.
-func scaleBackRotationToZoom(q Quat, lens Lens, w, h int, targetZoom float64, rsRot Vec3) (Quat, float64) {
-	if rotationFitsAtZoom(q, lens, w, h, targetZoom, rsRot) {
+func scaleBackRotationToZoom(q Quat, lens Lens, c rotationCanvas, targetZoom float64, rsRot Vec3) (Quat, float64) {
+	if rotationFitsAtZoom(q, lens, c, targetZoom, rsRot) {
 		return q, 1.0
 	}
 	lo, hi := 0.0, 1.0
 	for i := 0; i < 30; i++ {
 		mid := (lo + hi) / 2
-		if rotationFitsAtZoom(attenuateRotation(q, mid), lens, w, h, targetZoom, rsRot) {
+		if rotationFitsAtZoom(attenuateRotation(q, mid), lens, c, targetZoom, rsRot) {
 			lo = mid
 		} else {
 			hi = mid
@@ -315,9 +333,12 @@ func PlanRotationZoom(corrections []Quat, lens Lens, w, h int, maxZoom, sigmaFra
 		}
 		return Vec3{}
 	}
+	// One canvas for the whole clip: the frame size does not change, so neither
+	// do the boundary samples every containment test below walks.
+	canvas := newRotationCanvas(w, h)
 	raw := make([]float64, n)
 	for i, q := range corrections {
-		raw[i] = minZoomForRotation(q, lens, w, h, rsAt(i))
+		raw[i] = minZoomForRotation(q, lens, canvas, rsAt(i))
 	}
 
 	var env []float64
@@ -339,7 +360,7 @@ func PlanRotationZoom(corrections []Quat, lens Lens, w, h int, maxZoom, sigmaFra
 		res.PeakRequired = math.Max(res.PeakRequired, raw[i])
 		if maxZoom > 0 && env[i] > maxZoom {
 			env[i] = maxZoom
-			scaled, alpha := scaleBackRotationToZoom(q, lens, w, h, maxZoom, rsAt(i))
+			scaled, alpha := scaleBackRotationToZoom(q, lens, canvas, maxZoom, rsAt(i))
 			res.Corrections[i] = scaled
 			if alpha < 1 {
 				res.ClampedFrames++
