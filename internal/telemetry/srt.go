@@ -212,8 +212,8 @@ func formatOptf(present bool, value float64, format, absent string) string {
 }
 
 // formatStrydLine renders a Sample's DevFields as one readable,
-// deterministically-ordered line ("Form Power=76, Leg Spring
-// Stiffness=9.25, ..."), sorted by name for the same reason
+// deterministically-ordered line ("Form Power=76.0, Leg Spring
+// Stiffness=9.3, ..."), sorted by name for the same reason
 // buildStrydExtension (gpx.go) sorts them: map iteration order is
 // randomized in Go, and this output should be stable across runs.
 func formatStrydLine(dev map[string]float64) string {

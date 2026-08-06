@@ -189,7 +189,7 @@ func NewRootCmd() *cobra.Command {
 	root.Flags().Float64Var(&elevLoss, "elevation-loss", 0,
 		"telemetry-hud only: known total elevation LOSS (meters) for the activity; see --elevation-gain. 0 = use the FIT's own total")
 	root.Flags().BoolVar(&telemetryStryd, "telemetry-stryd", false,
-		"telemetry only: include Stryd running-dynamics developer fields in the GPX sidecar and muxed SRT")
+		"telemetry only: include Stryd running-dynamics developer fields in the GPX sidecar and in a --srt-format readable SRT. NOT in --srt-format dji: that layout is the fixed set of tags Telemetry Overlay parses out of a DJI drone's SRT, with no place to put an arbitrary developer field, so this flag does not affect it")
 	root.Flags().BoolVar(&location, "location", true,
 		"telemetry only: write the clip's GPS position into the output's container metadata (the \"location\" tag and Apple's \"com.apple.quicktime.location.ISO6709\"). On by default. Pass --location=false to leave it out: the tag is read by YouTube, Photos, Immich and QuickTime, so a run that starts at your front door otherwise ships your home address in the file. It governs only the tag videofx WRITES: it does not remove telemetry-hud's course map, which is burned into the pixels, nor a position the camera itself recorded, which is carried over with the rest of the source metadata (strip that with ffmpeg -map_metadata -1 or exiftool). Note --effect telemetry-hud implies --effect telemetry, so this applies to a HUD burn as well")
 
