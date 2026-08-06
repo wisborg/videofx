@@ -45,6 +45,34 @@ func TrimClip(ctx context.Context, src, dst string, startSeconds, endSeconds flo
 		"-map_metadata", "0",
 		"-avoid_negative_ts", "make_zero",
 	}
+	// TODO: this shifts creation_time by the REQUESTED start, while -ss above
+	// snaps the actual first frame back to the nearest keyframe at or before
+	// it. The tag therefore claims an exact seek that did not happen, and the
+	// trimmed clip's telemetry is early by however far the snap moved -- up to
+	// one GOP (a second or more on typical action-camera footage, which uses
+	// long GOPs).
+	//
+	// This was tolerable when --start was a rough number of seconds. It is
+	// less so now that --start/--end accept a wall-clock timestamp, because
+	// the premise of that feature is that a time read off a watch or a HUD
+	// means the same instant here as it does there -- and the tag written here
+	// is what the telemetry effects then resolve against, so the error lands
+	// squarely in the thing the timestamp was for.
+	//
+	// Two ways out, neither taken here:
+	//
+	//   - probe dst after the copy and shift by its ACTUAL first-frame PTS
+	//     rather than by startSeconds. Keeps the fast seek, costs one extra
+	//     ffprobe per trimmed file, and makes the tag true whatever ffmpeg
+	//     decided to do.
+	//   - move -ss after -i for an exact seek. Frame-accurate, but it decodes
+	//     from the beginning of the clip to get there, so it is no longer a
+	//     cheap stream copy on a long source.
+	//
+	// The first looks right; it is deferred rather than rejected. Anyone
+	// picking this up: the discrepancy is observable as an output whose
+	// duration exceeds (end - start) by the snap distance, which is why the
+	// cmd-level trim tests generate their clips with -g 1.
 	if info.HasCreationTime {
 		shifted := info.CreationTime.Add(time.Duration(startSeconds * float64(time.Second)))
 		args = append(args, "-metadata", "creation_time="+shifted.UTC().Format("2006-01-02T15:04:05.000000Z07:00"))

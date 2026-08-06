@@ -43,8 +43,16 @@ type TimeSpec struct {
 // needs a clip's creation_time to resolve) rather than an offset in seconds.
 func (t TimeSpec) IsAbsolute() bool { return !t.Absolute.IsZero() }
 
-// String renders the spec back into roughly the form it was given in, for
-// error messages and log lines. The zero TimeSpec renders as "unset".
+// String renders the spec for error messages and log lines. The zero TimeSpec
+// renders as "unset".
+//
+// A relative spec always renders as seconds, whichever of the three relative
+// forms it was written in: "1h23m45s" and "1:23:45" both come back as
+// "5025s". Only an absolute one round-trips. That is deliberate -- seconds
+// are unambiguous in a message that may be comparing two bounds written in
+// different forms, and preserving the input spelling would mean carrying the
+// raw string on every TimeSpec for the sake of cosmetics. It does mean an
+// error can quote a number the user did not type.
 func (t TimeSpec) String() string {
 	switch {
 	case !t.Set:

@@ -266,6 +266,12 @@ func TestParseTimeSpec_Unset(t *testing.T) {
 	}
 }
 
+// TestTimeSpecString records a deliberate spec, not an accident: every
+// relative form normalises to seconds and only an absolute one round-trips.
+// The two clock/duration rows below say the same thing twice on purpose --
+// they are written differently and render identically, which is the property
+// worth protecting. See String's doc comment for why normalising beats
+// preserving the input spelling.
 func TestTimeSpecString(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -274,6 +280,7 @@ func TestTimeSpecString(t *testing.T) {
 		{"", "unset"},
 		{"12", "12s"},
 		{"1h23m45s", "5025s"},
+		{"1:23:45", "5025s"},
 		{"2026-08-01T09:03:12Z", "2026-08-01T09:03:12Z"},
 	}
 	for _, c := range cases {
