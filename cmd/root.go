@@ -101,9 +101,9 @@ func NewRootCmd() *cobra.Command {
 	root.Flags().IntVar(&concurrency, "concurrency", 1,
 		"number of videos to process in parallel")
 	root.Flags().StringVar(&trimStart, "start", "",
-		"only process from this time into each input; unset = from the beginning. Accepts plain seconds (12, 12.5), an h/m/s duration (12s, 3H, 1h23m45s) or an absolute timestamp WITH a timezone (2026-08-01T09:03:12+01:00), which is resolved per file against that file's creation_time (and --offset, if given). The clip is trimmed to [--start, --end) up front (a lossless copy; the start snaps to the nearest keyframe), and creation_time is shifted so telemetry still syncs")
+		"only process from this time into each input; unset = from the beginning. Accepts plain seconds (12, 12.5), an h/m/s duration (12s, 3H, 1h23m45s), a clock duration in ffmpeg's own MM:SS or HH:MM:SS notation (1:30 is a minute and a half, 1:23:45), or an absolute timestamp WITH a timezone (2026-08-01T09:03:12+01:00), which is resolved per file against that file's creation_time (and --offset, if given). The clip is trimmed to [--start, --end) up front (a lossless copy; the start snaps to the nearest keyframe), and creation_time is shifted so telemetry still syncs")
 	root.Flags().StringVar(&trimEnd, "end", "",
-		"only process up to this time of each input; unset (or 0) = to the end. Takes the same three forms as --start; a relative value is measured from the beginning of the untrimmed clip, not from --start")
+		"only process up to this time of each input; unset (or 0) = to the end. Takes the same four forms as --start; a relative value is measured from the beginning of the untrimmed clip, not from --start")
 	root.Flags().BoolVar(&debugMode, "debug", false,
 		"print extra diagnostic output that a successful run otherwise keeps to itself: the telemetry and rotate effects' underlying ffmpeg logs (banner, stream info), and gocv-stabilizer's lens calibration under --warp-model rotation. Shorthand for --log-level debug, and it wins if both are given")
 	root.Flags().StringVar(&logLevel, "log-level", "info",

@@ -36,8 +36,8 @@ func newCalibrateCmd() *cobra.Command {
 			"footage, so calibrate once per camera/profile and reuse the number. Point --ss\n" +
 			"at a motion/detail-heavy stretch for a safe value; the static opening of a clip\n" +
 			"under-estimates the quality busier footage needs. --ss takes seconds, an h/m/s\n" +
-			"duration (1h23m45s) or a wall-clock timestamp resolved against the source's\n" +
-			"creation_time.",
+			"duration (1h23m45s), a clock duration (1:30, 1:23:45) or a wall-clock timestamp\n" +
+			"resolved against the source's creation_time.",
 		Args:          cobra.ExactArgs(1),
 		RunE:          runCalibrate,
 		SilenceUsage:  true,
@@ -48,9 +48,9 @@ func newCalibrateCmd() *cobra.Command {
 	c.Flags().IntSliceVar(&calCandidates, "candidates", calibrate.DefaultCandidates,
 		"comma-separated -q:v values to test (1-100, higher = better)")
 	c.Flags().StringVar(&calDuration, "duration", strconv.FormatFloat(calibrate.DefaultDuration, 'g', -1, 64),
-		"length of the segment encoded and scored per candidate: plain seconds (2, 2.5) or an h/m/s duration (90s, 2m). Not a timestamp -- this is a length, not a point in the clip")
+		"length of the segment encoded and scored per candidate: plain seconds (2, 2.5), an h/m/s duration (90s, 2m) or a clock duration (1:30). Not a timestamp -- this is a length, not a point in the clip")
 	c.Flags().StringVar(&calStart, "ss", "",
-		"seek this far into the source before taking the segment (aim at a busy section): plain seconds (12, 12.5), an h/m/s duration (12s, 1h23m45s), or an absolute timestamp WITH a timezone (2026-08-01T09:03:12+01:00), resolved against the source's creation_time. Unset = from the beginning")
+		"seek this far into the source before taking the segment (aim at a busy section): plain seconds (12, 12.5), an h/m/s duration (12s, 1h23m45s), a clock duration in ffmpeg's MM:SS or HH:MM:SS notation (1:30, 1:23:45), or an absolute timestamp WITH a timezone (2026-08-01T09:03:12+01:00), resolved against the source's creation_time. Unset = from the beginning")
 	return c
 }
 

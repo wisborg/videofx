@@ -109,9 +109,10 @@ Flags:
 - `--concurrency` — number of videos to process in parallel. Default `1`. When it is greater than `1` and more than one file is given, the batch is dispatched **largest-first** (see [Batch ordering](#batch-ordering) below) so the overall run finishes as quickly as possible.
 - `--debug` — print extra diagnostic output that a successful run otherwise keeps to itself. By default the `telemetry` and `rotate` effects' underlying ffmpeg calls run at ffmpeg's `error` log level, so a successful run is silent (no banner/stream-info dump) and only real errors surface; `--debug` restores ffmpeg's full output. It also makes `gocv-stabilizer` report the lens it calibrated under `--warp-model rotation` (which model, focal length, field of view, and how well it fitted) — useful when investigating a clip, noise on every other run, and the value to copy into `--lens`/`--lens-focal` for a clip too gentle to calibrate itself. **Warnings are not affected and always print**: anything that makes the render differ from what the flags asked for says so regardless. Shorthand for `--log-level debug`, and it wins if both are given.
 - `--log-level` — lowest severity to print: `debug` (everything, same as `--debug`), `info` (**default** — per-file progress plus warnings), `warn` (warnings only: no `processing …` or `[1/3] OK` lines), or `error` (failures only). All output goes to **stderr**, so `--log-level warn` is the way to keep a scripted batch quiet without losing the messages that matter.
-- `--start` / `--end` — process only the `[--start, --end)` span of each input; unset (the default) = the whole video (`--end 0` also means "to the end"). Each bound takes one of three forms:
+- `--start` / `--end` — process only the `[--start, --end)` span of each input; unset (the default) = the whole video (`--end 0` also means "to the end"). Each bound takes one of four forms:
   - **plain seconds** — `12`, `12.5`. The original form; a number with no unit is always seconds.
   - **an h/m/s duration** — `12s`, `3H`, `1h23m45s`, `90m`. Units are `h`/`m`/`s` in either case, largest first, each at most once. Fractions are fine (`1.5h`). Other units (`ms`, `ns`) are rejected rather than guessed at.
+  - **a clock duration** — `1:30`, `1:23:45`, `1:30.5`. ffmpeg's own `-ss` notation, `MM:SS` or `HH:MM:SS`. The **rightmost component is always seconds**, so `1:30` is a minute and a half, not an hour and a half. Only the leading component may exceed 59 (`90:00` is ninety minutes); `1:75` is rejected as the typo it almost certainly is rather than read as 135 seconds.
   - **an absolute timestamp** — `2026-08-01T09:03:12+01:00`, or `…Z`. A timezone is **required**: without one the same command would mean different instants on differently-configured machines. Resolved per file against that file's own `creation_time`, minus `--offset` if given — the same `fit_time = creation_time + offset + pts` model the telemetry sync uses, so a time read off a watch or a HUD means the same instant here as it does there.
 
   The clip is trimmed to the resolved span once, up front, as a **lossless stream copy**, and the effects run on it. `creation_time` is shifted by the start so telemetry still syncs. Because a stream copy can't begin mid-GOP, the **start snaps to the nearest keyframe** (the cut may land up to one GOP early, so a timestamp is not frame-exact); the end is exact. A relative `--end` is measured from the beginning of the untrimmed clip, not from `--start`.
@@ -463,17 +464,19 @@ Notes:
   stabilized result to the source with VMAF would measure the *warp*, not the
   encode. The transparent quality transfers to the stabilized render anyway.
 - Point `--ss` at a **busy** (motion/detail-heavy) stretch — a static opening
-  under-estimates the quality busier footage needs. It takes the same three
-  forms as `--start`: plain seconds (`12`), an h/m/s duration (`1h23m45s`), or
-  an absolute timestamp with a timezone (`2026-08-01T09:03:12+01:00`), resolved
+  under-estimates the quality busier footage needs. It takes the same four
+  forms as `--start`: plain seconds (`12`), an h/m/s duration (`1h23m45s`), a
+  clock duration (`1:30`, `1:23:45`), or an absolute timestamp with a timezone
+  (`2026-08-01T09:03:12+01:00`), resolved
   against the source's own `creation_time` — so a busy moment noted by
   wall-clock time can be handed over as-is. A timestamp before the recording
   starts measures from the beginning (with a warning); one past its end is an
   error, since there is no segment there to score. There is no `--offset` on
   this subcommand.
 - Tune the sweep with `--candidates`, strictness with `--target-vmaf`, and the
-  segment length with `--duration` — which takes seconds or an h/m/s duration
-  (`2`, `90s`, `2m`) but **not** a timestamp: it is a length, not a point.
+  segment length with `--duration` — which takes seconds, an h/m/s duration or
+  a clock duration (`2`, `90s`, `2m`, `1:30`) but **not** a timestamp: it is a
+  length, not a point.
 
 ## Performance
 

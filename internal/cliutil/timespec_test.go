@@ -2,6 +2,7 @@ package cliutil
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -39,6 +40,20 @@ func TestParseTimeSpec_Relative(t *testing.T) {
 		{"2m30s", 150},
 		{"1h45s", 3645},
 		{"  12s  ", 12}, // surrounding whitespace is not the user's mistake to pay for
+
+		// Clock form. The rightmost component is always seconds, so 1:30 is a
+		// minute and a half -- see TestParseTimeSpec_ClockFormMeaning, which
+		// is where that contract is pinned on its own.
+		{"1:30", 90},
+		{"0:00", 0},
+		{"1:23", 83},
+		{"01:23:45", 3600 + 23*60 + 45},
+		{"1:30.5", 90.5},
+		{"2:03:04", 2*3600 + 3*60 + 4},
+		{"0:00:01", 1},
+		{"90:00", 5400},      // leading component is unbounded: ninety minutes
+		{"99:00:00", 356400}, // and in the hours place too
+		{"1:00:00.25", 3600.25},
 	}
 	for _, c := range cases {
 		t.Run(c.in, func(t *testing.T) {
@@ -131,8 +146,21 @@ func TestParseTimeSpec_Rejected(t *testing.T) {
 		"1h1h", // repeated component
 		"1m2m", // repeated component
 		"12 s", // internal whitespace
-		"1:23", // clock-style, not a form we accept
-		"01:23:45",
+
+		// Clock form near-misses. An out-of-range component in a place that
+		// has a unit above it is a typo, not a request: reading "1:75" as 135
+		// seconds is the silent misinterpretation this grammar exists to avoid.
+		"1:75",
+		"1:60",
+		"1:90:00",
+		"1:2:3:4",
+		"1:",
+		":30",
+		"01:30:",
+		"1:-30",
+		"1::30",
+		"1:2:3.4.5",
+
 		"2026-08-01T09:03:12", // no timezone
 		"2026-08-01",          // date only, and no timezone
 		"2026-08-01T09:03",    // no seconds, no timezone
@@ -143,6 +171,53 @@ func TestParseTimeSpec_Rejected(t *testing.T) {
 				t.Errorf("ParseTimeSpec(%q) = %+v, want an error", in, got)
 			}
 		})
+	}
+}
+
+// TestParseTimeSpec_ClockFormMeaning pins the one thing about the colon form
+// a user can get wrong while still getting a number back: the RIGHTMOST
+// component is seconds, so "1:30" is a minute and a half, not an hour and a
+// half. It has its own test, named for the contract rather than the input,
+// because a table row reading {"1:30", 90} looks equally correct to someone
+// who has just swapped the multipliers and is reading their own change back.
+func TestParseTimeSpec_ClockFormMeaning(t *testing.T) {
+	got, err := ParseTimeSpec("1:30")
+	if err != nil {
+		t.Fatalf(`ParseTimeSpec("1:30") = %v`, err)
+	}
+	if got.Seconds == 5400 {
+		t.Fatalf(`ParseTimeSpec("1:30").Seconds = 5400 -- read as 1h30m; the rightmost component is SECONDS, so this is 1m30s = 90`)
+	}
+	if got.Seconds != 90 {
+		t.Errorf(`ParseTimeSpec("1:30").Seconds = %v, want 90 (1m30s)`, got.Seconds)
+	}
+
+	// The three-component form puts hours in front, so the same digits mean
+	// something else again -- this is what distinguishes MM:SS from HH:MM:SS
+	// having been collapsed into one rule.
+	got, err = ParseTimeSpec("1:30:00")
+	if err != nil {
+		t.Fatalf(`ParseTimeSpec("1:30:00") = %v`, err)
+	}
+	if got.Seconds != 5400 {
+		t.Errorf(`ParseTimeSpec("1:30:00").Seconds = %v, want 5400 (1h30m)`, got.Seconds)
+	}
+}
+
+// TestParseTimeSpec_ClockRangeError checks that an out-of-range component is
+// diagnosed as one, rather than falling through to the generic "not a valid
+// time" list. A user who typed "1:75" reached for this form unambiguously and
+// needs to be told what was wrong with it, not offered four alternatives.
+func TestParseTimeSpec_ClockRangeError(t *testing.T) {
+	_, err := ParseTimeSpec("1:75")
+	if err == nil {
+		t.Fatal(`ParseTimeSpec("1:75") succeeded, want an error`)
+	}
+	if strings.Contains(err.Error(), "is not a valid time") {
+		t.Errorf("got the generic error, want one naming the out-of-range component: %v", err)
+	}
+	if !strings.Contains(err.Error(), "seconds") {
+		t.Errorf("error does not say which component was out of range: %v", err)
 	}
 }
 
