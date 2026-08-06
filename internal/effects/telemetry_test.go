@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -603,6 +604,100 @@ func TestTelemetry_Apply_SRTSidecar(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "[latitude:") {
 		t.Errorf("SRT sidecar is not DJI-format:\n%s", data)
+	}
+}
+
+// devFieldFITPath writes a synthetic FIT activity that registers one
+// developer field, so a test can exercise the Stryd (developer-field) wiring
+// end to end. It is a separate, much shorter fixture than testFITPath's
+// (20 records rather than 16404) because nothing here needs a long activity:
+// it only has to cover the two-second clip stamped 2026-07-04T21:05:53Z, so
+// Resolve lands on FullOverlap.
+//
+// Scale is left at zero, which declares "no scale" -- the raw value is
+// already in final units -- so the expected rendered value follows directly
+// from fittest.DeveloperFieldRaw without re-deriving the decoder's
+// raw/scale-offset arithmetic (that is decodefixture_test.go's job).
+func devFieldFITPath(t *testing.T, fieldName string) string {
+	t.Helper()
+	opts := fittest.DefaultOptions()
+	opts.Start = time.Date(2026, 7, 4, 21, 5, 45, 0, time.UTC)
+	opts.Count = 20
+	opts.DeveloperField = fieldName
+	data, err := fittest.Build(opts)
+	if err != nil {
+		t.Fatalf("building the developer-field FIT fixture: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "activity.fit")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("writing the developer-field FIT fixture: %v", err)
+	}
+	return path
+}
+
+// TestTelemetry_Apply_StrydReachesTheSRT pins the wiring between
+// Telemetry.IncludeStryd (--telemetry-stryd) and the SRT's developer-field
+// line, in both directions.
+//
+// telemetry.WriteSRT's own gate is unit-tested in
+// TestWriteSRT_StrydLineGatedByFieldOption, but the gate is only as good as
+// the assignment that feeds it: drop `fields.Stryd = t.IncludeStryd` from
+// Apply and --telemetry-stryd becomes a no-op for the SRT. Nothing else
+// notices -- the sidecar is still written, the mux still succeeds and the
+// command still exits 0, so the missing running dynamics only surface when
+// someone opens the file in Telemetry Overlay.
+//
+// The readable format is the one under test because the DJI layout ignores
+// Fields entirely (it carries position and time only), so --telemetry-stryd
+// genuinely has no effect there.
+func TestTelemetry_Apply_StrydReachesTheSRT(t *testing.T) {
+	requireFFmpeg(t)
+
+	const fieldName = "Synthetic Metric" // fabricated; see fittest's doc comment
+	// Record 8 is the one covering the clip's first second (the clip is
+	// stamped 21:05:53, the fixture starts at 21:05:45 at 1 Hz), and the
+	// fixture writes the value unscaled, so the SRT must render it with
+	// formatStrydLine's single decimal.
+	wantEntry := fmt.Sprintf("%s=%.1f", fieldName, float64(fittest.DeveloperFieldRaw(8)))
+
+	fitPath := devFieldFITPath(t, fieldName)
+
+	for _, c := range []struct {
+		name  string
+		stryd bool
+	}{
+		{"stryd_on", true},
+		{"stryd_off", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := generateSyntheticSource(t, dir, "src.mp4", "2026-07-04T21:05:53Z")
+			outputPath := filepath.Join(dir, "clip_telemetry.mp4")
+
+			tel := &Telemetry{
+				Runner:       &fakeRunner{},
+				FitPath:      fitPath,
+				SRTFormat:    "readable",
+				SRTSidecar:   true,
+				IncludeStryd: c.stryd,
+			}
+			if err := tel.Apply(context.Background(), Input{SourcePath: src, OutputPath: outputPath}); err != nil {
+				t.Fatalf("Apply error: %v", err)
+			}
+
+			data, err := os.ReadFile(srtSidecarPath(outputPath))
+			if err != nil {
+				t.Fatalf("SRT sidecar not written at %s: %v", srtSidecarPath(outputPath), err)
+			}
+			got := string(data)
+
+			if c.stryd && !strings.Contains(got, wantEntry) {
+				t.Errorf("IncludeStryd=true produced an SRT without %q:\n%s", wantEntry, got)
+			}
+			if !c.stryd && strings.Contains(got, fieldName) {
+				t.Errorf("IncludeStryd=false leaked the developer field %q into the SRT:\n%s", fieldName, got)
+			}
+		})
 	}
 }
 

@@ -209,6 +209,136 @@ func TestFormatSRTCueBody_DistancePaceFormatting(t *testing.T) {
 	}
 }
 
+// TestWriteSRT_StrydLineGatedByFieldOption pins both directions of the
+// FieldOptions.Stryd gate on the SRT side, the counterpart of
+// TestWriteGPX_StrydOptIn: with the option on, the cue grows a third line
+// carrying every developer field the Sample has; with it off, the cue is
+// two lines and no developer-field name appears anywhere.
+//
+// Both directions matter because either half can fail silently. Inverting
+// the guard in formatSRTCueBody (or dropping the effect's
+// fields.Stryd = t.IncludeStryd wiring) makes --telemetry-stryd write a
+// perfectly valid SRT with the running dynamics missing: sidecar written,
+// mux succeeds, exit 0, and the omission is only visible when someone
+// opens the file. Leaving it always on would leak developer fields into
+// every default run.
+//
+// The expected line is written out in full rather than probed for
+// substrings, so it also pins the separator, the "name=value" form and the
+// one-decimal value rendering. 8.46 and 9.27 are chosen to be nowhere near
+// a .05 tie, so the expectation states rounding without depending on how
+// ties break.
+func TestWriteSRT_StrydLineGatedByFieldOption(t *testing.T) {
+	base := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
+	sample := Sample{
+		Time: base, HasGPS: true, Lat: 1, Lon: 2,
+		DevFields: map[string]float64{
+			// Deliberately not in sorted order here: the rendered
+			// order must come from formatStrydLine's sort, not from
+			// the literal.
+			"Vertical Oscillation": 8.46,
+			"Leg Spring Stiffness": 9.27,
+			"Air Power":            12.3,
+		},
+	}
+	points := []ClipPoint{{PTS: 0, WallTime: base, Sample: sample}}
+
+	const wantLine = "Air Power=12.3, Leg Spring Stiffness=9.3, Vertical Oscillation=8.5"
+
+	for _, c := range []struct {
+		name  string
+		stryd bool
+	}{
+		{"stryd_on", true},
+		{"stryd_off", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fields := DefaultFieldOptions()
+			fields.Stryd = c.stryd
+
+			var buf bytes.Buffer
+			if err := WriteSRT(&buf, points, SRTOptions{Fields: fields}); err != nil {
+				t.Fatalf("WriteSRT: %v", err)
+			}
+			out := buf.String()
+
+			// The cue body is everything after the two header lines
+			// (index, timing) up to the blank line separating cues.
+			block := strings.TrimRight(out, "\n")
+			bodyLines := strings.Split(block, "\n")[2:]
+
+			if c.stryd {
+				if len(bodyLines) != 3 {
+					t.Fatalf("cue body has %d lines, want 3 (GPS, readout, Stryd):\n%s", len(bodyLines), out)
+				}
+				if bodyLines[2] != wantLine {
+					t.Errorf("Stryd line = %q, want %q", bodyLines[2], wantLine)
+				}
+				return
+			}
+
+			if len(bodyLines) != 2 {
+				t.Fatalf("cue body has %d lines, want 2 (GPS, readout) with Stryd off:\n%s", len(bodyLines), out)
+			}
+			for name := range sample.DevFields {
+				if strings.Contains(out, name) {
+					t.Errorf("developer field %q leaked into the SRT with Stryd off:\n%s", name, out)
+				}
+			}
+		})
+	}
+}
+
+// TestFormatSRTCueBody_StrydEnabledButNoDevFields covers the other half of
+// the same guard: the option is on, but this particular Sample carries no
+// developer fields (a device that reports them only intermittently, or a
+// FIT file that registers none at all). The cue must stay two lines rather
+// than gaining an empty third one, which would render as a blank line in
+// the middle of a subtitle cue.
+//
+// Relaxing the guard's length check is the mutation this catches, and it is
+// invisible in the on/off test above -- there, DevFields is always
+// populated.
+func TestFormatSRTCueBody_StrydEnabledButNoDevFields(t *testing.T) {
+	fields := DefaultFieldOptions()
+	fields.Stryd = true
+
+	s := Sample{HasGPS: true, Lat: 1, Lon: 2} // DevFields nil
+	body := formatSRTCueBody(s, fields)
+	if got, want := len(strings.Split(body, "\n")), 2; got != want {
+		t.Errorf("cue body has %d lines, want %d (no developer fields to add):\n%q", got, want, body)
+	}
+}
+
+// TestFormatStrydLine_SortedAndStable pins the determinism property the
+// sort exists for. Go randomizes map iteration order, so a formatStrydLine
+// that lost its sort would still produce a plausible line every time -- it
+// would just produce a *different* plausible line on each run, which no
+// single-call assertion can reliably distinguish from the sorted one (with
+// n fields a lucky run hits sorted order 1/n! of the time).
+//
+// So this asserts the two halves separately: the line equals the
+// hand-written sorted expectation, and repeated calls over the same map all
+// agree. Five fields over 32 calls makes an unsorted implementation
+// surviving both about (1/120)^31, i.e. never.
+func TestFormatStrydLine_SortedAndStable(t *testing.T) {
+	dev := map[string]float64{
+		"Vertical Oscillation": 8.46,
+		"Air Power":            12.34,
+		"Ground Time":          249.51,
+		"Leg Spring Stiffness": 9.27,
+		"Form Power":           76.44,
+	}
+	const want = "Air Power=12.3, Form Power=76.4, Ground Time=249.5, " +
+		"Leg Spring Stiffness=9.3, Vertical Oscillation=8.5"
+
+	for i := 0; i < 32; i++ {
+		if got := formatStrydLine(dev); got != want {
+			t.Fatalf("formatStrydLine call %d = %q, want %q", i, got, want)
+		}
+	}
+}
+
 // TestWriteSRT_DJI pins the DJI-drone layout Telemetry Overlay reads: each
 // cue carries the absolute WallTime (UTC, DJI's no-timezone datetime form)
 // and GPS as bracketed key/value pairs, with abs_alt from Elevation. A

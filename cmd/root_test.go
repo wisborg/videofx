@@ -1422,6 +1422,60 @@ func TestParseHUDTimeZone(t *testing.T) {
 
 // TestValidateSRTOptions pins the accepted --srt-format set and the
 // --srt-sidecar-with-nothing-to-write contradiction.
+// TestResolveLogLevel covers all three of the function's outcomes, because
+// every one of them is silent when it goes wrong.
+//
+// The precedence row is the load-bearing one: --debug must win over an
+// explicit --log-level, so `--debug --log-level warn` shows debug output.
+// Swap resolveLogLevel's two returns and that combination quietly suppresses
+// exactly the debug-level diagnostics a correction declining to act reports
+// -- the run still succeeds and still logs, just not the lines someone
+// passed --debug to see.
+//
+// The invalid row asserts on the "--log-level:" prefix rather than on
+// logging.ParseLevel's own wording, since only the wrapping here can produce
+// it: a raw ParseLevel error says "unknown log level" without ever naming
+// the flag the user actually typed.
+//
+// The invalid+debug row states the deliberate ordering of the two branches:
+// a typo'd level is an error even with --debug. --debug outranks a valid
+// level, not a rejected one, so a mistyped flag is never silently swallowed.
+func TestResolveLogLevel(t *testing.T) {
+	cases := []struct {
+		name    string
+		level   string
+		debug   bool
+		want    logging.Level
+		wantErr bool
+	}{
+		{"explicit level, no debug", "warn", false, logging.LevelWarn, false},
+		{"default level, no debug", "info", false, logging.LevelInfo, false},
+		{"debug overrides an explicit level", "warn", true, logging.LevelDebug, false},
+		{"invalid level", "verbose", false, 0, true},
+		{"invalid level is an error even with debug", "verbose", true, 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := resolveLogLevel(c.level, c.debug)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("resolveLogLevel(%q, %v) = %v, want an error", c.level, c.debug, got)
+				}
+				if !strings.HasPrefix(err.Error(), "--log-level:") {
+					t.Errorf("error %q should name the flag it came from (--log-level:)", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveLogLevel(%q, %v) = %v, want no error", c.level, c.debug, err)
+			}
+			if got != c.want {
+				t.Errorf("resolveLogLevel(%q, %v) = %v, want %v", c.level, c.debug, got, c.want)
+			}
+		})
+	}
+}
+
 func TestValidateSRTOptions(t *testing.T) {
 	// Valid formats, no sidecar.
 	for _, f := range []string{"none", "readable", "dji"} {

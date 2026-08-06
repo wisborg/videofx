@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"videofx/internal/logging"
 	"videofx/internal/stabilize"
@@ -317,11 +318,26 @@ func TestGoCVStabilizer_Apply_EndToEnd(t *testing.T) {
 // TestGoCVStabilizer_Apply_SidecarReuse checks the reuse story
 // SidecarPath exists for: a first Apply run with SidecarPath set writes
 // the sidecar, and a second run against the SAME source with the SAME
-// SidecarPath must succeed by reading it back rather than re-analyzing
-// (this test doesn't have an independent way to prove "no Analyze ran"
-// short of instrumentation, so it checks the observable, documented
-// contract instead: the sidecar file exists, names this exact source,
-// and a second Apply against it still produces a valid output).
+// SidecarPath reads it back rather than re-analyzing.
+//
+// "Rather than re-analyzing" is the load-bearing half and it is invisible
+// from the output: delete loadOrAnalyze's os.Stat short-circuit and every
+// run silently re-analyzes from scratch, producing an equally valid clip
+// of the same length, just after paying the multi-minute analysis pass
+// --sidecar was added to avoid. On a ten-frame fixture even the wall clock
+// cannot tell the two apart.
+//
+// The sidecar's own mtime can. Only the analyze branch calls WriteSidecar,
+// so stamping the file to a known past time between the runs turns "did
+// Apply re-analyze?" into "did the file get rewritten?", with no
+// instrumentation and no production seam. The stamp is two hours back and
+// truncated to a whole second, so neither filesystem timestamp granularity
+// nor the test's own runtime can blur the comparison: a rewrite lands at
+// the current time, which is nowhere near it.
+//
+// The read side is pinned separately by
+// TestGoCVStabilizer_Apply_SidecarSourceMismatchRejected, which can only
+// produce its error if the sidecar was actually read.
 func TestGoCVStabilizer_Apply_SidecarReuse(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg not on PATH")
@@ -355,9 +371,28 @@ func TestGoCVStabilizer_Apply_SidecarReuse(t *testing.T) {
 		t.Errorf("sidecar FrameCount = %d, want %d", series.FrameCount, wantFrames)
 	}
 
+	// Backdate the sidecar so a rewrite by the second run is unmistakable.
+	stamp := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(sidecarPath, stamp, stamp); err != nil {
+		t.Fatalf("test setup: backdating the sidecar: %v", err)
+	}
+	before, err := os.Stat(sidecarPath)
+	if err != nil {
+		t.Fatalf("test setup: stat after backdating: %v", err)
+	}
+
 	out2 := filepath.Join(dir, "out2.mp4")
 	if err := g.Apply(ctx, Input{SourcePath: src, OutputPath: out2, Strength: 0.5}); err != nil {
 		t.Fatalf("second Apply (should read the sidecar back): %v", err)
+	}
+
+	after, err := os.Stat(sidecarPath)
+	if err != nil {
+		t.Fatalf("stat after the second Apply: %v", err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Errorf("second Apply rewrote the sidecar (mtime %v -> %v), so it re-analyzed instead of reusing it",
+			before.ModTime(), after.ModTime())
 	}
 
 	frameCount, err := countFramesFfprobe(out2)
