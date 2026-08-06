@@ -54,6 +54,13 @@ func TestParseTimeSpec_Relative(t *testing.T) {
 		{"90:00", 5400},      // leading component is unbounded: ninety minutes
 		{"99:00:00", 356400}, // and in the hours place too
 		{"1:00:00.25", 3600.25},
+
+		// "0s" is the discriminating case for unitSeconds' "was any component
+		// present?" flag: a refactor to `any = total > 0` breaks --end 0s
+		// while "0" keeps working, because that one goes down the ParseFloat
+		// branch instead.
+		{"0s", 0},
+		{"0h", 0},
 	}
 	for _, c := range cases {
 		t.Run(c.in, func(t *testing.T) {
@@ -87,6 +94,10 @@ func TestParseTimeSpec_Absolute(t *testing.T) {
 		{"2026-08-01T09:03:12-05:30", time.Date(2026, 8, 1, 9, 3, 12, 0, time.FixedZone("", -(5*3600+30*60)))},
 		{"2026-08-01T09:03:12.250Z", time.Date(2026, 8, 1, 9, 3, 12, 250*int(time.Millisecond), time.UTC)},
 		{"2026-08-01 09:03:12+01:00", time.Date(2026, 8, 1, 9, 3, 12, 0, time.FixedZone("", 3600))},
+		// The space layout was only ever tested with a numeric offset; Z and
+		// a fractional second go down the same layout and were not pinned.
+		{"2026-08-01 09:03:12Z", time.Date(2026, 8, 1, 9, 3, 12, 0, time.UTC)},
+		{"2026-08-01 09:03:12.250Z", time.Date(2026, 8, 1, 9, 3, 12, 250*int(time.Millisecond), time.UTC)},
 	}
 	for _, c := range cases {
 		t.Run(c.in, func(t *testing.T) {
@@ -164,6 +175,25 @@ func TestParseTimeSpec_Rejected(t *testing.T) {
 		"2026-08-01T09:03:12", // no timezone
 		"2026-08-01",          // date only, and no timezone
 		"2026-08-01T09:03",    // no seconds, no timezone
+
+		// Out-of-range date and time components. These are rejected by
+		// time.Parse today, not by anything written here -- which is exactly
+		// why they are pinned: timestampLayouts' doc comment reserves the
+		// right to change the layouts, and a hand-rolled parser or a more
+		// lenient layout added later would accept these and resolve to an
+		// instant nobody asked for, with no test objecting.
+		"2026-13-01T09:03:12Z", // month 13
+		"2026-02-30T09:03:12Z", // February 30th
+		"2026-08-01T25:00:00Z", // hour 25
+		"2026-08-01T09:03:60Z", // second 60
+		"2026-08-01T09:03:12+25:00",
+
+		// A plausible near-miss from tools that print a zone without the
+		// colon (exiftool among them). Pinned as rejected rather than
+		// accommodated: the error already tells the user a timezone is
+		// needed, and adding a layout for every spelling of one is how a
+		// grammar stops being predictable.
+		"2026-08-01T09:03:12+0100",
 	} {
 		t.Run(in, func(t *testing.T) {
 			got, err := ParseTimeSpec(in)

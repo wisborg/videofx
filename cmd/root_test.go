@@ -123,6 +123,17 @@ func TestResolveCalibrateStart(t *testing.T) {
 		{name: "exactly at the end", ss: "600", info: clip, wantErr: true},
 		{name: "timestamp with no creation_time", ss: "2026-08-01T09:03:12Z", info: vidio.Info{Duration: 600}, wantErr: true},
 		{name: "seconds need no creation_time", ss: "12", info: vidio.Info{Duration: 600}, want: 12},
+		// The trim window's table has had this case since it was written;
+		// --ss's had not, though the two share the warning (see
+		// naiveCreationTimeWarning). Losing it means a zone-less
+		// creation_time resolves --ss hours off in silence, and calibrate
+		// still prints a full, confident table for whatever it measured.
+		{
+			name: "a naive creation_time is honored but warned about",
+			ss:   "2026-08-01T09:03:12Z",
+			info: vidio.Info{Duration: 600, CreationTime: creation, HasCreationTime: true, CreationTimeNaive: true},
+			want: 192, wantWarn: true,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -568,6 +579,10 @@ func TestResolveTrimWindow(t *testing.T) {
 		wantEnd    float64
 		wantWarn   bool
 		wantErr    bool
+		// wantErrHas, when set, requires the error to say this. Several
+		// distinct failures here all return "an error", so on the rows where
+		// the WRONG error is the regression, the message is the assertion.
+		wantErrHas string
 	}{{
 		name: "relative bounds pass straight through", start: "90", end: "2m30s", info: clip,
 		wantStart: 90, wantEnd: 150,
@@ -629,7 +644,21 @@ func TestResolveTrimWindow(t *testing.T) {
 	}, {
 		name:  "absolute bound against a clip with no creation_time",
 		start: "2026-08-01T09:03:12Z", info: vidio.Info{Duration: 600},
-		wantErr: true,
+		wantErr: true, wantErrHas: "creation_time tag to resolve it against",
+	}, {
+		// The same failure on --end, which resolves and returns separately
+		// and so has its own way of going wrong.
+		//
+		// The assertion is on the MESSAGE, because "an error came back" does
+		// not discriminate here: drop --end's error return and endSec stays
+		// 0, which the no-overlap check below then reports as "the requested
+		// span lies entirely outside this clip". Still an error, and still a
+		// non-zero exit -- but it blames the span for a problem that is
+		// really a missing creation_time tag, and sends the user looking at
+		// their timestamps instead of at their file.
+		name: "absolute END against a clip with no creation_time",
+		end:  "2026-08-01T09:03:12Z", info: vidio.Info{Duration: 600},
+		wantErr: true, wantErrHas: "creation_time tag to resolve it against",
 	}, {
 		name: "relative bounds need no creation_time", start: "90", end: "150",
 		info: vidio.Info{Duration: 600}, wantStart: 90, wantEnd: 150,
@@ -655,6 +684,9 @@ func TestResolveTrimWindow(t *testing.T) {
 			if c.wantErr {
 				if err == nil {
 					t.Fatalf("resolveTrimWindow = %.3f..%.3f, want an error", gotStart, gotEnd)
+				}
+				if c.wantErrHas != "" && !strings.Contains(err.Error(), c.wantErrHas) {
+					t.Errorf("error = %q, want one mentioning %q -- the right diagnosis, not just any failure", err, c.wantErrHas)
 				}
 				return
 			}
@@ -942,6 +974,52 @@ func TestRunRoot_SpanMissingEveryFileExitsNonZero(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("output dir holds %d file(s), want none: a skipped file must not be processed", len(entries))
+	}
+}
+
+// TestApplyTrimWindows_DropsUnprobeableFiles covers the other way a job leaves
+// the batch: not "the span missed it" but "we could not ask". If that continue
+// ever became a keep, a file ffprobe cannot read would be processed WHOLE --
+// the span silently not applied to the one input whose properties are unknown,
+// which is the worst possible candidate for a silent full-length render.
+//
+// The fixture is named neutrally on purpose. Naming it after the thing being
+// asserted makes strings.Contains pass on the filename alone, since the error
+// carries the path -- a trap that defeated a whole test in an earlier review.
+func TestApplyTrimWindows_DropsUnprobeableFiles(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	dir := t.TempDir()
+	good := filepath.Join(dir, "alpha.mp4")
+	genClipAt(t, good, 6, time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC))
+
+	// An .mp4 by name and nothing but bytes inside.
+	bad := filepath.Join(dir, "beta.mp4")
+	if err := os.WriteFile(bad, []byte("not a video, just some bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	start, err := cliutil.ParseTimeSpec("2s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	log := logging.New(&buf, logging.LevelInfo).Named("videofx")
+	kept := applyTrimWindows(context.Background(),
+		[]video.Job{{SourcePath: good}, {SourcePath: bad}}, start, cliutil.TimeSpec{}, 0, log)
+
+	if len(kept) != 1 || kept[0].SourcePath != good {
+		t.Fatalf("kept %+v, want only the probeable file", kept)
+	}
+	if kept[0].StartSeconds != 2 {
+		t.Errorf("the surviving job's span = %v, want 2 -- one bad file must not disturb the others", kept[0].StartSeconds)
+	}
+	// Reported by name, so the user can tell WHICH file left the batch. The
+	// assertion is on the path, which is why the name carries no hint of what
+	// is wrong with it.
+	if out := buf.String(); !strings.Contains(out, "beta.mp4") {
+		t.Errorf("the dropped file must be reported by name, got:\n%s", out)
 	}
 }
 
