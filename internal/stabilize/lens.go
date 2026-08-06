@@ -537,12 +537,34 @@ var calibrationFocalRatios = []float64{
 	0.62, 0.70, 0.80, 0.95, 1.15, 1.55, 2.10, 3.00,
 }
 
+// lensCandidate is one entry of the calibration sweep: the model to fit, and
+// whether it is that kind's flat baseline -- the longest focal swept, i.e. the
+// near-rectilinear limit the fitted model has to beat to be believed.
+//
+// Flat is recorded where the sweep is CONSTRUCTED rather than recovered
+// afterwards by comparing a candidate's Focal against longest*width. That
+// comparison was exact only because both sides happened to be the same float
+// expression with the same operand order; reassociating either one (folding the
+// ratio, scaling width first) makes no candidate match, leaves flat[kind] at
+// zero -- and LensCalibration.Reliable requires FlatError > 0, so the
+// calibration would then be rejected for EVERY clip and the rotation warp model
+// would quietly never engage anywhere, reported only at debug level.
+type lensCandidate struct {
+	Lens Lens
+	Flat bool
+}
+
 // lensCandidates enumerates the models the calibration sweeps.
-func lensCandidates(width, height float64) []Lens {
-	out := make([]Lens, 0, len(lensKinds)*len(calibrationFocalRatios))
+func lensCandidates(width, height float64) []lensCandidate {
+	out := make([]lensCandidate, 0, len(lensKinds)*len(calibrationFocalRatios))
 	for _, k := range lensKinds {
-		for _, ratio := range calibrationFocalRatios {
-			out = append(out, Lens{Kind: k, Focal: ratio * width, CX: width / 2, CY: height / 2})
+		for i, ratio := range calibrationFocalRatios {
+			out = append(out, lensCandidate{
+				Lens: Lens{Kind: k, Focal: ratio * width, CX: width / 2, CY: height / 2},
+				// calibrationFocalRatios is ordered shortest to longest, so the
+				// last entry is the near-rectilinear baseline.
+				Flat: i == len(calibrationFocalRatios)-1,
+			})
 		}
 	}
 	return out
@@ -579,8 +601,8 @@ func CalibrateLens(pairs []correspondence, width, height float64, opts Options) 
 	// near-rectilinear limit, i.e. the same 3 degrees of freedom spent without
 	// modelling any wide-angle geometry.
 	flat := map[LensKind]float64{}
-	longest := calibrationFocalRatios[len(calibrationFocalRatios)-1]
-	for _, lens := range lensCandidates(width, height) {
+	for _, cand := range lensCandidates(width, height) {
+		lens := cand.Lens
 		var errs []float64
 		for _, p := range pairs {
 			q, ok := FitRotation(p.from, p.to, lens)
@@ -593,7 +615,7 @@ func CalibrateLens(pairs []correspondence, width, height float64, opts Options) 
 			continue
 		}
 		e := medianUpper(errs)
-		if lens.Focal == longest*width {
+		if cand.Flat {
 			flat[lens.Kind] = e
 		}
 		if e < best.Error {

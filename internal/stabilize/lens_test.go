@@ -223,6 +223,23 @@ func TestCalibrateLensRecoversSyntheticLens(t *testing.T) {
 		pairs = append(pairs, c)
 	}
 	cal := CalibrateLens(pairs, w, h, DefaultOptions())
+
+	// The flat baseline, asserted before Reliable() because Reliable() already
+	// requires FlatError > 0 and would fail first with a message about
+	// reliability instead of about the missing baseline. A zero here means the
+	// sweep never identified its near-rectilinear candidate, which makes EVERY
+	// clip's calibration unreliable and silently disables the rotation warp
+	// model; see lensCandidate.
+	if cal.FlatError <= 0 {
+		t.Fatalf("no flat baseline recorded: FlatError = %g (%s)", cal.FlatError, cal)
+	}
+	// Not a restatement of the above: the flat candidate is itself one of the
+	// swept candidates, so the winner cannot fit worse than the baseline. A
+	// FlatError below Error would mean the two came from different lens kinds.
+	if cal.FlatError < cal.Error {
+		t.Errorf("FlatError %g is below the winning Error %g -- the baseline belongs to a different kind (%s)",
+			cal.FlatError, cal.Error, cal)
+	}
 	if !cal.Reliable() {
 		t.Fatalf("synthetic calibration not reliable: %s", cal)
 	}
@@ -231,6 +248,50 @@ func TestCalibrateLensRecoversSyntheticLens(t *testing.T) {
 	}
 	if rel := math.Abs(cal.Lens.Focal-truth.Focal) / truth.Focal; rel > 0.1 {
 		t.Errorf("recovered focal %.1f, want %.1f (%.0f%% off)", cal.Lens.Focal, truth.Focal, rel*100)
+	}
+}
+
+// TestLensCandidates_MarksOneFlatBaselinePerKind pins the sweep's structure:
+// each lens kind must contribute exactly one candidate marked as its flat
+// baseline, and that candidate must be the longest focal swept -- the
+// near-rectilinear limit CalibrateLens compares the winner against.
+//
+// The marking used to be recovered afterwards by testing Focal == longest*width
+// for float equality, which held only because both sides were the same
+// expression with the same operand order. Nothing about the calibration's
+// OUTPUT says whether the baseline was found or missed except FlatError being
+// zero, and a zero FlatError makes every calibration unreliable (see
+// LensCalibration.Reliable) -- i.e. it disables the rotation warp model
+// everywhere, quietly. So the structure is asserted directly, per kind and
+// without fitting anything; TestCalibrateLensRecoversSyntheticLens is the
+// end-to-end half, checking a real calibration comes back with the baseline
+// filled in.
+func TestLensCandidates_MarksOneFlatBaselinePerKind(t *testing.T) {
+	const w, h = 960.0, 720.0
+	// Derived here from the ratio table rather than copied from the sweep, so
+	// this is an independent statement of which candidate is the baseline.
+	longest := 0.0
+	for _, r := range calibrationFocalRatios {
+		if r > longest {
+			longest = r
+		}
+	}
+
+	flatPerKind := map[LensKind]int{}
+	for _, cand := range lensCandidates(w, h) {
+		if !cand.Flat {
+			continue
+		}
+		flatPerKind[cand.Lens.Kind]++
+		if want := longest * w; cand.Lens.Focal != want {
+			t.Errorf("%s: candidate marked flat has focal %g, want the longest swept %g",
+				cand.Lens.Kind, cand.Lens.Focal, want)
+		}
+	}
+	for _, k := range lensKinds {
+		if flatPerKind[k] != 1 {
+			t.Errorf("%s: %d candidates marked as the flat baseline, want exactly 1", k, flatPerKind[k])
+		}
 	}
 }
 

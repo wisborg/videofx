@@ -944,6 +944,45 @@ func TestRenderOptions(t *testing.T) {
 	})
 }
 
+// TestRegisteredStabilizer_MeshEngagesFromTheRegistry checks the effect the
+// REGISTRY hands out, not one a test built by hand.
+//
+// MeshStrength has two out-of-band values and they mean opposite things: a
+// negative one asks for DefaultMeshStrength, and the zero value a struct
+// literal leaves behind is a real gain of zero, which mesh.go treats as "no
+// mesh" and falls back to the similarity. The CLI passes -1 because that is its
+// flag default, so it was fine; a caller doing effects.Get("gocv-stabilizer")
+// and then setting WarpModel = "mesh" got a similarity render with nothing said
+// about it. The factory has to supply the value, and only a test that goes
+// through Get can see whether it does.
+func TestRegisteredStabilizer_MeshEngagesFromTheRegistry(t *testing.T) {
+	e, err := Get("gocv-stabilizer")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	g, ok := e.(*GoCVStabilizer)
+	if !ok {
+		t.Fatalf("registry returned %T, want *GoCVStabilizer", e)
+	}
+
+	// What a library caller does: take the effect, name the model, render.
+	g.WarpModel = string(stabilize.WarpModelMesh)
+
+	var buf bytes.Buffer
+	got := g.renderOptions(captureLog(&buf, false), rotationSeries(false),
+		stabilize.EdgeModeAdaptive, g.WarpModel, nil, 0)
+
+	if !got.Mesh {
+		t.Fatal("Mesh = false under --warp-model mesh from the registry")
+	}
+	if got.MeshStrength <= 0 {
+		t.Errorf("MeshStrength = %v: a gain of zero renders a plain similarity, silently", got.MeshStrength)
+	}
+	if got.MeshStrength != DefaultMeshStrength {
+		t.Errorf("MeshStrength = %v, want the default %v", got.MeshStrength, DefaultMeshStrength)
+	}
+}
+
 // TestRenderOptions_RollingShutter pins that the rolling-shutter correction
 // reaches the renderer, and that the two models take delivery of it differently.
 //

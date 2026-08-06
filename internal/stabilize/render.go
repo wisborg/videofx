@@ -260,9 +260,23 @@ type RenderStats struct {
 	MeshMargin float64
 	RSMargin   float64
 
-	// Lens is the camera model the rotation path rendered with, or nil when
+	// Lens is the camera model the rotation path rendered from, or nil when
 	// that path did not engage. Reported so a render is self-describing about
 	// the geometry it assumed.
+	//
+	// It is the calibration AS CALIBRATED -- analysis-resolution pixels -- not
+	// the lens the warp used: Render scales it by the analysis-to-output factor
+	// first (Lens.Scaled), so a focal read off this field is smaller than the
+	// rendered one by exactly that factor on any clip analyzed below source
+	// resolution, which is all of them by default.
+	//
+	// Scaling the embedded Lens before reporting would be worse, not better.
+	// Error, FlatError and SimilarityError are per-point reprojection errors in
+	// analysis pixels and have no meaningful conversion (they are fit residuals,
+	// not lengths on the output frame), so a rescaled Lens beside unrescaled
+	// errors would be half-converted -- a struct with two unit systems in it and
+	// nothing saying which field is in which. One honest unit for the whole
+	// struct is the lesser evil; this comment is the conversion.
 	Lens *LensCalibration
 }
 

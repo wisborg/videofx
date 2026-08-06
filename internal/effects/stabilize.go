@@ -14,10 +14,19 @@ import (
 func init() {
 	Register("gocv-stabilizer", func() Effect {
 		return &GoCVStabilizer{
-			TrackOptions:   stabilize.DefaultOptions(),
-			EdgeMode:       stabilize.EdgeModeAdaptive,
-			FixedZoom:      stabilize.DefaultRenderOptions().FixedZoom,
-			MaxZoom:        0,
+			TrackOptions: stabilize.DefaultOptions(),
+			EdgeMode:     stabilize.EdgeModeAdaptive,
+			FixedZoom:    stabilize.DefaultRenderOptions().FixedZoom,
+			MaxZoom:      0,
+			// Not DefaultMeshStrength's sentinel but its VALUE: MeshStrength's
+			// "use the default" marker is negative, and the zero value a bare
+			// struct literal would leave behind means the mesh contributes
+			// nothing at all. A programmatic caller that takes this effect from
+			// the registry and sets WarpModel = "mesh" would otherwise render a
+			// plain similarity with no sign that the mesh was asked for. The CLI
+			// is unaffected -- its flag default is the -1 sentinel -- which is
+			// exactly why the gap stayed invisible.
+			MeshStrength:   DefaultMeshStrength,
 			RollingShutter: true,
 		}
 	})
