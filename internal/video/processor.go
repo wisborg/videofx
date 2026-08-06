@@ -3,6 +3,7 @@ package video
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -142,7 +143,7 @@ func Run(ctx context.Context, jobs []Job, cfg ProcessorConfig) []Result {
 	if concurrency > 1 && len(jobs) > 1 {
 		costs := make([]float64, len(jobs))
 		for i, job := range jobs {
-			costs[i] = estimateCost(ctx, job.SourcePath)
+			costs[i] = estimateCost(ctx, job)
 		}
 		order = dispatchOrder(costs)
 	}
@@ -232,8 +233,15 @@ func dispatchOrder(costs []float64) []int {
 // clip sorts last), and the real error surfaces later when processOne
 // actually tries to open it — cost estimation must never turn a probe
 // hiccup into a failed batch, since ordering is only ever an optimization.
-func estimateCost(ctx context.Context, path string) float64 {
-	info, err := vidio.Probe(ctx, path)
+//
+// The job's --start/--end span scales the result, because the effects only
+// ever see the trimmed clip (processOne trims first). Without that, a batch
+// mixing a long clip contributed as a few seconds with a short clip
+// contributed whole ranks them by their untrimmed lengths and dispatches the
+// long one first — the exact makespan inversion this ordering exists to
+// prevent. This takes the whole Job rather than a path for that reason.
+func estimateCost(ctx context.Context, job Job) float64 {
+	info, err := vidio.Probe(ctx, job.SourcePath)
 	if err != nil {
 		return 0
 	}
@@ -241,7 +249,39 @@ func estimateCost(ctx context.Context, path string) float64 {
 	if frames <= 0 {
 		frames = info.Duration * info.FPS
 	}
-	return frames * float64(info.Width) * float64(info.Height)
+	return frames * float64(info.Width) * float64(info.Height) * spanFraction(job, info.Duration)
+}
+
+// spanFraction is how much of a clip a job's trim span actually covers, as a
+// factor in (0,1] to scale the whole-clip cost by.
+//
+// EndSeconds of 0 keeps its meaning from Job — "to the end of the clip" —
+// rather than being read as a zero-length span.
+//
+// Everything unusual answers 1, "assume the whole clip", through the single
+// guard below:
+//
+//   - a span at least as long as the clip IS the whole clip;
+//   - an unknown or non-positive duration, which necessarily makes the span
+//     non-positive too, since the start is clamped to zero and the end can
+//     then be no larger than the duration;
+//   - a span that should be impossible — resolveTrimWindow rejects an --end
+//     at or before --start — which must not be answered with 0, since that
+//     would sort a job last on the strength of a contradiction.
+//
+// Guessing high is the safe direction: an over-estimated job starts earlier,
+// and starting early is the whole point of the heuristic. The guard is also
+// what keeps the division below from ever seeing a zero duration.
+func spanFraction(job Job, duration float64) float64 {
+	end := duration
+	if job.EndSeconds > 0 && job.EndSeconds < end {
+		end = job.EndSeconds
+	}
+	span := end - math.Max(job.StartSeconds, 0)
+	if span <= 0 || span >= duration {
+		return 1
+	}
+	return span / duration
 }
 
 // processOne runs the effect pipeline for one job. finalPath is the output

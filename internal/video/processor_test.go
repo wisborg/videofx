@@ -48,9 +48,88 @@ func TestDispatchOrder(t *testing.T) {
 // than an error or panic, so a bad input never breaks the batch's ordering
 // pass — the real error surfaces later in processOne.
 func TestEstimateCost_ProbeFailureIsZero(t *testing.T) {
-	got := estimateCost(context.Background(), filepath.Join(t.TempDir(), "does-not-exist.mp4"))
+	got := estimateCost(context.Background(), Job{SourcePath: filepath.Join(t.TempDir(), "does-not-exist.mp4")})
 	if got != 0 {
 		t.Errorf("estimateCost of an unprobeable path = %v, want 0", got)
+	}
+}
+
+// TestEstimateCost_ScalesWithTheTrimSpan checks the ordering decision this
+// metric exists to make, on the case that made it wrong: a long clip
+// contributed as a short span against a short clip contributed whole.
+//
+// The effects only ever see the trimmed clip, so a cost taken from the
+// untrimmed file ranks a 12-second clip entered at its last two seconds above
+// a 3-second clip processed end to end — and dispatches the cheap job first,
+// which is precisely the inversion LPT ordering exists to prevent. Asserting
+// on dispatchOrder rather than on the numbers is deliberate: the numbers are
+// unitless and only their ORDER is ever read.
+func TestEstimateCost_ScalesWithTheTrimSpan(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	dir := t.TempDir()
+	long := filepath.Join(dir, "long.mp4")
+	short := filepath.Join(dir, "short.mp4")
+	genClip(t, long, 12)
+	genClip(t, short, 3)
+
+	ctx := context.Background()
+	longWhole := estimateCost(ctx, Job{SourcePath: long})
+	shortWhole := estimateCost(ctx, Job{SourcePath: short})
+	longSliced := estimateCost(ctx, Job{SourcePath: long, StartSeconds: 10, EndSeconds: 12})
+
+	// Unchanged behavior for the default path: no span means the whole clip,
+	// and the longer clip still costs more.
+	if longWhole <= shortWhole {
+		t.Fatalf("whole-clip costs are %v (12s) and %v (3s); the longer clip must cost more", longWhole, shortWhole)
+	}
+	if longSliced >= longWhole {
+		t.Errorf("a 2s span of a 12s clip costs %v, the whole clip %v; the span must cost less", longSliced, longWhole)
+	}
+	// Two seconds of the long clip is less work than three seconds of the
+	// short one, and the ordering has to say so.
+	if longSliced >= shortWhole {
+		t.Errorf("2s of the long clip costs %v, the whole 3s clip %v; the span is smaller and must cost less", longSliced, shortWhole)
+	}
+	if got := dispatchOrder([]float64{longSliced, shortWhole}); got[0] != 1 {
+		t.Errorf("dispatchOrder = %v, want the whole 3s clip (index 1) dispatched first; "+
+			"the 2s span of the 12s clip is the cheaper job and must not go first", got)
+	}
+
+	// An --end of 0 means "to the end of the clip", not a zero-length span.
+	if got := estimateCost(ctx, Job{SourcePath: long, EndSeconds: 0}); got != longWhole {
+		t.Errorf("EndSeconds 0 gave cost %v, want the whole-clip %v", got, longWhole)
+	}
+}
+
+// TestSpanFraction covers the guards around the scaling factor without
+// needing a real file. Everything unusual must answer 1 ("assume the whole
+// clip"): guessing high starts a job earlier, which is the safe direction for
+// a heuristic whose only job is to avoid a long clip starting last.
+func TestSpanFraction(t *testing.T) {
+	cases := []struct {
+		name     string
+		job      Job
+		duration float64
+		want     float64
+	}{
+		{"no span", Job{}, 10, 1},
+		{"start only", Job{StartSeconds: 6}, 10, 0.4},
+		{"end only", Job{EndSeconds: 4}, 10, 0.4},
+		{"both bounds", Job{StartSeconds: 2, EndSeconds: 6}, 10, 0.4},
+		{"end past the clip", Job{EndSeconds: 99}, 10, 1},
+		{"span covers the clip", Job{StartSeconds: 0, EndSeconds: 10}, 10, 1},
+		{"unknown duration", Job{StartSeconds: 2, EndSeconds: 6}, 0, 1},
+		{"negative start is clamped", Job{StartSeconds: -5, EndSeconds: 4}, 10, 0.4},
+		{"impossible span is not zero", Job{StartSeconds: 8, EndSeconds: 4}, 10, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := spanFraction(c.job, c.duration); got != c.want {
+				t.Errorf("spanFraction(%+v, %v) = %v, want %v", c.job, c.duration, got, c.want)
+			}
+		})
 	}
 }
 
