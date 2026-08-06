@@ -232,23 +232,22 @@ func (l *Logger) Enabled(level Level) bool {
 	return l.resolve().sl.Enabled(context.Background(), level.slogLevel())
 }
 
-// The formatted variants (Debugf/Infof/Warnf/Errorf) are the primary API.
-// videofx's messages are user-facing prose with values embedded mid-sentence,
-// and that phrasing is the part that tells someone what to do about what they
-// are being told; rendering them as key=value would lose it.
+// The formatted variants (Debugf/Infof/Warnf/Errorf) are the whole message
+// API. videofx's messages are user-facing prose with values embedded
+// mid-sentence, and that phrasing is the part that tells someone what to do
+// about what they are being told; rendering them as key=value would lose it.
+//
+// There is deliberately no slog-style Debug/Info/Warn/Error taking alternating
+// key/value args. Those existed and were never called once, which is what the
+// paragraph above predicts: the structured half of a videofx line is the
+// component name and the WithField context, not the message. Anything that
+// really is structured attaches with WithField and still says its piece in
+// prose.
 
 func (l *Logger) Debugf(format string, a ...any) { l.logf(LevelDebug, format, a...) }
 func (l *Logger) Infof(format string, a ...any)  { l.logf(LevelInfo, format, a...) }
 func (l *Logger) Warnf(format string, a ...any)  { l.logf(LevelWarn, format, a...) }
 func (l *Logger) Errorf(format string, a ...any) { l.logf(LevelError, format, a...) }
-
-// The unformatted variants take slog-style alternating key/value args, for
-// messages whose context really is structured.
-
-func (l *Logger) Debug(msg string, args ...any) { l.log(LevelDebug, msg, args...) }
-func (l *Logger) Info(msg string, args ...any)  { l.log(LevelInfo, msg, args...) }
-func (l *Logger) Warn(msg string, args ...any)  { l.log(LevelWarn, msg, args...) }
-func (l *Logger) Error(msg string, args ...any) { l.log(LevelError, msg, args...) }
 
 func (l *Logger) logf(level Level, format string, a ...any) {
 	r := l.resolve()
@@ -259,9 +258,4 @@ func (l *Logger) logf(level Level, format string, a ...any) {
 		return
 	}
 	r.sl.Log(context.Background(), lv, fmt.Sprintf(format, a...))
-}
-
-func (l *Logger) log(level Level, msg string, args ...any) {
-	r := l.resolve()
-	r.sl.Log(context.Background(), level.slogLevel(), msg, args...)
 }

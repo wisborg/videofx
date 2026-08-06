@@ -532,7 +532,7 @@ func (g *GoCVStabilizer) renderOptions(
 			reg = 1.0 // full perspective correction by default
 		}
 		opts.PerspectiveRegularize = reg
-		opts.PerspectiveZoomMargin = 0.03 // small extra crop to cover perspective corner excursion
+		opts.PerspectiveZoomMargin = stabilize.DefaultPerspectiveZoomMargin
 
 	case stabilize.WarpModelRotation:
 		opts.Rotation = g.reportLens(log, series)
@@ -554,21 +554,7 @@ func (g *GoCVStabilizer) renderOptions(
 		}
 		opts.Mesh = true
 		opts.MeshStrength = strength
-		// Small safety cushion on top of the crop Render measures to the mesh's
-		// actual exposed border. Raised from 0.02 to 0.04 after a visual A/B on
-		// test_very_shaken: the measured crop is the 95th percentile of the
-		// per-frame requirement (see meshCoverageCrop), so the frames past it
-		// fall back to the mesh remap's BORDER_REPLICATE fill, and at the
-		// default grid-1 settings that smeared band was visibly streaking at
-		// the frame edges. Roughly two extra percent of crop removes it.
-		//
-		// This is a cushion on a percentile, not a measurement -- 0.04 is the
-		// value confirmed to clear the streaking by eye, not a computed
-		// minimum. Raising the percentile instead would be the principled fix,
-		// but the per-frame crop distribution on this footage is broad rather
-		// than outlier-driven (p95 needs ~38%, the worst frame ~74%), so it
-		// would cost several times more picture than this does.
-		opts.MeshZoomMargin = 0.04
+		opts.MeshZoomMargin = stabilize.DefaultMeshZoomMargin
 	}
 
 	return opts
@@ -733,17 +719,19 @@ func warnIfShortAnalysis(log *logging.Logger, sourcePath string, series *stabili
 // mapStrengthToSigma converts the Effect interface's normalized 0.0-1.0
 // Strength into a Gaussian smoothing Sigma, in analysis frames. Kept as
 // its own isolated function -- mirroring WarpStabilizer's own mapStrength
-// in this package's warpstab.go, and stabilize.mapStrength in
-// internal/stabilize/smooth.go -- so the strength dial can be retuned
+// in this package's warpstab.go -- so the strength dial can be retuned
 // here without touching Apply's pipeline logic.
 //
-// This is a DELIBERATELY DIFFERENT mapping from stabilize.mapStrength/
-// SmoothWithStrength (Phase 3's own strength dial, still exported and
-// used directly by cmd/vidiobench for hands-on experimentation): that one
-// spans Sigma 10-90 with no particular value pinned to any specific
-// strength. This effect's mapping is narrower -- Sigma 10 (strength 0) to
-// Sigma 24 (strength 1) -- chosen so that videofx's CLI-wide --strength
-// default of 0.5 lands on Sigma ~17.
+// This is the ONLY place videofx turns a strength into a sigma. Package
+// stabilize deliberately has no mapping of its own: stabilize.Smooth takes
+// a sigma in frames, so cmd/vidiobench and stabilize's own tests name the
+// sigma they mean rather than going through a dial. Anything added here is
+// therefore a UI convention, free to be retuned against how the CLI feels,
+// without a second mapping downstream quietly disagreeing with it.
+//
+// The range is narrow on purpose -- Sigma 10 (strength 0) to Sigma 24
+// (strength 1) -- chosen so that videofx's CLI-wide --strength default of
+// 0.5 lands on Sigma ~17.
 //
 // The range was retuned from an earlier 10-30 (which put the default at
 // Sigma 20) after viewing real output: on this head-mounted running

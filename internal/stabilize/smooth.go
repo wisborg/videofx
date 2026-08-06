@@ -120,8 +120,9 @@ type SmoothOptions struct {
 	// analysis frames. Larger sigma removes lower frequencies (heavier
 	// smoothing, more of the shake removed, but also more of any real
 	// intentional camera pan gets treated as "shake" and pulled out).
-	// See DefaultSmoothOptions and mapStrength for the reasoning behind
-	// specific values.
+	// See DefaultSmoothOptions for the reasoning behind specific values,
+	// and internal/effects' mapStrengthToSigma for the range the CLI's
+	// --strength dial actually spans.
 	Sigma float64 `json:"sigma"`
 
 	// RadiusMultiple sets the kernel's half-width as a multiple of Sigma
@@ -292,6 +293,17 @@ type SmoothResult struct {
 // entire point of the sidecar (see MotionSeries's doc comment): tuning
 // SmoothOptions against real footage does not require re-running the
 // (multi-second) analysis pass each time.
+//
+// There is deliberately no SmoothWithStrength alongside this: Smooth takes
+// a Sigma in frames and nothing else, so every caller in this package —
+// its tests, cmd/vidiobench, the effect layer — states the sigma it means.
+// The Effect interface's normalized 0.0-1.0 Strength is translated exactly
+// once, by internal/effects/stabilize.go's mapStrengthToSigma, which is
+// where that mapping belongs: it is a UI convention (videofx's shared
+// --strength default of 0.5 has to land on a sigma that suits this
+// footage), not a property of Gaussian smoothing. A second, wider mapping
+// did live here, and it went uncalled for exactly that reason — anyone
+// working at this layer already knows the sigma they want.
 func Smooth(series *MotionSeries, opts SmoothOptions) *SmoothResult {
 	opts = opts.sanitized()
 
@@ -361,55 +373,4 @@ func Smooth(series *MotionSeries, opts SmoothOptions) *SmoothResult {
 		ClampedCount: clampedCount,
 		Options:      opts,
 	}
-}
-
-// mapStrength converts the Effect interface's normalized 0.0-1.0
-// Strength (see internal/effects.Input) into a Gaussian Sigma, in
-// frames. Kept as its own isolated function — mirroring
-// internal/effects/warpstab.go's mapStrength — so the strength dial can
-// be retuned without touching the smoothing algorithm in this file.
-//
-// Higher strength means more smoothing (larger sigma), per the package
-// spec. The range is bounded by sigmaMinFrames (barely more than a
-// single-frame delta: removes almost nothing) and sigmaMaxFrames (~1.5s
-// at 59.94fps: very heavy smoothing, cuts well under 0.1Hz). The
-// DefaultSmoothOptions value (Sigma=20, validated against measured
-// footage — see its doc comment) falls at strength 0.125 in this
-// mapping; that is not a special breakpoint the mapping was built
-// around, just where the measured-safe value happens to land in a plain
-// linear range.
-//
-// This is a different, more general-purpose dial than the effect layer
-// uses: internal/effects' new GoCVStabilizer effect (Phase 5) has its
-// OWN isolated strength->sigma mapping, in its own file, tuned so the
-// CLI's shared --strength default (0.5) lands exactly on the
-// DefaultSmoothOptions value above — this package's mapStrength/
-// SmoothWithStrength exist for direct experimentation (e.g. via
-// cmd/vidiobench) independent of that effect-specific convention, and
-// are not called by GoCVStabilizer.
-func mapStrength(strength float64) float64 {
-	const sigmaMinFrames = 10.0
-	const sigmaMaxFrames = 90.0
-
-	s := strength
-	if s < 0 {
-		s = 0
-	}
-	if s > 1 {
-		s = 1
-	}
-	return sigmaMinFrames + s*(sigmaMaxFrames-sigmaMinFrames)
-}
-
-// SmoothWithStrength is the Effect-facing entry point for Phase 3: it
-// derives Sigma from strength via mapStrength, keeping every other field
-// of base (ScaleCorrectionWeight, clamps, RadiusMultiple) unchanged. Kept
-// separate from Smooth (rather than folding strength into SmoothOptions
-// itself) so callers that already know the exact sigma they want — this
-// package's own tests, or a human iterating on a sidecar with vidiobench
-// — are never forced through the strength dial.
-func SmoothWithStrength(series *MotionSeries, strength float64, base SmoothOptions) *SmoothResult {
-	opts := base
-	opts.Sigma = mapStrength(strength)
-	return Smooth(series, opts)
 }

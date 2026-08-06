@@ -793,11 +793,11 @@ func runRender(ctx context.Context, p renderParams) error {
 	case stabilize.WarpModelMesh:
 		renderOpts.Mesh = true
 		renderOpts.MeshStrength = p.meshStrength
-		renderOpts.MeshZoomMargin = 0.04 // matches the effect's cushion
+		renderOpts.MeshZoomMargin = stabilize.DefaultMeshZoomMargin
 		fmt.Printf("correction: mesh (grid %d, strength %.2f)\n", series.Options.MeshGrid, p.meshStrength)
 	case stabilize.WarpModelHomography:
 		renderOpts.PerspectiveRegularize = 1.0
-		renderOpts.PerspectiveZoomMargin = 0.03
+		renderOpts.PerspectiveZoomMargin = stabilize.DefaultPerspectiveZoomMargin
 		fmt.Println("correction: homography (EXPERIMENTAL; measured WORSE than similarity)")
 	default:
 		fmt.Println("correction: similarity")

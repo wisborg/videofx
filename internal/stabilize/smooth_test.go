@@ -434,24 +434,6 @@ func TestSmooth_FromSidecarRoundTrip(t *testing.T) {
 	}
 }
 
-func TestMapStrength_MonotonicAndBounded(t *testing.T) {
-	prev := mapStrength(0)
-	for _, s := range []float64{0.0, 0.25, 0.5, 0.75, 1.0} {
-		sigma := mapStrength(s)
-		if s > 0 && sigma < prev {
-			t.Errorf("mapStrength not monotonic: mapStrength(%v)=%v < previous %v", s, sigma, prev)
-		}
-		prev = sigma
-	}
-
-	if got := mapStrength(-1); got != mapStrength(0) {
-		t.Errorf("mapStrength(-1) = %v, want clamped to mapStrength(0) = %v", got, mapStrength(0))
-	}
-	if got := mapStrength(2); got != mapStrength(1) {
-		t.Errorf("mapStrength(2) = %v, want clamped to mapStrength(1) = %v", got, mapStrength(1))
-	}
-}
-
 func TestGaussianKernel_NormalizedAndSymmetric(t *testing.T) {
 	kernel := gaussianKernel(30, 3)
 

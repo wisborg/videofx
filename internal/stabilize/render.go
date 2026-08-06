@@ -131,7 +131,8 @@ type RenderOptions struct {
 	// on top of the similarity crop when the perspective correction is active,
 	// to cover the small extra corner excursion perspective can introduce
 	// beyond what the similarity zoom accounts for. Ignored when
-	// PerspectiveRegularize is 0.
+	// PerspectiveRegularize is 0. DefaultPerspectiveZoomMargin is the tuned
+	// value; the zero value here means "no cushion", not "the default".
 	PerspectiveZoomMargin float64
 
 	// Mesh enables the EXPERIMENTAL MeshFlow-style spatially-varying correction
@@ -163,7 +164,9 @@ type RenderOptions struct {
 	// MeshZoomMargin is a small extra fractional zoom added ON TOP of the crop
 	// that Render sizes to the mesh's actual edge displacement (see
 	// meshCropMargin) -- a safety cushion, not the primary crop. Ignored when
-	// Mesh is false.
+	// Mesh is false. DefaultMeshZoomMargin is the tuned value, and carries the
+	// A/B that chose it; the zero value here means "no cushion", not "the
+	// default".
 	MeshZoomMargin float64
 
 	// RS holds the per-frame rolling-shutter rectifications to apply before the
@@ -186,6 +189,38 @@ type RenderOptions struct {
 // estimation noise that would otherwise warp the picture. A modest fixed value:
 // enough to calm the estimate, short enough not to erase real local motion.
 const meshDenoiseSigma = 4.0
+
+// DefaultMeshZoomMargin is the value to give MeshZoomMargin: a small safety
+// cushion on top of the crop Render measures to the mesh's actual exposed
+// border. Raised from 0.02 to 0.04 after a visual A/B on test_very_shaken: the
+// measured crop is the 95th percentile of the per-frame requirement (see
+// meshCoverageCrop), so the frames past it fall back to the mesh remap's
+// BORDER_REPLICATE fill, and at the default grid-1 settings that smeared band
+// was visibly streaking at the frame edges. Roughly two extra percent of crop
+// removes it.
+//
+// This is a cushion on a percentile, not a measurement -- 0.04 is the value
+// confirmed to clear the streaking by eye, not a computed minimum. Raising the
+// percentile instead would be the principled fix, but the per-frame crop
+// distribution on this footage is broad rather than outlier-driven (p95 needs
+// ~38%, the worst frame ~74%), so it would cost several times more picture than
+// this does.
+//
+// It lives here, next to the code that spends it, rather than at the two call
+// sites that set the field -- internal/effects (the shipped render) and
+// cmd/vidiobench (the crop measurement the shipped render is compared against).
+// Those two must agree by construction: crop is the currency this stabilizer
+// spends, so a vidiobench run configured with a different cushion than the
+// effect uses is a crop measurement filed under the wrong configuration, and
+// the reasoning above is invisible at exactly the site where someone comparing
+// configurations reads it.
+const DefaultMeshZoomMargin = 0.04
+
+// DefaultPerspectiveZoomMargin is the value to give PerspectiveZoomMargin: a
+// small extra crop covering the corner excursion the EXPERIMENTAL homography
+// correction can introduce beyond what the similarity zoom accounts for. Same
+// reason for living here as DefaultMeshZoomMargin.
+const DefaultPerspectiveZoomMargin = 0.03
 
 // DefaultRenderOptions returns EdgeModeFixed at a 12% zoom -- the Phase 4
 // spec's original starting point. It is NOT the recommended default for

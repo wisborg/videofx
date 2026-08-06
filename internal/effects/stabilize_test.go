@@ -947,9 +947,14 @@ func TestRenderOptions(t *testing.T) {
 		}
 		// The cushion is what keeps the mesh remap's replicated border out of
 		// the picture; it is a tuned value, so losing it is a visible
-		// regression rather than a rounding difference.
-		if got.MeshZoomMargin <= 0 {
-			t.Errorf("MeshZoomMargin = %v, want the tuned cushion", got.MeshZoomMargin)
+		// regression rather than a rounding difference. Compared against the
+		// shared constant rather than a literal on purpose: cmd/vidiobench sets
+		// the same field from the same constant so that a crop it measures is
+		// the crop the shipped effect produces, and a literal re-inlined here
+		// would let the two drift apart without failing anything.
+		if got.MeshZoomMargin != stabilize.DefaultMeshZoomMargin {
+			t.Errorf("MeshZoomMargin = %v, want the shared cushion %v",
+				got.MeshZoomMargin, stabilize.DefaultMeshZoomMargin)
 		}
 	})
 
@@ -973,8 +978,9 @@ func TestRenderOptions(t *testing.T) {
 		if got.PerspectiveRegularize != 1.0 {
 			t.Errorf("PerspectiveRegularize = %v, want the 1.0 default", got.PerspectiveRegularize)
 		}
-		if got.PerspectiveZoomMargin <= 0 {
-			t.Errorf("PerspectiveZoomMargin = %v, want a positive margin", got.PerspectiveZoomMargin)
+		if got.PerspectiveZoomMargin != stabilize.DefaultPerspectiveZoomMargin {
+			t.Errorf("PerspectiveZoomMargin = %v, want the shared margin %v",
+				got.PerspectiveZoomMargin, stabilize.DefaultPerspectiveZoomMargin)
 		}
 	})
 }
