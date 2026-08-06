@@ -97,6 +97,10 @@ func rotateArgs(displayRotation int, src, dst string, debug bool) []string {
 		"-map", "0",
 		"-c", "copy",
 		"-map_metadata", "0",
-		dst,
+		// Bare positional: a dst whose name starts with a dash is otherwise
+		// parsed as an option. Reachable here without any odd input -- the
+		// output name is derived from the source's, so a clip named "-y.mp4"
+		// produces "-y - rotated 90.mp4". See vidio.PositionalPath.
+		vidio.PositionalPath(dst),
 	)
 }

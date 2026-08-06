@@ -153,6 +153,39 @@ func TestEncodeSegmentArgs(t *testing.T) {
 	}
 }
 
+// TestArgvBuilders_GuardTheOutputPositional covers this package's builders
+// under the rule stated in full by the test of the same name in internal/vidio
+// (where PositionalPath lives): a builder whose argument list ends in an output
+// FILENAME must run it through vidio.PositionalPath. Read that comment for why,
+// for why the fixture below is a literal relative "-out.mp4", and for what
+// these tables do not catch.
+//
+// vmafArgs has no row: it ends in "-f null -", a dash that must survive.
+//
+// A new builder that ends in an output path belongs in this table.
+func TestArgvBuilders_GuardTheOutputPositional(t *testing.T) {
+	const dashOut = "-out.mp4"
+	const want = "./-out.mp4"
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"encodeSegmentArgs", encodeSegmentArgs("in.mp4", dashOut, 55, Options{}.withDefaults())},
+		{"encodeSegmentArgs/seeking", encodeSegmentArgs("in.mp4", dashOut, 55, Options{StartSeconds: 3}.withDefaults())},
+	}
+	for _, tt := range tests {
+		if len(tt.args) == 0 {
+			t.Errorf("%s: built an empty argument list", tt.name)
+			continue
+		}
+		if got := tt.args[len(tt.args)-1]; got != want {
+			t.Errorf("%s: trailing output argument is %q, want %q (ffmpeg would parse %q as an option)",
+				tt.name, got, want, dashOut)
+		}
+	}
+}
+
 // TestEncodeSegmentArgs_NoSeekWhenNotAsked pins that -ss is omitted rather than
 // passed as zero, so the default path is exactly the plain command line.
 func TestEncodeSegmentArgs_NoSeekWhenNotAsked(t *testing.T) {

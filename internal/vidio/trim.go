@@ -35,11 +35,32 @@ func TrimClip(ctx context.Context, src, dst string, startSeconds, endSeconds flo
 			startSeconds, end, src, info.Duration)
 	}
 
+	// Through newFFmpegCmd like every other ffmpeg invocation in this package:
+	// it supplies the quiet flags this used to pass by hand, and -- the part
+	// that was actually missing -- captures stderr into the bounded buffer
+	// instead of slurping combined output unbounded. A stream copy of a long
+	// clip that fails late could otherwise return an arbitrarily large error.
+	cmd, capture := newFFmpegCmd(ctx, trimArgs(src, dst, startSeconds, end, info)...)
+	if err := cmd.Run(); err != nil {
+		if tail := capture.String(); tail != "" {
+			return fmt.Errorf("vidio: trimming %s: %w\nffmpeg stderr:\n%s", src, err, tail)
+		}
+		return fmt.Errorf("vidio: trimming %s: %w", src, err)
+	}
+	return nil
+}
+
+// trimArgs builds TrimClip's ffmpeg argument list for the already-clamped span
+// [startSeconds, endSeconds) of src. Split out from TrimClip -- like
+// encoderArgs and overlayArgs -- so the argument shape can be asserted without
+// spawning ffmpeg, and so the output positional sits with the other builders
+// that have to guard it.
+func trimArgs(src, dst string, startSeconds, endSeconds float64, info Info) []string {
 	args := []string{
 		"-y",
 		"-ss", secs(startSeconds), // fast seek before -i (keyframe-aligned)
 		"-i", src,
-		"-t", secs(end - startSeconds),
+		"-t", secs(endSeconds - startSeconds),
 		"-map", "0:v:0", "-map", "0:a?",
 		"-c", "copy",
 		"-map_metadata", "0",
@@ -77,21 +98,10 @@ func TrimClip(ctx context.Context, src, dst string, startSeconds, endSeconds flo
 		shifted := info.CreationTime.Add(time.Duration(startSeconds * float64(time.Second)))
 		args = append(args, "-metadata", "creation_time="+shifted.UTC().Format("2006-01-02T15:04:05.000000Z07:00"))
 	}
-	args = append(args, dst)
-
-	// Through newFFmpegCmd like every other ffmpeg invocation in this package:
-	// it supplies the quiet flags this used to pass by hand, and -- the part
-	// that was actually missing -- captures stderr into the bounded buffer
-	// instead of slurping combined output unbounded. A stream copy of a long
-	// clip that fails late could otherwise return an arbitrarily large error.
-	cmd, capture := newFFmpegCmd(ctx, args...)
-	if err := cmd.Run(); err != nil {
-		if tail := capture.String(); tail != "" {
-			return fmt.Errorf("vidio: trimming %s: %w\nffmpeg stderr:\n%s", src, err, tail)
-		}
-		return fmt.Errorf("vidio: trimming %s: %w", src, err)
-	}
-	return nil
+	// dst is a temp path today (absolute, fixed basename), so the dash guard
+	// changes nothing for the current caller; it is applied because every bare
+	// positional in this tree does, not because this one is exploitable.
+	return append(args, PositionalPath(dst))
 }
 
 func secs(s float64) string { return strconv.FormatFloat(s, 'f', 3, 64) }

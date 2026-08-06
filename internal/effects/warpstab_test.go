@@ -51,9 +51,16 @@ func TestWarpStabilizer_Apply_UsesPerfOptions(t *testing.T) {
 		},
 	}
 
+	// A dash-leading output name, deliberately: this effect builds its argv
+	// inline in Apply rather than through a builder, so it has no row in
+	// TestArgvBuilders_GuardTheOutputPositional and this is the only place the
+	// guard on its output positional is checked. A plain "out.mp4" here (what
+	// this used to pass) asserts the trailing argument just as happily with
+	// vidio.PositionalPath deleted. It must be RELATIVE -- the guard is a no-op
+	// on an absolute path.
 	err := w.Apply(context.Background(), Input{
 		SourcePath: "in.mp4",
-		OutputPath: "out.mp4",
+		OutputPath: "-out.mp4",
 		Strength:   0.5,
 	})
 	if err != nil {
@@ -95,8 +102,9 @@ func TestWarpStabilizer_Apply_UsesPerfOptions(t *testing.T) {
 	if !containsAdjacent(transform.args, "-c:a", "copy") {
 		t.Errorf("transform pass should copy audio: %v", transform.args)
 	}
-	if transform.args[len(transform.args)-1] != "out.mp4" {
-		t.Errorf("transform pass should write to the resolved output path, got args: %v", transform.args)
+	if got := transform.args[len(transform.args)-1]; got != "./-out.mp4" {
+		t.Errorf("transform pass trailing argument is %q, want %q (ffmpeg parses a bare %q as an option): %v",
+			got, "./-out.mp4", "-out.mp4", transform.args)
 	}
 
 	// Sanity check the vidstabtransform filter references the same temp
@@ -186,9 +194,13 @@ func TestWarpStabilizer_Apply_CopiesSourceMetadata(t *testing.T) {
 	fr := &fakeRunner{}
 	w := &WarpStabilizer{Runner: fr, perf: DefaultPerfOptions()}
 
+	// Dash-leading for the same reason as in
+	// TestWarpStabilizer_Apply_UsesPerfOptions: the assertion below is about
+	// the output surviving as the LAST argument, and it should hold the guard
+	// in place while it is there.
 	if err := w.Apply(context.Background(), Input{
 		SourcePath: "in.mp4",
-		OutputPath: "out.mp4",
+		OutputPath: "-out.mp4",
 		Strength:   0.5,
 	}); err != nil {
 		t.Fatalf("Apply returned error: %v", err)
@@ -204,9 +216,10 @@ func TestWarpStabilizer_Apply_CopiesSourceMetadata(t *testing.T) {
 	if !containsAdjacent(transform.args, "-map_metadata:s:v:0", "0:s:v:0") {
 		t.Errorf("transform pass must copy video-stream metadata (-map_metadata:s:v:0 0:s:v:0): %v", transform.args)
 	}
-	// OutputPath must remain the final argument.
-	if transform.args[len(transform.args)-1] != "out.mp4" {
-		t.Errorf("output path should remain last after adding metadata flags: %v", transform.args)
+	// OutputPath must remain the final argument, still dash-guarded.
+	if got := transform.args[len(transform.args)-1]; got != "./-out.mp4" {
+		t.Errorf("output path should remain last (and guarded) after adding metadata flags, got %q: %v",
+			got, transform.args)
 	}
 }
 

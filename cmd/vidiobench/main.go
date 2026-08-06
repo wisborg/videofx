@@ -1010,14 +1010,7 @@ func runRoundtrip(ctx context.Context, file, outPath string, maxFrames int) erro
 // also just container metadata, and encoding could in principle produce
 // a file whose metadata is right but whose stream isn't, or vice versa).
 func countFramesFfprobe(ctx context.Context, path string) (int, error) {
-	cmd := exec.CommandContext(ctx, "ffprobe",
-		"-v", "error",
-		"-select_streams", "v:0",
-		"-count_frames",
-		"-show_entries", "stream=nb_read_frames",
-		"-print_format", "json",
-		path,
-	)
+	cmd := exec.CommandContext(ctx, "ffprobe", countFramesArgs(path)...)
 	out, err := cmd.Output()
 	if err != nil {
 		return 0, err
@@ -1038,6 +1031,22 @@ func countFramesFfprobe(ctx context.Context, path string) (int, error) {
 		return 0, err
 	}
 	return n, nil
+}
+
+// countFramesArgs builds countFramesFfprobe's command line. Split out for the
+// same reason every other ffmpeg/ffprobe invocation in this tree has a builder:
+// the argument list is the thing that can be wrong, and asserting it costs no
+// subprocess. ffprobe takes its input as a BARE positional (no -i), so the path
+// needs the same dash guard an output filename does.
+func countFramesArgs(path string) []string {
+	return []string{
+		"-v", "error",
+		"-select_streams", "v:0",
+		"-count_frames",
+		"-show_entries", "stream=nb_read_frames",
+		"-print_format", "json",
+		vidio.PositionalPath(path),
+	}
 }
 
 // peakRSSBytes reports the process's peak resident set size, when the

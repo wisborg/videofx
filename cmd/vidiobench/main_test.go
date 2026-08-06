@@ -100,6 +100,41 @@ func TestRenderModelResolution(t *testing.T) {
 	}
 }
 
+// TestArgvBuilders_GuardTheOutputPositional covers this tool's builders under
+// the rule stated in full by the test of the same name in internal/vidio (where
+// PositionalPath lives): a builder whose argument list ends in a bare
+// positional PATH must run it through vidio.PositionalPath. Read that comment
+// for why, for why the fixture is a literal relative "-clip.mp4", and for what
+// these tables do not catch.
+//
+// This is a developer tool rather than shipped CLI surface, so the row is here
+// for consistency: it is the last bare positional in the tree, and a rule with
+// one silent exception is not a rule. ffprobe takes its input file as a
+// positional, so it is the input path that needs the guard here.
+//
+// A new builder that ends in a bare positional path belongs in this table.
+func TestArgvBuilders_GuardTheOutputPositional(t *testing.T) {
+	const dashPath = "-clip.mp4"
+	const want = "./-clip.mp4"
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"countFramesArgs", countFramesArgs(dashPath)},
+	}
+	for _, tt := range tests {
+		if len(tt.args) == 0 {
+			t.Errorf("%s: built an empty argument list", tt.name)
+			continue
+		}
+		if got := tt.args[len(tt.args)-1]; got != want {
+			t.Errorf("%s: trailing positional is %q, want %q (ffprobe would parse %q as an option)",
+				tt.name, got, want, dashPath)
+		}
+	}
+}
+
 // TestModelLabel pins that the similarity does not print as an empty string.
 // It is the empty string in the type, so an unguarded %s drops it out of the
 // middle of a sentence about which model won the render.
