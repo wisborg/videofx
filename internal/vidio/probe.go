@@ -138,6 +138,20 @@ type ffprobeFormatTags struct {
 	CreationTime string `json:"creation_time"`
 }
 
+// maxProbeDimension is the largest per-side pixel dimension Probe will report.
+//
+// It is a malformed/hostile-metadata guard, not a statement about what this
+// program can handle: 16384 is more than four times 4K's width and more than
+// twice 8K's, so no real clip comes near it. What it stops is a container whose
+// header CLAIMS an enormous frame: Probe reads metadata only -- no frame is
+// decoded -- and every consumer sizes its buffers from what Probe returns, so a
+// declared 65535x65535 has effects/telemetryhud.go allocating ~17GB of RGBA and
+// vidio.Decoder asking gocv for a Mat of the same. The latter is a C++
+// allocation the Go runtime cannot recover from: it aborts the process rather
+// than returning an error. One ceiling here covers all of those sites, which is
+// why it lives in Probe rather than at each allocation.
+const maxProbeDimension = 16384
+
 // Probe runs ffprobe against path and extracts the video (and audio
 // presence) information a Decoder/Encoder needs to size buffers and
 // build ffmpeg command lines. It is a single cheap subprocess call —
@@ -188,6 +202,16 @@ func parseProbeJSON(data []byte) (Info, error) {
 	}
 	if videoStream == nil {
 		return Info{}, fmt.Errorf("no video stream")
+	}
+	// See maxProbeDimension: names the side that failed, since "16384x16384" is
+	// a different problem from "65535 wide, 1080 tall".
+	if videoStream.Width > maxProbeDimension {
+		return Info{}, fmt.Errorf("video stream declares a width of %d pixels, above the %d-pixel sanity limit (metadata is malformed)",
+			videoStream.Width, maxProbeDimension)
+	}
+	if videoStream.Height > maxProbeDimension {
+		return Info{}, fmt.Errorf("video stream declares a height of %d pixels, above the %d-pixel sanity limit (metadata is malformed)",
+			videoStream.Height, maxProbeDimension)
 	}
 
 	fps, err := parseFrameRate(videoStream.RFrameRate)

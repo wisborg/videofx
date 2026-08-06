@@ -2,6 +2,7 @@ package effects
 
 import (
 	"encoding/binary"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -212,6 +213,160 @@ func TestHideSubtitleTrack_TruncatedTkhdDoesNotPanic(t *testing.T) {
 	// the right answer. A panic is not, and neither is silent success.
 	if err := hideSubtitleTrack(path); err == nil {
 		t.Error("expected an error for a subtitle track with no usable tkhd")
+	}
+}
+
+// largeBox builds one ISO-BMFF box using the 64-bit largesize form: a 32-bit
+// size field of 1, the type, then the declared size as a uint64. The declared
+// size is passed separately from the payload precisely so a test can lie about
+// it.
+func largeBox(typ string, declared uint64, payload []byte) []byte {
+	b := make([]byte, 16+len(payload))
+	binary.BigEndian.PutUint32(b[0:4], 1)
+	copy(b[4:8], typ)
+	binary.BigEndian.PutUint64(b[8:16], declared)
+	copy(b[16:], payload)
+	return b
+}
+
+// TestReadBox_RejectsOverflowingLargesize covers the one hole in this parser's
+// bounds checks: the 64-bit largesize is attacker-chosen and was narrowed to
+// int before being range-checked.
+//
+// The dangerous value is not the largest one. A size near math.MaxInt64 read at
+// offset 0 still fails "off+size > end" honestly. But at any NONZERO offset --
+// and every box after the first is at one -- a size of MaxInt64-k with off > k
+// makes that sum wrap negative, so the check passes, readBox reports ok, and
+// the caller's "off += size" lands the next read at a negative index. Checked as
+// a uint64 against the bytes actually remaining, no declared size can wrap.
+func TestReadBox_RejectsOverflowingLargesize(t *testing.T) {
+	// 8 bytes of a preceding box, so the box under test sits at off=8: the
+	// wrap needs off > 0.
+	const off = 8
+	prefix := box("free", nil)
+
+	tests := []struct {
+		name     string
+		declared uint64
+		wantOK   bool
+		wantSize int
+	}{
+		// Honest 64-bit box: header(16) + 8 bytes of payload, all present.
+		{name: "valid largesize", declared: 24, wantOK: true, wantSize: 24},
+		// Overruns the buffer by one byte. Already rejected before this fix;
+		// here so the fix is not free to reject everything instead.
+		{name: "one byte too long", declared: 25},
+		// off + size overflows int64 to a negative sum: MaxInt64-4 at off=8.
+		{name: "overflows int addition", declared: uint64(math.MaxInt64) - 4},
+		// Also wraps: MaxInt64 + off=8 is 8 past the wrap point. It would be
+		// caught honestly only at off=0, which is not where boxes after the
+		// first one live.
+		{name: "max int64", declared: math.MaxInt64},
+		// Sign bit set: negative once cast, caught by "size < hdr".
+		{name: "sets the sign bit", declared: 1 << 63},
+	}
+
+	for _, tt := range tests {
+		data := append(append([]byte{}, prefix...), largeBox("skip", tt.declared, make([]byte, 8))...)
+		size, _, _, ok := readBox(data, off, len(data))
+		if ok != tt.wantOK {
+			t.Errorf("%s: readBox(declared=%d) ok = %v, want %v (size=%d)", tt.name, tt.declared, ok, tt.wantOK, size)
+			continue
+		}
+		if ok && size != tt.wantSize {
+			t.Errorf("%s: readBox returned size %d, want %d", tt.name, size, tt.wantSize)
+		}
+	}
+}
+
+// TestHideSubtitleTrack_OverflowingLargesizeDoesNotPanic is the caller-level
+// half of the test above: a moov whose second child declares an overflowing
+// 64-bit size must end the scan, not walk the offset backwards off the front of
+// the buffer. Not reachable in production today -- this only ever parses a file
+// ffmpeg wrote seconds earlier -- but a parser that indexes with a
+// file-supplied number should not depend on that.
+func TestHideSubtitleTrack_OverflowingLargesizeDoesNotPanic(t *testing.T) {
+	// free(8 bytes) then a 64-bit-largesize box at off=8 claiming MaxInt64-4.
+	moovContent := append(box("free", nil), largeBox("skip", uint64(math.MaxInt64)-4, nil)...)
+	file := append(box("ftyp", make([]byte, 16)), box("moov", moovContent)...)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "overflow.mp4")
+	if err := os.WriteFile(path, file, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// There is no subtitle track here, so an error is the right answer -- what
+	// matters is that it is an error and not a panic.
+	if err := hideSubtitleTrack(path); err == nil {
+		t.Error("expected an error for a moov containing no subtitle track")
+	}
+}
+
+// TestFindTopLevelBox_RejectsOverflowingLargesize is the same property as
+// TestReadBox_RejectsOverflowingLargesize, one level up: findTopLevelBox parses
+// the identical header format off the FILE rather than out of a buffer, and had
+// the identical narrow-then-check bug. Two implementations of one rule is
+// exactly the situation where fixing only the one that was reported leaves the
+// file looking like it has a policy it does not have.
+//
+// The observable difference is not "error versus panic" here -- a negative
+// ReadAt offset errors rather than panicking, so the unfixed version fails
+// eventually too. It is that the unfixed version SUCCEEDS at this call, handing
+// back a box declared larger than the file it came from, and leaves catching
+// that to whatever the caller does next (maxMoovLen, today, and only because
+// the box it happens to look for is the moov).
+func TestFindTopLevelBox_RejectsOverflowingLargesize(t *testing.T) {
+	// free(8 bytes) so the moov sits at off=8: the wrap needs a nonzero offset.
+	file := append(box("free", nil), largeBox("moov", uint64(math.MaxInt64)-4, make([]byte, 32))...)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "overflow.mp4")
+	if err := os.WriteFile(path, file, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	off, size, _, err := findTopLevelBox(f, int64(len(file)), "moov")
+	if err == nil {
+		t.Errorf("findTopLevelBox accepted a box at %d declaring %d bytes out of a %d-byte file",
+			off, size, len(file))
+	}
+	// Belt and braces: whatever it reports, it must never describe a box that
+	// does not fit the file -- that number is used to size an allocation.
+	if size > int64(len(file)) {
+		t.Errorf("findTopLevelBox returned size %d for a %d-byte file", size, len(file))
+	}
+}
+
+// TestFindTopLevelBox_AcceptsAnHonestLargesizeBox is the other half: the range
+// check must not reject the legitimate 64-bit form, which is how any file with
+// a box over 4GiB (a long clip's mdat) declares itself.
+func TestFindTopLevelBox_AcceptsAnHonestLargesizeBox(t *testing.T) {
+	moov := largeBox("moov", 16+32, make([]byte, 32))
+	file := append(box("free", nil), moov...)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "honest.mp4")
+	if err := os.WriteFile(path, file, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	off, size, hdr, err := findTopLevelBox(f, int64(len(file)), "moov")
+	if err != nil {
+		t.Fatalf("findTopLevelBox rejected a valid 64-bit box: %v", err)
+	}
+	if off != 8 || size != 48 || hdr != 16 {
+		t.Errorf("findTopLevelBox = (off %d, size %d, hdr %d), want (8, 48, 16)", off, size, hdr)
 	}
 }
 

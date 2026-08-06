@@ -1,6 +1,8 @@
 package vidio
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -88,6 +90,57 @@ func TestParseProbeJSON_NoVideoStreamIsError(t *testing.T) {
 	data := []byte(`{"streams": [{"codec_type": "audio"}], "format": {"duration": "1.0"}}`)
 	if _, err := parseProbeJSON(data); err == nil {
 		t.Fatal("expected an error when the source has no video stream")
+	}
+}
+
+// TestParseProbeJSON_RejectsImplausibleDimensions guards the allocation
+// ceiling. Probe decodes nothing -- it reports what the container CLAIMS -- and
+// its callers size their buffers from that claim: telemetry-hud allocates two
+// image.NewRGBA of Width*Height*4 bytes, and Decoder.NewFrame a gocv Mat of
+// Width*Height*3. A file declaring 65535x65535 therefore asks for ~17GB before
+// a single frame is read, and the gocv one is a C++ allocation the Go runtime
+// cannot fail gracefully on.
+//
+// 8K (7680x4320) must still pass: the limit exists to reject malformed metadata,
+// not to state what this program can process. The error has to name the side
+// that failed, since a bad width and a bad height are different problems.
+func TestParseProbeJSON_RejectsImplausibleDimensions(t *testing.T) {
+	probeJSON := func(w, h int) []byte {
+		return []byte(fmt.Sprintf(`{
+			"streams": [{"codec_type": "video", "width": %d, "height": %d, "r_frame_rate": "30/1", "avg_frame_rate": "30/1"}],
+			"format": {"duration": "1.0"}
+		}`, w, h))
+	}
+
+	tests := []struct {
+		name        string
+		w, h        int
+		wantErr     bool
+		wantMention string
+	}{
+		{name: "4K", w: 3840, h: 2160},
+		{name: "8K", w: 7680, h: 4320},
+		{name: "portrait 8K", w: 4320, h: 7680},
+		// The limit itself is inclusive: a frame exactly at the ceiling is
+		// implausible but not absurd, and 16384*16384*4 is a survivable ~1GB.
+		{name: "at the limit", w: maxProbeDimension, h: maxProbeDimension},
+		{name: "absurd width", w: 65535, h: 1080, wantErr: true, wantMention: "65535"},
+		{name: "absurd height", w: 1920, h: 65535, wantErr: true, wantMention: "65535"},
+		{name: "one past the limit", w: maxProbeDimension + 1, h: 1080, wantErr: true, wantMention: "16385"},
+	}
+
+	for _, tt := range tests {
+		info, err := parseProbeJSON(probeJSON(tt.w, tt.h))
+		switch {
+		case tt.wantErr && err == nil:
+			t.Errorf("%s: parseProbeJSON(%dx%d) succeeded (%dx%d), want a rejection",
+				tt.name, tt.w, tt.h, info.Width, info.Height)
+		case tt.wantErr && !strings.Contains(err.Error(), tt.wantMention):
+			t.Errorf("%s: error %q does not name the offending dimension %q", tt.name, err, tt.wantMention)
+		case !tt.wantErr && err != nil:
+			t.Errorf("%s: parseProbeJSON(%dx%d) returned %v, want a real clip of this size to be accepted",
+				tt.name, tt.w, tt.h, err)
+		}
 	}
 }
 

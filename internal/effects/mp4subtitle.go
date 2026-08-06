@@ -126,7 +126,17 @@ func findTopLevelBox(f *os.File, fileSize int64, want string) (off, size int64, 
 			if _, err := f.ReadAt(hdrBuf[:16], off); err != nil {
 				return -1, 0, 0, fmt.Errorf("reading 64-bit box header at %d: %w", off, err)
 			}
-			size = int64(binary.BigEndian.Uint64(hdrBuf[8:16]))
+			// Range-checked as a uint64 before narrowing, for the reason
+			// readBox spells out: a declared size near 2^63 survives the cast
+			// as a positive int64, and "off+size > fileSize" below then
+			// overflows to a negative sum and lets it through. The two
+			// functions parse the same header format and must not disagree
+			// about which sizes are acceptable.
+			sz := binary.BigEndian.Uint64(hdrBuf[8:16])
+			if sz > uint64(fileSize-off) {
+				return -1, 0, 0, fmt.Errorf("64-bit box at %d declares size %d, which does not fit the file", off, sz)
+			}
+			size = int64(sz)
 			hdr = 16
 		case 0:
 			// "to end of file"
@@ -159,7 +169,20 @@ func readBox(data []byte, off, end int) (size int, typ string, hdr int, ok bool)
 		if off+16 > end {
 			return 0, "", 0, false
 		}
-		size = int(binary.BigEndian.Uint64(data[off+8 : off+16]))
+		// Range-check the largesize BEFORE narrowing it to int: a declared
+		// size near 2^63 stays positive through the cast, and the "off+size >
+		// end" test below then overflows to a negative sum and passes. The box
+		// would be accepted, and the caller's "off += size" would drive the
+		// offset negative into a panic. Compared as uint64 against the bytes
+		// actually remaining, no value can do that. findTopLevelBox reads the
+		// same header format straight off the file and carries the same check:
+		// those two are the only places a file-supplied length is narrowed, and
+		// they must not disagree about which sizes are acceptable.
+		sz := binary.BigEndian.Uint64(data[off+8 : off+16])
+		if sz > uint64(end-off) {
+			return 0, "", 0, false
+		}
+		size = int(sz)
 		hdr = 16
 	case 0:
 		size = end - off
