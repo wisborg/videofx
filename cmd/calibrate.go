@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strconv"
@@ -56,15 +57,46 @@ func newCalibrateCmd() *cobra.Command {
 
 func runCalibrate(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-
 	source := args[0]
+
+	opts, err := calibrateOptions(ctx, source, cmd.ErrOrStderr())
+	if err != nil {
+		return err
+	}
+	if err := calibrate.CheckVMAFAvailable(ctx); err != nil {
+		return err
+	}
+
+	res, err := calibrate.Run(ctx, source, opts)
+	if err != nil {
+		return err
+	}
+	printCalibration(cmd.OutOrStdout(), source, res)
+	return nil
+}
+
+// calibrateOptions turns the calibrate flags into the Options one run needs:
+// the --ss and --duration grammars, the probe an absolute --ss has to resolve
+// against, and any warnings that resolution produces (written to warnOut,
+// which is the command's stderr in a real run).
+//
+// Split out from runCalibrate so these values can be checked without calling
+// calibrate.Run, which shells out to ffmpeg and libvmaf for real. That is not
+// coverage for its own sake. A --ss that never arrives does not fail: the
+// command calibrates the opening of the clip instead, prints a complete and
+// entirely plausible VMAF table for it, marks a suggested --quality and exits
+// 0. The user then encodes a whole library at a quality measured on the static
+// footage --ss exists to steer away from, and there is nothing in the output
+// to notice. The only place that can catch it is a test that reads the values
+// on their way past.
+func calibrateOptions(ctx context.Context, source string, warnOut io.Writer) (calibrate.Options, error) {
 	startSpec, err := cliutil.ParseTimeSpec(calStart)
 	if err != nil {
-		return fmt.Errorf("--ss %w", err)
+		return calibrate.Options{}, fmt.Errorf("--ss %w", err)
 	}
 	duration, err := parseSegmentDuration(calDuration)
 	if err != nil {
-		return err
+		return calibrate.Options{}, err
 	}
 
 	// Resolving --ss needs the source's own creation_time and duration, so it
@@ -74,33 +106,24 @@ func runCalibrate(cmd *cobra.Command, args []string) error {
 	if startSpec.Set {
 		info, err := vidio.Probe(ctx, source)
 		if err != nil {
-			return fmt.Errorf("resolving --ss: %w", err)
+			return calibrate.Options{}, fmt.Errorf("resolving --ss: %w", err)
 		}
 		var warnings []string
 		startSeconds, warnings, err = resolveCalibrateStart(source, startSpec, info)
 		for _, w := range warnings {
-			fmt.Fprintln(cmd.ErrOrStderr(), "warning: "+w)
+			fmt.Fprintln(warnOut, "warning: "+w)
 		}
 		if err != nil {
-			return err
+			return calibrate.Options{}, err
 		}
 	}
 
-	if err := calibrate.CheckVMAFAvailable(ctx); err != nil {
-		return err
-	}
-
-	res, err := calibrate.Run(ctx, source, calibrate.Options{
+	return calibrate.Options{
 		Candidates:   calCandidates,
 		TargetVMAF:   calTargetVMAF,
 		StartSeconds: startSeconds,
 		Duration:     duration,
-	})
-	if err != nil {
-		return err
-	}
-	printCalibration(cmd.OutOrStdout(), args[0], res)
-	return nil
+	}, nil
 }
 
 // resolveCalibrateStart turns --ss into seconds into the source, the way

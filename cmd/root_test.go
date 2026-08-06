@@ -187,6 +187,150 @@ func TestParseSegmentDuration(t *testing.T) {
 // TestPrintCalibration covers the two report shapes: a target that was met
 // (a suggested value, marked in the table) and one that was not (best-found
 // plus a hint to try higher).
+// calibrateOptionsFor parses args the way the real subcommand does -- through
+// the registered flags, so the package-level cal* variables are set exactly as
+// a user invocation sets them -- and then builds the Options. Building a fresh
+// newCalibrateCmd per call is what resets those variables between subtests.
+func calibrateOptionsFor(t *testing.T, source string, args ...string) (calibrate.Options, string, error) {
+	t.Helper()
+	c := newCalibrateCmd()
+	if err := c.Flags().Parse(args); err != nil {
+		t.Fatalf("parsing %v: %v", args, err)
+	}
+	var warn bytes.Buffer
+	opts, err := calibrateOptions(context.Background(), source, &warn)
+	return opts, warn.String(), err
+}
+
+// TestCalibrateOptions_FlagsReachTheOptions is the wiring test for --ss and
+// --duration. Both grammars are parsed by functions with their own tests
+// (resolveCalibrateStart, parseSegmentDuration) and both are then assigned to
+// a struct that nothing checked, which is the gap: internal/calibrate already
+// proves Options.StartSeconds becomes ffmpeg's -ss, so this is the one missing
+// link between the flag and the encode.
+//
+// It matters more here than the equivalent gap on --start, because there is no
+// failure to observe. A --ss that never arrives calibrates the opening of the
+// clip, prints a full VMAF table for it, and suggests a --quality measured on
+// the static footage the flag exists to avoid. The run looks perfect.
+func TestCalibrateOptions_FlagsReachTheOptions(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	// 20 seconds long, covering 09:00:00 .. 09:00:20.
+	base := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	src := filepath.Join(t.TempDir(), "clip.mp4")
+	genClipAt(t, src, 20, base)
+
+	cases := []struct {
+		name      string
+		args      []string
+		wantStart float64
+		wantDur   float64
+		wantWarn  string
+	}{
+		{
+			name:      "defaults",
+			args:      nil,
+			wantStart: 0,
+			wantDur:   calibrate.DefaultDuration,
+		},
+		{
+			name:      "relative seconds",
+			args:      []string{"--ss", "3"},
+			wantStart: 3,
+			wantDur:   calibrate.DefaultDuration,
+		},
+		{
+			name:      "h/m/s duration",
+			args:      []string{"--ss", "5s"},
+			wantStart: 5,
+			wantDur:   calibrate.DefaultDuration,
+		},
+		{
+			name:      "clock duration",
+			args:      []string{"--ss", "0:04"},
+			wantStart: 4,
+			wantDur:   calibrate.DefaultDuration,
+		},
+		{
+			name:      "absolute timestamp",
+			args:      []string{"--ss", "2026-08-01T09:00:06Z"},
+			wantStart: 6,
+			wantDur:   calibrate.DefaultDuration,
+		},
+		{
+			name:      "duration in its own grammar",
+			args:      []string{"--duration", "1:30"},
+			wantStart: 0,
+			wantDur:   90,
+		},
+		{
+			// Only an absolute --ss can land before the clip; the clamp is
+			// warned about because the user asked for an instant and is not
+			// getting it. Asserting it here is what proves warnOut is wired
+			// at all -- a warning written to a discarded writer is the same
+			// silent-success shape as an unapplied --ss.
+			name:      "absolute timestamp before the clip starts",
+			args:      []string{"--ss", "2026-08-01T08:59:56Z"},
+			wantStart: 0,
+			wantDur:   calibrate.DefaultDuration,
+			wantWarn:  "before",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			opts, warn, err := calibrateOptionsFor(t, src, c.args...)
+			if err != nil {
+				t.Fatalf("calibrateOptions(%v) = %v", c.args, err)
+			}
+			if opts.StartSeconds != c.wantStart {
+				t.Errorf("StartSeconds = %v, want %v -- the flag did not reach the encode", opts.StartSeconds, c.wantStart)
+			}
+			if opts.Duration != c.wantDur {
+				t.Errorf("Duration = %v, want %v", opts.Duration, c.wantDur)
+			}
+			if c.wantWarn == "" && warn != "" {
+				t.Errorf("unexpected warning: %s", warn)
+			}
+			if c.wantWarn != "" && !strings.Contains(warn, c.wantWarn) {
+				t.Errorf("warning = %q, want one containing %q", warn, c.wantWarn)
+			}
+			// The other two fields come from flags with no resolution step,
+			// but they share the struct literal: a field dropped there is
+			// dropped for all of them.
+			if opts.TargetVMAF != calibrate.DefaultTargetVMAF {
+				t.Errorf("TargetVMAF = %v, want %v", opts.TargetVMAF, calibrate.DefaultTargetVMAF)
+			}
+			if len(opts.Candidates) != len(calibrate.DefaultCandidates) {
+				t.Errorf("Candidates = %v, want %v", opts.Candidates, calibrate.DefaultCandidates)
+			}
+		})
+	}
+}
+
+// TestCalibrateOptions_Rejects covers the two ways the pre-flight must fail
+// rather than fall back to measuring the wrong thing.
+func TestCalibrateOptions_Rejects(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	src := filepath.Join(t.TempDir(), "clip.mp4")
+	genClipAt(t, src, 6, time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC))
+
+	for _, c := range []struct{ name, flag, value string }{
+		{"--ss past the end of the clip", "--ss", "30"},
+		{"--ss is not a time at all", "--ss", "half past"},
+		{"--duration is a timestamp", "--duration", "2026-08-01T09:00:02Z"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if _, _, err := calibrateOptionsFor(t, src, c.flag, c.value); err == nil {
+				t.Errorf("%s %q was accepted; it must fail rather than calibrate something else", c.flag, c.value)
+			}
+		})
+	}
+}
+
 func TestPrintCalibration(t *testing.T) {
 	points := []calibrate.Point{
 		{Quality: 50, VMAF: 94.0, Bitrate: 51.7},
