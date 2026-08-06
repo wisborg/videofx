@@ -1,6 +1,7 @@
 package cliutil
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -170,6 +171,17 @@ func ParseTimeSpec(s string) (TimeSpec, error) {
 	return TimeSpec{}, invalidTimeError(s)
 }
 
+// ErrNotATime marks the error returned for an input that matches none of the
+// four forms. A caller accepting only some of them can recognize it with
+// errors.Is and substitute its own list -- calibrate's --duration takes a
+// length, so it must not recommend a timestamp the way this message does.
+//
+// Only the "matched nothing" error carries it. The more specific ones (a
+// negative time, an out-of-range clock component) are correct whichever
+// subset of the forms a caller takes, so they are meant to pass through
+// unchanged.
+var ErrNotATime = errors.New("not a valid time")
+
 // invalidTimeError is the one error covering all four forms: whichever the
 // user was reaching for, the message shows what that form should have looked
 // like. A zone-less timestamp is the likeliest near-miss, so it gets called
@@ -180,10 +192,10 @@ func ParseTimeSpec(s string) (TimeSpec, error) {
 // that it is looking at this message (see cmd.parseSegmentDuration, which
 // takes lengths and so cannot recommend a timestamp).
 func invalidTimeError(s string) error {
-	return fmt.Errorf("%q is not a valid time: use seconds (12 or 12.5), "+
+	return fmt.Errorf("%q is %w: use seconds (12 or 12.5), "+
 		"an h/m/s duration (12s, 3H, 1h23m45s), a clock duration (1:30 or "+
 		"1:23:45), or a timestamp WITH a timezone (2026-08-01T09:03:12+01:00 "+
-		"or ...Z)", s)
+		"or ...Z)", s, ErrNotATime)
 }
 
 // clockSeconds converts a clockDuration submatch into seconds.

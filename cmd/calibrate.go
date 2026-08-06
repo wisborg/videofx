@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 
 	"videofx/internal/calibrate"
 	"videofx/internal/cliutil"
+	"videofx/internal/logging"
 	"videofx/internal/vidio"
 )
 
@@ -59,7 +61,12 @@ func runCalibrate(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	source := args[0]
 
-	opts, err := calibrateOptions(ctx, source, cmd.ErrOrStderr())
+	// calibrate has no --log-level of its own, so this is the package default
+	// (stderr at LevelWarn) pointed at the command's stderr, which keeps the
+	// subcommand testable without giving it a flag the root command owns.
+	log := logging.New(cmd.ErrOrStderr(), logging.LevelWarn).Named("videofx")
+
+	opts, err := calibrateOptions(ctx, source, log)
 	if err != nil {
 		return err
 	}
@@ -77,8 +84,7 @@ func runCalibrate(cmd *cobra.Command, args []string) error {
 
 // calibrateOptions turns the calibrate flags into the Options one run needs:
 // the --ss and --duration grammars, the probe an absolute --ss has to resolve
-// against, and any warnings that resolution produces (written to warnOut,
-// which is the command's stderr in a real run).
+// against, and any warnings that resolution produces.
 //
 // Split out from runCalibrate so these values can be checked without calling
 // calibrate.Run, which shells out to ffmpeg and libvmaf for real. That is not
@@ -89,7 +95,7 @@ func runCalibrate(cmd *cobra.Command, args []string) error {
 // footage --ss exists to steer away from, and there is nothing in the output
 // to notice. The only place that can catch it is a test that reads the values
 // on their way past.
-func calibrateOptions(ctx context.Context, source string, warnOut io.Writer) (calibrate.Options, error) {
+func calibrateOptions(ctx context.Context, source string, log *logging.Logger) (calibrate.Options, error) {
 	startSpec, err := cliutil.ParseTimeSpec(calStart)
 	if err != nil {
 		return calibrate.Options{}, fmt.Errorf("--ss %w", err)
@@ -111,7 +117,7 @@ func calibrateOptions(ctx context.Context, source string, warnOut io.Writer) (ca
 		var warnings []string
 		startSeconds, warnings, err = resolveCalibrateStart(source, startSpec, info)
 		for _, w := range warnings {
-			fmt.Fprintln(warnOut, "warning: "+w)
+			log.Warnf("%s", w)
 		}
 		if err != nil {
 			return calibrate.Options{}, err
@@ -140,8 +146,8 @@ func calibrateOptions(ctx context.Context, source string, warnOut io.Writer) (ca
 // timestamps are taken against the container clock as they are.
 func resolveCalibrateStart(path string, spec cliutil.TimeSpec, info vidio.Info) (float64, []string, error) {
 	var warnings []string
-	if spec.IsAbsolute() && info.HasCreationTime && info.CreationTimeNaive {
-		warnings = append(warnings, fmt.Sprintf("%s's creation_time tag has no timezone marker; treating it as UTC, which may be wrong -- the resolved --ss could be hours off", path))
+	if w := naiveCreationTimeWarning(path, "--ss", spec.IsAbsolute(), info); w != "" {
+		warnings = append(warnings, w)
 	}
 
 	secs, err := resolveInstant("--ss", path, spec, info, 0)
@@ -170,6 +176,15 @@ func resolveCalibrateStart(path string, spec cliutil.TimeSpec, info vidio.Info) 
 func parseSegmentDuration(s string) (float64, error) {
 	spec, err := cliutil.ParseTimeSpec(s)
 	if err != nil {
+		// ParseTimeSpec's "matched nothing" message names all four forms,
+		// including the timestamp that the very next check rejects by name --
+		// so following its advice lands the user on the second error. Only
+		// that one is replaced; a negative time or an out-of-range clock
+		// component is diagnosed correctly whichever forms this flag takes.
+		if errors.Is(err, cliutil.ErrNotATime) {
+			return 0, fmt.Errorf("--duration %q is not a valid length: use seconds (2, 2.5), "+
+				"an h/m/s duration (90s, 2m) or a clock duration (1:30)", s)
+		}
 		return 0, fmt.Errorf("--duration %w", err)
 	}
 	if spec.IsAbsolute() {

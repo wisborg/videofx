@@ -484,9 +484,8 @@ func resolveTrimWindow(path string, start, end cliutil.TimeSpec, info vidio.Info
 		return resolveInstant(flag, path, spec, info, offset)
 	}
 
-	absolute := start.IsAbsolute() || end.IsAbsolute()
-	if absolute && info.HasCreationTime && info.CreationTimeNaive {
-		warnings = append(warnings, fmt.Sprintf("%s's creation_time tag has no timezone marker; treating it as UTC, which may be wrong -- the resolved --start/--end could be hours off", path))
+	if w := naiveCreationTimeWarning(path, "--start/--end", start.IsAbsolute() || end.IsAbsolute(), info); w != "" {
+		warnings = append(warnings, w)
 	}
 
 	if start.Set {
@@ -554,6 +553,29 @@ func resolveInstant(flag, path string, spec cliutil.TimeSpec, info vidio.Info, o
 		return 0, fmt.Errorf("%s %s is an absolute timestamp, but %s has no creation_time tag to resolve it against; use a relative time (e.g. 90s) for this file", flag, spec, path)
 	}
 	return spec.Absolute.Sub(info.CreationTime).Seconds() - offset.Seconds(), nil
+}
+
+// naiveCreationTimeWarning is the warning for resolving an absolute time
+// against a creation_time tag that carries no timezone, or "" when that does
+// not apply. flags names the flag(s) the caller is resolving.
+//
+// Shared by resolveTrimWindow and resolveCalibrateStart, which had a verbatim
+// copy each. The sentence asserts a property of vidio.Probe's parsing -- that
+// a zone-less tag is read as UTC -- from a different package, so two copies is
+// two places to find when that ever changes, with nothing failing if only one
+// of them is. The GATING CONDITION is shared for the same reason; it is the
+// half more likely to drift, since a warning that stops appearing is much
+// quieter than one whose wording goes stale.
+//
+// Only this sentence is shared. The two callers' clamp-and-error policies
+// genuinely differ (the trim window clamps to the clip, --ss errors past its
+// end) and that difference is deliberate -- see resolveCalibrateStart.
+func naiveCreationTimeWarning(path, flags string, absolute bool, info vidio.Info) string {
+	if !absolute || !info.HasCreationTime || !info.CreationTimeNaive {
+		return ""
+	}
+	return fmt.Sprintf("%s's creation_time tag has no timezone marker; treating it as UTC, "+
+		"which may be wrong -- the resolved %s could be hours off", path, flags)
 }
 
 // clipWindow describes what a clip covers, in absolute time when it carries a

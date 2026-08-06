@@ -198,7 +198,8 @@ func calibrateOptionsFor(t *testing.T, source string, args ...string) (calibrate
 		t.Fatalf("parsing %v: %v", args, err)
 	}
 	var warn bytes.Buffer
-	opts, err := calibrateOptions(context.Background(), source, &warn)
+	log := logging.New(&warn, logging.LevelWarn).Named("videofx")
+	opts, err := calibrateOptions(context.Background(), source, log)
 	return opts, warn.String(), err
 }
 
@@ -328,6 +329,115 @@ func TestCalibrateOptions_Rejects(t *testing.T) {
 				t.Errorf("%s %q was accepted; it must fail rather than calibrate something else", c.flag, c.value)
 			}
 		})
+	}
+}
+
+// TestParseSegmentDuration_ErrorDoesNotRecommendATimestamp pins the fix for a
+// message that sent the user in a circle: ParseTimeSpec's "matched nothing"
+// error names all four forms, including the timestamp --duration rejects by
+// name in its very next check. Following the advice produced a second error.
+//
+// The more specific errors must still pass through: a negative time or an
+// out-of-range clock component is diagnosed correctly whichever subset of the
+// forms a flag takes, and replacing those would lose information.
+func TestParseSegmentDuration_ErrorDoesNotRecommendATimestamp(t *testing.T) {
+	_, err := parseSegmentDuration("half past")
+	if err == nil {
+		t.Fatal(`parseSegmentDuration("half past") succeeded, want an error`)
+	}
+	if strings.Contains(err.Error(), "timestamp") {
+		t.Errorf("--duration's parse error recommends a form it rejects: %v", err)
+	}
+	for _, want := range []string{"length", "90s", "1:30"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q, so it does not say what --duration does take: %v", want, err)
+		}
+	}
+
+	// A specific diagnosis survives rather than being flattened into the
+	// generic one.
+	_, err = parseSegmentDuration("-5")
+	if err == nil || !strings.Contains(err.Error(), "negative") {
+		t.Errorf(`parseSegmentDuration("-5") = %v, want the "must not be negative" diagnosis`, err)
+	}
+	_, err = parseSegmentDuration("1:75")
+	if err == nil || !strings.Contains(err.Error(), "under 60") {
+		t.Errorf(`parseSegmentDuration("1:75") = %v, want the out-of-range clock diagnosis`, err)
+	}
+}
+
+// TestNaiveCreationTimeWarning_IsSharedByBothCallers checks that the trim
+// window and --ss produce the same sentence from the same condition. They had
+// a verbatim copy each, and the sentence asserts a property of vidio.Probe's
+// parsing from another package -- so a future change there has to find both.
+//
+// Asserting they AGREE, rather than asserting the wording, is the point: the
+// text may be improved freely, but not in one place only.
+func TestNaiveCreationTimeWarning_IsSharedByBothCallers(t *testing.T) {
+	info := vidio.Info{
+		Duration:          60,
+		HasCreationTime:   true,
+		CreationTimeNaive: true,
+		CreationTime:      time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC),
+	}
+	abs, err := cliutil.ParseTimeSpec("2026-08-01T09:00:10Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, trimWarnings, err := resolveTrimWindow("clip.mp4", abs, cliutil.TimeSpec{}, info, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ssWarnings, err := resolveCalibrateStart("clip.mp4", abs, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trimWarnings) != 1 || len(ssWarnings) != 1 {
+		t.Fatalf("want one warning from each caller, got %v and %v", trimWarnings, ssWarnings)
+	}
+
+	// Same sentence apart from the flag name each is resolving.
+	trimText := strings.Replace(trimWarnings[0], "--start/--end", "FLAG", 1)
+	ssText := strings.Replace(ssWarnings[0], "--ss", "FLAG", 1)
+	if trimText != ssText {
+		t.Errorf("the two callers' warnings have drifted apart:\n  trim: %s\n  --ss: %s", trimWarnings[0], ssWarnings[0])
+	}
+
+	// And the shared gating condition: no absolute time, no warning.
+	rel, err := cliutil.ParseTimeSpec("10s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, w, err := resolveTrimWindow("clip.mp4", rel, cliutil.TimeSpec{}, info, 0); err != nil || len(w) != 0 {
+		t.Errorf("a relative --start warned about creation_time: %v (err %v)", w, err)
+	}
+	if _, w, err := resolveCalibrateStart("clip.mp4", rel, info); err != nil || len(w) != 0 {
+		t.Errorf("a relative --ss warned about creation_time: %v (err %v)", w, err)
+	}
+}
+
+// TestCalibrateWarningsGoThroughTheLogger pins that calibrate's warnings carry
+// the same WARN prefix every other warning in the CLI has. They used to be
+// written with a bare fmt.Fprintln, which was the only user-facing warning in
+// the program not going through internal/logging.
+func TestCalibrateWarningsGoThroughTheLogger(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	src := filepath.Join(t.TempDir(), "clip.mp4")
+	genClipAt(t, src, 6, time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC))
+
+	// An --ss four seconds before the clip starts: clamped, with a warning.
+	_, warn, err := calibrateOptionsFor(t, src, "--ss", "2026-08-01T08:59:56Z")
+	if err != nil {
+		t.Fatalf("calibrateOptions = %v", err)
+	}
+	if !strings.Contains(warn, "WARN") {
+		t.Errorf("warning does not carry the logger's level prefix, so it is not going through internal/logging: %q", warn)
+	}
+	if !strings.Contains(warn, "videofx") {
+		t.Errorf("warning is not tagged with the program name the way every other one is: %q", warn)
 	}
 }
 
