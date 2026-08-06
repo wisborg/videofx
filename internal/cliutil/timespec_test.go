@@ -18,6 +18,12 @@ func TestParseTimeSpec_Relative(t *testing.T) {
 		{"12", 12},
 		{"12.5", 12.5},
 		{"90", 90},
+		// Ordinary decimal notation stays whole: these are the parts of
+		// strconv.ParseFloat's syntax the parser deliberately keeps, next to
+		// the hex and underscore forms it rejects below.
+		{"1e3", 1000},
+		{"+12", 12},
+		{"0.5", 0.5},
 
 		{"12s", 12},
 		{"12S", 12},
@@ -88,10 +94,33 @@ func TestParseTimeSpec_Absolute(t *testing.T) {
 // zone-less timestamp (which would silently mean different instants on two
 // machines), and components out of order or repeated -- each of which a looser
 // parser would accept as some other number entirely.
+//
+// The non-finite entries are the ones that cost the most to get wrong. NaN
+// parses as a float, survives the "not negative" check (as every comparison
+// against NaN does), and then disables the trim entirely instead of failing:
+// see the comment in ParseTimeSpec. They are pinned here rather than at the
+// far end of the pipeline because this is the only place that can still say no.
 func TestParseTimeSpec_Rejected(t *testing.T) {
 	for _, in := range []string{
 		"-5",
 		"-1h",
+
+		"NaN",
+		"nan",
+		"NAN",
+		"Inf",
+		"inf",
+		"+Inf",
+		"-Inf",
+		"Infinity",
+		"-Infinity",
+
+		"0x1p10", // hex float: 1024, and nobody meant that
+		"0X1P10",
+		"0x20",
+		"1_0", // digit separator: 10
+		"1_000",
+
 		"12ms",
 		"12us",
 		"12x",

@@ -2,6 +2,7 @@ package cliutil
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -92,8 +93,29 @@ func ParseTimeSpec(s string) (TimeSpec, error) {
 		return TimeSpec{}, nil
 	}
 
-	// Bare number of seconds -- the original, pre-units contract.
-	if secs, err := strconv.ParseFloat(s, 64); err == nil {
+	// Bare number of seconds -- the original, pre-units contract. The two
+	// extra conditions reject what strconv.ParseFloat also accepts but a
+	// video timeline has no use for:
+	//
+	// NaN and the infinities are not points in a clip, and NaN in particular
+	// cannot be caught later: every range check downstream is a comparison,
+	// and every comparison against NaN is false, so it passes validateTrim,
+	// resolves without a warning, and then fails the "did the user ask for a
+	// span?" test in video.processOne -- the clip is processed WHOLE, with a
+	// successful exit. A time this parser lets through is a time nothing
+	// downstream will question.
+	//
+	// Go's hex-float and digit-separator notations are the milder case:
+	// "0x1p10" is 1024 and "1_0" is 10, so a typo resolves to a plausible but
+	// wrong number instead of hitting the error that names the accepted
+	// forms. Ordinary decimal notation is kept in full, exponents ("1e3")
+	// and leading sign ("+12") included.
+	//
+	// Both fall through to that error rather than getting one of their own:
+	// neither matches the unit or timestamp grammars below, and what the user
+	// needs to be told is what a time looks like.
+	if secs, err := strconv.ParseFloat(s, 64); err == nil &&
+		!math.IsNaN(secs) && !math.IsInf(secs, 0) && !strings.ContainsAny(s, "xX_") {
 		if secs < 0 {
 			return TimeSpec{}, fmt.Errorf("%q is invalid: a time must not be negative", s)
 		}
