@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -29,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 
+	"videofx/internal/runner"
 	"videofx/internal/vidio"
 )
 
@@ -169,9 +169,16 @@ func pickSuggested(points []Point, target float64) (int, bool) {
 // vidio.VideoEncodeArgs, the same builder the real gocv-stabilizer render uses,
 // so the measured number transfers to that pipeline by construction rather than
 // by two copies happening to agree.
+//
+// The spawn goes through runner.ExecRunner.Output, not a local os/exec call:
+// this package needs ffmpeg's combined output (see scoreVMAF -- libvmaf prints
+// the score to stderr), and that need belongs in the one execution layer rather
+// than in a third private wrapper next to runner.ExecRunner and
+// vidio.newFFmpegCmd.
 func encodeSegment(ctx context.Context, src, out string, q int, opts Options) error {
-	if out, err := runFFmpeg(ctx, encodeSegmentArgs(src, out, q, opts)...); err != nil {
-		return fmt.Errorf("%w\n%s", err, strings.TrimSpace(out))
+	ffout, err := runner.ExecRunner{}.Output(ctx, "ffmpeg", encodeSegmentArgs(src, out, q, opts)...)
+	if err != nil {
+		return fmt.Errorf("%w\n%s", err, strings.TrimSpace(ffout))
 	}
 	return nil
 }
@@ -207,7 +214,7 @@ func encodeSegmentArgs(src, out string, q int, opts Options) []string {
 // segment, the distorted input (already just that segment) is read whole.
 // libvmaf's first pad is the distorted stream, the second the reference.
 func scoreVMAF(ctx context.Context, src, distorted string, opts Options) (float64, error) {
-	out, err := runFFmpeg(ctx, vmafArgs(src, distorted, opts)...)
+	out, err := runner.ExecRunner{}.Output(ctx, "ffmpeg", vmafArgs(src, distorted, opts)...)
 	if err != nil {
 		return 0, fmt.Errorf("%w\n%s", err, strings.TrimSpace(out))
 	}
@@ -252,22 +259,14 @@ func parseVMAFScore(ffmpegOutput string) (float64, error) {
 // which calibration depends on, returning an actionable error if not --
 // Homebrew's core ffmpeg does include it, but not every build does.
 func CheckVMAFAvailable(ctx context.Context) error {
-	out, err := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-filters").CombinedOutput()
+	ok, _, err := runner.HasFilters(ctx, "ffmpeg", "libvmaf")
 	if err != nil {
 		return fmt.Errorf("could not run ffmpeg to check for libvmaf: %w", err)
 	}
-	if !strings.Contains(string(out), "libvmaf") {
+	if !ok {
 		return fmt.Errorf("this ffmpeg build lacks the libvmaf filter, which `videofx calibrate` needs to measure quality; install an ffmpeg built with libvmaf (Homebrew's ffmpeg has it)")
 	}
 	return nil
-}
-
-// runFFmpeg runs ffmpeg with args and returns its combined output (ffmpeg
-// writes everything, including libvmaf's score line, to stderr). The output
-// is returned even on error so the caller can surface ffmpeg's own message.
-func runFFmpeg(ctx context.Context, args ...string) (string, error) {
-	out, err := exec.CommandContext(ctx, "ffmpeg", args...).CombinedOutput()
-	return string(out), err
 }
 
 // ftoa formats a float seconds value compactly (no trailing zeros) for an
