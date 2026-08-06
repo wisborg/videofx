@@ -2,12 +2,19 @@
 // RGBA overlays, to be composited onto a video (see internal/vidio's
 // OverlayEncoder and the telemetry-hud effect).
 //
-// The design is built for future customization even though v1 ships a single
-// fixed arrangement: every gauge is a self-drawing Gauge placed by a
+// The design is built for future customization, though what ships today is two
+// fixed arrangements (DefaultLayout and VerticalLayout, chosen by --hud-layout
+// or by clip orientation): every gauge is a self-drawing Gauge placed by a
 // Placement (an Anchor + a fractional offset + an Enabled flag) in a Layout.
-// Toggling a gauge off, or moving it to another corner, is then just editing
-// its Placement -- no gauge or renderer change -- so wiring that to CLI flags
-// later needs no rework here.
+// Moving a gauge to another corner, or switching it off, is then just editing
+// its Placement -- no gauge or renderer change.
+//
+// Nothing in the CLI reaches an individual Placement. --hud-layout selects
+// between the two whole layouts and nothing finer, so there is no way for a
+// user to turn one gauge off; both layouts include the course map, which draws
+// the whole route, and the default one includes heart rate. That is a property
+// worth knowing when changing this package, because those are burned into the
+// pixels and cannot be removed downstream the way a metadata tag can.
 package hud
 
 import (
@@ -110,9 +117,15 @@ type Box struct {
 // fractions of frame width/height (so a layout scales across resolutions);
 // Enabled toggles the gauge.
 type Placement struct {
-	Gauge   Gauge
-	Anchor  Anchor
-	DX, DY  float64
+	Gauge  Gauge
+	Anchor Anchor
+	DX, DY float64
+	// Enabled is honored by the renderer but is not reachable from the CLI:
+	// both shipped layouts set it true on every gauge they list, and
+	// --hud-layout picks a whole layout rather than a set of gauges. It is
+	// pre-wiring for offering more HUD models, which is why it is not dead
+	// config and should not be deleted -- a new layout that omits a gauge, or
+	// carries it disabled, is the intended way to add one.
 	Enabled bool
 }
 

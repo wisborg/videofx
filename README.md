@@ -155,7 +155,7 @@ Flags:
 - `--srt-sidecar` — telemetry only: write the `--srt-format` SRT as a **separate `.srt` file** next to the output (like `--gpx`) **instead of embedding it** — e.g. `clip - telemetry.srt` beside `clip - telemetry.mp4`. Nothing is muxed into the video, so nothing can display during playback, while Telemetry Overlay reads the separate file (matching DJI's own `NAME.MP4` + `NAME.SRT` pairing). **The reliable way to keep telemetry off screen** (see below). Off by default (the SRT is embedded); requires `--srt-format readable` or `dji`.
 - `--show-subtitle` — telemetry only: keep the **embedded** subtitle track visible/auto-displayed. **Off by default** — an embedded subtitle is flagged hidden (its track-`enabled` flag cleared), but **macOS players (QuickTime, Quick Look) auto-display subtitles regardless of that flag**, so this doesn't reliably hide it; use `--srt-sidecar` instead. Ignored with `--srt-sidecar`.
 - `--gpx` — telemetry only: **also** write a GPX sidecar next to the output (`clip - telemetry.gpx`). **Off by default** — most runs just want the muxed clip; the sidecar is a separate deliverable for map tools and re-syncing, so it's opt-in.
-- `--location` — telemetry only: write the clip's GPS position into the output's container metadata — the `location` tag and Apple's `com.apple.quicktime.location.ISO6709`. **On by default**, and the only telemetry output that is. Pass `--location=false` to leave it out: that tag is read by YouTube, Photos, Immich and QuickTime, so a run starting at your front door otherwise ships your home address inside the file. Note `--effect telemetry-hud` implies `--effect telemetry`, so this applies to a HUD burn too.
+- `--location` — telemetry only: write the clip's GPS position into the output's container metadata — the `location` tag and Apple's `com.apple.quicktime.location.ISO6709`. **On by default**, and the only telemetry output that is. Pass `--location=false` to leave it out: that tag is read by YouTube, Photos, Immich and QuickTime, so a run starting at your front door otherwise ships your home address inside the file. This governs only the tag **videofx writes** — a position the camera already recorded is carried over regardless ([Metadata carried over](#what-comes-across-from-the-source)), and it has no bearing on `telemetry-hud`'s burned-in course map ([What the HUD puts in the pixels](#what-the-hud-puts-in-the-pixels)). Note `--effect telemetry-hud` implies `--effect telemetry`, so this applies to a HUD burn too.
 - `--telemetry-stryd` — telemetry only: include Stryd running-dynamics developer fields (Form Power, Leg Spring Stiffness, ...) in the GPX sidecar and muxed SRT. Off by default.
 - `--strength` is accepted but **ignored** by `telemetry` — there is no "how strong" dial for attaching telemetry to a clip, so `ValidateStrength` accepts any value.
 
@@ -173,6 +173,8 @@ for A/B comparison). Originals are never touched. If the target filename
 already exists, a numeric counter is appended (`vacation - gocv-stabilized - 1.mp4`,
 etc.) instead of overwriting anything.
 
+### What comes across from the source
+
 Both stabilizers preserve the source's audio and metadata. In particular the
 container- and stream-level **`creation_time`** is copied onto the output
 (downstream tools rely on it to sync a clip with external data such as
@@ -180,6 +182,15 @@ Garmin FIT GPS/exercise tracks), along with other original tags like
 `language` and `handler_name`. This is a merge: the structural tags that
 describe the newly encoded file (codec brands, encoder string) stay
 correct — the source's tags do not overwrite them.
+
+The carry-over is **wholesale**, and every effect does it — not just the stabilizers.
+Whatever else the camera wrote comes along too, including any position it recorded:
+iPhone and GoPro footage often carries `com.apple.quicktime.location.ISO6709`, and that
+tag survives a `videofx` run with no telemetry involved at all. `--location=false`
+governs only the tag videofx would *add*; it does not remove one that was already there.
+To drop the source's metadata, run the output through `ffmpeg -map_metadata -1` or
+`exiftool`. Note that stripping everything also drops `creation_time`, which is what
+telemetry syncing depends on.
 
 ### Chaining effects
 
@@ -302,7 +313,9 @@ produces `run - telemetry.mp4` (stream-copied video + audio + a visible
 telemetry subtitle + location tag) and, because `--gpx` was passed,
 `run - telemetry.gpx` next to the original. Drop the `--srt-format`/`--show-subtitle`/`--gpx`
 options (the defaults) to get just the location-tagged clip, or add
-`--location=false` for a clip whose metadata carries no position at all.
+`--location=false` to stop videofx adding a location tag of its own. (That does not
+remove a position the camera already wrote — see
+[Metadata carried over](#what-comes-across-from-the-source).)
 
 ### Embedding telemetry for Telemetry Overlay
 
@@ -396,8 +409,29 @@ elevation profile (bottom) — since the full set crowds a narrow frame; `--hud-
 selects between them (default `auto` picks by the clip's display aspect). See
 `--hud-layout` for details.
 
-The HUD is built so each gauge can be toggled or moved (every gauge has an anchor +
-offset + enabled flag in a layout), and layouts are selectable per orientation.
+### What the HUD puts in the pixels
+
+Worth knowing before publishing a HUD burn, because none of it can be taken out
+afterwards:
+
+- **The course map draws the entire GPS route**, including its start point, in every
+  frame — not just the part covered so far. If the activity started at home, the shape
+  and position of that route are in the video.
+- **The default layout shows heart rate**, alongside cadence, power, incline, pace and
+  speed.
+
+`--location=false` does not affect any of this. That flag governs the container's
+location *tag*, which is metadata; the HUD is burned into the image. A re-mux,
+`exiftool -all=`, or a re-encode by whatever platform the clip is uploaded to will strip
+the tag and leave every pixel of the map and the heart rate exactly where they are.
+
+**There is no per-gauge opt-out today.** Both layouts include the course map, and
+`--hud-layout` chooses between them rather than between gauge sets. The way to publish a
+clip without the route or the heart rate is not to use `telemetry-hud` on it.
+
+Internally each gauge carries an anchor, an offset and an enabled flag in its layout, so
+a gauge can be moved or switched off by editing a layout. That is groundwork for
+offering more HUD models later; no CLI flag reaches it.
 
 ## Rotate
 
