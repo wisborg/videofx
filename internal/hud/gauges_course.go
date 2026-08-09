@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/fogleman/gg"
+
+	"videofx/internal/telemetry"
 )
 
 // SplitsGauge is the upper-left kilometre-splits list: a header (current lap /
@@ -29,26 +31,9 @@ func (SplitsGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
 
 	r.Text(dc, fmt.Sprintf("1 km lap %d/%d", curKm, sp.TotalKm()), box.X, box.Y, 0, headerPx)
 
-	// Show the last maxWindow laps ending at the current one, and always the
-	// fastest lap -- pinned at the top when it falls outside that window (so
-	// e.g. at lap 20 with a fastest of 10 the rows are 10, 16, 17, 18, 19, 20).
-	const maxWindow = 5
-	startKm := curKm - maxWindow + 1
-	if startKm < 1 {
-		startKm = 1
-	}
 	fastest := sp.Fastest()
-
-	kms := make([]int, 0, maxWindow+1)
-	if fastest >= 1 && fastest < startKm {
-		kms = append(kms, fastest)
-	}
-	for k := startKm; k <= curKm; k++ {
-		kms = append(kms, k)
-	}
-
 	y := box.Y + headerPx*1.4
-	for _, k := range kms {
+	for _, k := range splitsRows(sp, curKm) {
 		current := k == curKm
 		dur := sp.SplitDuration(k)
 		if current {
@@ -62,6 +47,54 @@ func (SplitsGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
 		}
 		y += lineH
 	}
+}
+
+// splitsRows picks the kilometre numbers SplitsGauge lists at lap curKm: the
+// last maxWindow laps ending at the current one, plus the fastest lap pinned
+// at the top when it falls outside that window (so e.g. at lap 20 with a
+// fastest of 10 the rows are 10, 16, 17, 18, 19, 20).
+//
+// Every number in and out -- curKm, the floor, sp.Fastest, the returned rows
+// -- is an ABSOLUTE kilometre number, not a row index or an offset into a
+// relative list. Splits numbers its laps by the activity's kilometres, so a
+// track that begins part way through one has no lap 1 to draw: the floor is
+// sp.FirstKm rather than a literal 1, otherwise the gauge asks for laps whose
+// opening crossing is not in the data and prints rows reading "1/ 0:00".
+// FirstKm is 1 for a whole activity, so this is the same window as before for
+// every track built today. When curKm is still short of the first complete lap
+// there is nothing honest to list and the result is empty -- the caller draws
+// the header alone.
+//
+// PRECONDITION: sp is not Empty. On an Empty Splits FirstKm is 0, the floor
+// stops floor-ing, and this returns a run of rows for kilometres that have no
+// boundaries at all. Draw's own guard makes that unreachable, and a second
+// guard here would be a branch no test could reach; the requirement is stated
+// instead.
+//
+// Split out from Draw because it is the row SELECTION that has a right answer;
+// the rest of Draw is placement, only assertable as ink on a bitmap. Note the
+// gold-lap decision is deliberately NOT here: Draw highlights the fastest lap
+// wherever it appears, including inside the window, so it needs sp.Fastest for
+// styling whether or not that lap was pinned. Returning the pinned number
+// would not remove that call, only split one question across two places.
+func splitsRows(sp *telemetry.Splits, curKm int) []int {
+	const maxWindow = 5
+	startKm := curKm - maxWindow + 1
+	if first := sp.FirstKm(); startKm < first {
+		startKm = first
+	}
+
+	kms := make([]int, 0, maxWindow+1)
+	// > 0, not >= 1: the same test, but without reading as the 1-based-index
+	// guard it is not, three lines under a comment insisting these are km
+	// numbers. 0 is Fastest's "no completed lap" sentinel.
+	if fastest := sp.Fastest(); fastest > 0 && fastest < startKm {
+		kms = append(kms, fastest)
+	}
+	for k := startKm; k <= curKm; k++ {
+		kms = append(kms, k)
+	}
+	return kms
 }
 
 // ProgressBarGauge is the top-center distance progress bar: a full-width line,

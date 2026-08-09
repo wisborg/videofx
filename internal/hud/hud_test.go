@@ -275,6 +275,106 @@ func TestRender_CourseGauges(t *testing.T) {
 	}
 }
 
+// splitsOver builds a Splits from a constant-pace series of (metres, seconds)
+// samples running from startM to endM.
+func splitsOver(base time.Time, startM, endM, stepM, stepS float64) *telemetry.Splits {
+	var samples []telemetry.Sample
+	for d, t := startM, 0.0; d <= endM; d, t = d+stepM, t+stepS {
+		samples = append(samples, telemetry.Sample{
+			Time:        base.Add(time.Duration(t) * time.Second),
+			HasDistance: true, Distance: d,
+		})
+	}
+	return telemetry.BuildSplits(&telemetry.Track{Samples: samples})
+}
+
+// splitsWithAFastLap builds a Splits over 10 200 -> 18 400 m in which one
+// kilometre -- 12 000 to 13 000 m -- is run at 20 s per 100 m against 30 s
+// everywhere else, so the fastest lap is unambiguously km 13 and sits below
+// the row window at lap 19.
+func splitsWithAFastLap(base time.Time) *telemetry.Splits {
+	var samples []telemetry.Sample
+	elapsed := 0.0
+	for d := 10200.0; d <= 18400.0; d += 100 {
+		samples = append(samples, telemetry.Sample{
+			Time:        base.Add(time.Duration(elapsed) * time.Second),
+			HasDistance: true, Distance: d,
+		})
+		if d >= 12000 && d < 13000 {
+			elapsed += 20
+		} else {
+			elapsed += 30
+		}
+	}
+	return telemetry.BuildSplits(&telemetry.Track{Samples: samples})
+}
+
+// TestSplitsRows_NeverListsALapWhoseOpeningCrossingIsMissing checks the lap
+// window the splits gauge draws, in absolute kilometre numbers.
+//
+// The floor used to be a literal 1, which is correct only because every track
+// built today starts at 0 m. Over a track scoped to 10.2-12.4 km the only
+// complete lap is km 12, so at lap 13 the window must be {12, 13} -- a floor of
+// 1 would ask for laps 9, 10 and 11 and print three rows of "0:00" for
+// kilometres the data does not contain.
+func TestSplitsRows_NeverListsALapWhoseOpeningCrossingIsMissing(t *testing.T) {
+	base := time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC)
+	whole := splitsOver(base, 0, 8000, 100, 30)       // 0 -> 8 km, laps 1..8
+	scoped := splitsOver(base, 10200, 12400, 100, 30) // 10.2 -> 12.4 km, lap 12 only
+
+	tests := []struct {
+		name   string
+		sp     *telemetry.Splits
+		curKm  int
+		want   []int
+		reason string
+	}{{
+		name: "a whole activity early on is unchanged", sp: whole, curKm: 3,
+		want:   []int{1, 2, 3},
+		reason: "the window's floor is FirstKm, which is 1 for a track starting at 0 m",
+	}, {
+		name: "a whole activity mid-run shows the last five plus the pinned fastest",
+		sp:   whole, curKm: 8,
+		// Constant pace, so BuildSplits picks the earliest lap as fastest;
+		// km 1 is outside the 4..8 window and is pinned above it.
+		want:   []int{1, 4, 5, 6, 7, 8},
+		reason: "the fastest lap is an absolute km number, compared against the window's floor",
+	}, {
+		name: "a clip-scoped track lists only laps it actually contains",
+		sp:   scoped, curKm: 13,
+		want:   []int{12, 13},
+		reason: "km 11's opening crossing at 10 000 m is before the track",
+	}, {
+		name: "a clip-scoped track before its first complete lap lists nothing",
+		sp:   scoped, curKm: 11,
+		want:   []int{},
+		reason: "the header draws alone rather than inventing a lap",
+	}, {
+		name: "a clip-scoped track pins its fastest lap by absolute number",
+		sp:   splitsWithAFastLap(base), curKm: 19,
+		// The window is 15..19; the fastest lap is km 13, below it, so it is
+		// pinned on top. If Fastest still returned a slice index it would be
+		// 2 here -- inside the "pin it" branch, and drawn as a row labelled
+		// "2/", a kilometre this clip is nowhere near.
+		want:   []int{13, 15, 16, 17, 18, 19},
+		reason: "the pin compares Fastest against the window floor, both absolute km numbers",
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := splitsRows(tt.sp, tt.curKm)
+			if len(got) != len(tt.want) {
+				t.Fatalf("splitsRows(curKm=%d) = %v, want %v (%s)", tt.curKm, got, tt.want, tt.reason)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("splitsRows(curKm=%d) = %v, want %v (%s)", tt.curKm, got, tt.want, tt.reason)
+				}
+			}
+		})
+	}
+}
+
 func TestFmtMSS(t *testing.T) {
 	cases := map[time.Duration]string{
 		0:                 "0:00",
