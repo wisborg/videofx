@@ -2,6 +2,7 @@ package vidio
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -304,6 +305,59 @@ func TestParseProbeJSON_NoRotation(t *testing.T) {
 	if info.DisplayWidth() != info.Width || info.DisplayHeight() != info.Height {
 		t.Errorf("display dims %dx%d should equal coded dims %dx%d when unrotated",
 			info.DisplayWidth(), info.DisplayHeight(), info.Width, info.Height)
+	}
+}
+
+// TestParseProbeJSON_StartTime covers the container's start_time, which
+// TrimClip's keyframe probe converts through: ffmpeg counts an input -ss from
+// start_time while ffprobe's read_intervals positions and pts_time values are
+// absolute, so a clip with a 5 s start_time gets a creation_time 5 s wrong if
+// this field is not read.
+//
+// The cases that carry the test are the ones with a NON-ZERO start_time. Every
+// degradation here answers 0, and 0 is also the zero value of the field, so a
+// version of parseProbeJSON that never looked at start_time at all -- a
+// misspelt json tag, a deleted block -- would satisfy the absent/N/A/garbage
+// rows on its own. Negative is included because it is real (an MP4 edit list
+// or audio priming can put the first sample before zero) and because it is the
+// one value a `if v > 0` guard bolted on later would silently drop.
+func TestParseProbeJSON_StartTime(t *testing.T) {
+	tests := []struct {
+		name   string
+		format string
+		want   float64
+	}{
+		{name: "a positive start_time is read", format: `"duration": "9.0", "start_time": "5.000000"`, want: 5},
+		{name: "a negative start_time is kept", format: `"duration": "9.0", "start_time": "-0.023000"`, want: -0.023},
+		{name: "a zero start_time", format: `"duration": "9.0", "start_time": "0.000000"`, want: 0},
+		{name: "absent means the timeline starts where it starts", format: `"duration": "9.0"`, want: 0},
+		{name: "N/A is not an error", format: `"duration": "9.0", "start_time": "N/A"`, want: 0},
+		{name: "garbage is not an error", format: `"duration": "9.0", "start_time": "whenever"`, want: 0},
+		{name: "empty is not an error", format: `"duration": "9.0", "start_time": ""`, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := []byte(`{
+				"streams": [
+					{"codec_type": "video", "width": 640, "height": 480, "r_frame_rate": "25/1", "avg_frame_rate": "25/1"}
+				],
+				"format": {` + tt.format + `}
+			}`)
+			info, err := parseProbeJSON(data)
+			// An unreadable start_time must never fail the probe: nothing but
+			// the trim tag reads it, and the stabilizer must still run.
+			if err != nil {
+				t.Fatalf("parseProbeJSON returned error: %v", err)
+			}
+			if math.Abs(info.StartTime-tt.want) > 1e-9 {
+				t.Errorf("StartTime = %v, want %v", info.StartTime, tt.want)
+			}
+			// The rest of the format object must still have been read, so a
+			// start_time case cannot pass by parsing nothing.
+			if info.Duration != 9.0 {
+				t.Errorf("Duration = %v, want 9.0", info.Duration)
+			}
+		})
 	}
 }
 

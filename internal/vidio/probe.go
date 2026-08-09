@@ -39,6 +39,18 @@ type Info struct {
 	NBFrames int
 	// Duration is the container's reported duration in seconds.
 	Duration float64
+	// StartTime is the container's reported start_time in seconds -- the
+	// timestamp of the first sample on the file's own timeline, which is not
+	// always 0 (an MP4 edit list, or a muxer that offset the timestamps, can
+	// put it elsewhere). It is 0 when the container does not report one.
+	//
+	// It matters because ffmpeg and ffprobe disagree about which end of it
+	// they count from. An INPUT -ss is measured from start_time, while
+	// ffprobe's -read_intervals positions and the pts_time values it prints
+	// are absolute. Anything that has to predict where an -ss will land --
+	// TrimClip's keyframe probe -- has to convert between the two, and a
+	// clip with a 5 s start_time gets the answer 5 s wrong if it does not.
+	StartTime float64
 	// HasAudio reports whether the source has at least one audio stream.
 	// Encoder uses this indirectly (via EncoderConfig.SourcePath)
 	// when deciding whether to map an audio track through.
@@ -126,8 +138,9 @@ type ffprobeSideData struct {
 }
 
 type ffprobeFormat struct {
-	Duration string            `json:"duration"`
-	Tags     ffprobeFormatTags `json:"tags"`
+	Duration  string            `json:"duration"`
+	StartTime string            `json:"start_time"`
+	Tags      ffprobeFormatTags `json:"tags"`
 }
 
 // ffprobeFormatTags mirrors the subset of ffprobe's format.tags object
@@ -152,26 +165,54 @@ type ffprobeFormatTags struct {
 // why it lives in Probe rather than at each allocation.
 const maxProbeDimension = 16384
 
+// runFFprobeJSON runs ffprobe over path with args and returns its stdout.
+//
+// It is to ffprobe what newFFmpegCmd is to ffmpeg: the one place that decides
+// what every invocation in this package has in common. That is three things,
+// each of which was previously duplicated per call site and each of which is
+// silently wrong if a new call site forgets it -- "-v error" (so stdout is
+// parseable JSON and stderr is signal rather than a banner), the JSON print
+// format itself, and PositionalPath on the trailing filename, since ffprobe
+// takes its input as a bare positional and would read "-y.mp4" as an option.
+// args is what actually differs: which sections and entries to show.
+//
+// The caller wraps the returned error with its own "vidio: <what> of <path>"
+// context, because "probing" and "probing the keyframe before 4.400s" are
+// different failures to a reader and only the caller knows which it is.
+// ffprobe's own stderr is appended here, where the pipe is: the bounded
+// stderrCapture rather than a plain buffer, so a pathologically chatty failure
+// cannot put an unbounded string into an error value. Near-theoretical under
+// -v error -- which is the argument for fixing it in the shared helper rather
+// than reasoning about it per call site.
+func runFFprobeJSON(ctx context.Context, path string, args ...string) ([]byte, error) {
+	argv := append([]string{"-v", "error", "-print_format", "json"}, args...)
+	argv = append(argv, PositionalPath(path))
+
+	cmd := exec.CommandContext(ctx, "ffprobe", argv...)
+	var stdout bytes.Buffer
+	capture := &stderrCapture{}
+	cmd.Stdout = &stdout
+	cmd.Stderr = capture
+	if err := cmd.Run(); err != nil {
+		if tail := capture.String(); tail != "" {
+			return nil, fmt.Errorf("%w: %s", err, tail)
+		}
+		return nil, err
+	}
+	return stdout.Bytes(), nil
+}
+
 // Probe runs ffprobe against path and extracts the video (and audio
 // presence) information a Decoder/Encoder needs to size buffers and
 // build ffmpeg command lines. It is a single cheap subprocess call —
 // ffprobe reads container metadata only, it does not decode frames.
 func Probe(ctx context.Context, path string) (Info, error) {
-	cmd := exec.CommandContext(ctx, "ffprobe",
-		"-v", "error",
-		"-print_format", "json",
-		"-show_format",
-		"-show_streams",
-		PositionalPath(path),
-	)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return Info{}, fmt.Errorf("vidio: probing %s: %w: %s", path, err, strings.TrimSpace(stderr.String()))
+	data, err := runFFprobeJSON(ctx, path, "-show_format", "-show_streams")
+	if err != nil {
+		return Info{}, fmt.Errorf("vidio: probing %s: %w", path, err)
 	}
 
-	info, err := parseProbeJSON(stdout.Bytes())
+	info, err := parseProbeJSON(data)
 	if err != nil {
 		return Info{}, fmt.Errorf("vidio: parsing ffprobe output for %s: %w", path, err)
 	}
@@ -247,6 +288,19 @@ func parseProbeJSON(data []byte) (Info, error) {
 		}
 	}
 
+	// start_time is absent or "N/A" for plenty of containers, and 0 is the
+	// right reading of both: the timeline starts where it starts. A value
+	// that is present but unparseable is treated the same way rather than
+	// failing Probe, for the same reason creation_time is -- the only caller
+	// that reads it is TrimClip's keyframe probe, so a malformed one must not
+	// take down every Probe the stabilizer pipeline makes.
+	startTime := 0.0
+	if s := parsed.Format.StartTime; s != "" && s != "N/A" {
+		if v, err := strconv.ParseFloat(s, 64); err == nil {
+			startTime = v
+		}
+	}
+
 	creationTime, hasCreationTime, creationTimeNaive := parseCreationTime(parsed.Format.Tags.CreationTime)
 
 	// Display rotation: prefer the display-matrix side-data entry, falling
@@ -271,6 +325,7 @@ func parseProbeJSON(data []byte) (Info, error) {
 		FPS:               fps,
 		NBFrames:          nbFrames,
 		Duration:          duration,
+		StartTime:         startTime,
 		HasAudio:          hasAudio,
 		CreationTime:      creationTime,
 		HasCreationTime:   hasCreationTime,

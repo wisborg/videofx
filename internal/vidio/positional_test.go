@@ -61,10 +61,10 @@ func TestArgvBuilders_GuardTheOutputPositional(t *testing.T) {
 		// The span is already clamped by TrimClip before it gets here, and the
 		// Info is only read for creation_time -- nothing else in it reaches the
 		// argv.
-		{"trimArgs", trimArgs("in.mp4", dashOut, 1, 3, Info{})},
+		{"trimArgs", trimArgs("in.mp4", dashOut, 1, 3, 1, Info{})},
 		// The creation_time branch appends after the rest of the list, so it is
 		// the other way the trailing argument can be reached.
-		{"trimArgs/creation_time", trimArgs("in.mp4", dashOut, 1, 3, Info{HasCreationTime: true})},
+		{"trimArgs/creation_time", trimArgs("in.mp4", dashOut, 1, 3, 1, Info{HasCreationTime: true})},
 	}
 
 	for _, tt := range tests {
