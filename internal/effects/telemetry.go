@@ -131,6 +131,37 @@ type Telemetry struct {
 	// selecting telemetry-hud auto-appends this effect (see cmd's
 	// impliedEffects), so "burn a HUD onto this clip" stamps the tag too.
 	OmitLocation bool
+
+	// Scope selects how much of the activity the emitted telemetry describes.
+	// The ZERO VALUE is telemetry.ScopeActivity -- the whole activity, which
+	// is what this effect has always emitted -- so a caller that never sets it
+	// gets today's behaviour. See telemetry.Scope on why an unset enum is the
+	// documented default here rather than a trap.
+	//
+	// For THIS effect the two clip modes differ only in the SRT's cumulative
+	// distance column, which ScopeClipRebased restarts at 0.00 km. Everything
+	// else the effect emits was already windowed to the clip, so
+	// ScopeClipAbsolute normally produces byte-identical output to
+	// ScopeActivity; that is correct, not a wiring mistake. The GPX is normally
+	// identical in all THREE modes, because its <time> is the video's own wall
+	// clock -- the thing Telemetry Overlay matches creation_time against -- and
+	// rebasing it would break Garmin sync rather than re-origin a readout.
+	//
+	// "Normally" is doing real work in both sentences, and the exception is a
+	// recording GAP straddling a clip boundary rather than anything to do with
+	// distance. Asked for an instant inside a gap, Track.At snaps to the
+	// nearest real sample and returns it with ITS own timestamp; if that
+	// snapped sample is also the window's first native one, Window's
+	// adjacent-duplicate collapse folds the two together and the scoped track's
+	// coverage begins at the sample rather than at the boundary instant --
+	// which then falls before coverage, so BuildClipPoints drops that point
+	// entirely. The full track, having samples on both sides, still emits it.
+	// A clip with a tunnel at its edge can therefore produce fewer cues and
+	// trkpts under either clip mode, in both the SRT and the GPX, with no
+	// rebasing involved. The scoped output is arguably the more honest of the
+	// two -- it declines to place a point the window has no data for -- but
+	// anyone diffing a real clip needs to know why the bytes moved.
+	Scope telemetry.Scope
 }
 
 func (t *Telemetry) Name() string         { return "telemetry" }
@@ -213,7 +244,17 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 			sync.CoverageStart.Format(time.RFC3339), sync.CoverageEnd.Format(time.RFC3339))
 	}
 
-	points := telemetry.BuildClipPoints(track, correctedCreationTime, 0, duration, telemetry.DefaultCadence)
+	// Scoping happens HERE, after the Resolve switch above, because sync is
+	// what tells it which window to scope to -- a data dependency, not a
+	// guard. Reversing the two would not quietly break the partial-overlap
+	// warning above (Window clamps to the samples that exist, so a scoped
+	// track still classifies as PartialOverlap or NoOverlap exactly as the
+	// full one does); it simply could not be written. See
+	// BuildScopedActivity's doc comment.
+	scoped := telemetry.BuildScopedActivity(track, sync, t.Scope)
+	logClipScope(log, scoped)
+
+	points := telemetry.BuildClipPoints(scoped.Track, correctedCreationTime, 0, duration, telemetry.DefaultCadence)
 
 	fields := telemetry.DefaultFieldOptions()
 	fields.Stryd = t.IncludeStryd
@@ -300,6 +341,56 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 	}
 
 	return nil
+}
+
+// logClipScope announces what a clip-scoped run narrowed the telemetry down
+// to, and says nothing at all for the whole-activity default (which is what
+// every run did before scoping existed, and does not need announcing).
+//
+// It exists because clip scoping is otherwise invisible: the sidecars are
+// still written, the mux still succeeds, and the only difference in the
+// telemetry effect's output is one column of an SRT nobody opens. A run whose
+// --offset was a minute out would narrow to the wrong stretch of the activity
+// and look exactly like a correct one.
+//
+// The distance span is reported in the ACTIVITY's own numbers in every mode --
+// RebasedBy is added back for a rebased clip -- so the line answers "where in
+// the run is this clip" identically whichever mode produced it, and the
+// rebasing is reported as the separate fact it is.
+//
+// The near end is READ FROM THE STRUCT (StartDistance + RebasedBy, of which at
+// most one is ever non-zero) rather than rescanned off the track, and that is
+// the point of those fields existing. The origin is what the rebase was
+// performed against; a second derivation here would be a second opinion about
+// it, free to drift from the first the day the origin rule changes -- and it
+// would drift in the log line, which is the only place anyone would have
+// looked to notice. Presence comes from HasOrigin for the same reason: a
+// window whose samples all lost their distance channel and a clip that opens
+// exactly on the activity's start line both leave the numbers at zero.
+//
+// The far end is trackTotalDistance, the same "last sample carrying a
+// distance" rule the HUD's course gauge measures against; there is no
+// corresponding field to read it from, and no second copy of the rule here.
+func logClipScope(log *logging.Logger, scoped *telemetry.ScopedActivity) {
+	if scoped.Scope == telemetry.ScopeActivity {
+		return
+	}
+
+	if !scoped.HasOrigin {
+		log.Infof("clip scope %s: %d samples, no distance data in the clip's window",
+			scoped.Scope, scoped.Track.Len())
+		return
+	}
+
+	first := scoped.StartDistance + scoped.RebasedBy
+	last := trackTotalDistance(scoped.Track) + scoped.RebasedBy
+
+	rebased := ""
+	if scoped.RebasedBy != 0 {
+		rebased = fmt.Sprintf(", rebased by %.2f km", scoped.RebasedBy/1000)
+	}
+	log.Infof("clip scope %s: %d samples, %.2f-%.2f km%s",
+		scoped.Scope, scoped.Track.Len(), first/1000, last/1000, rebased)
 }
 
 // resolveSRTFormat maps the effect's SRTFormat string onto a

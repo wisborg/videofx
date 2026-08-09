@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -696,6 +697,537 @@ func TestTelemetry_Apply_StrydReachesTheSRT(t *testing.T) {
 			}
 			if !c.stryd && strings.Contains(got, fieldName) {
 				t.Errorf("IncludeStryd=false leaked the developer field %q into the SRT:\n%s", fieldName, got)
+			}
+		})
+	}
+}
+
+// The scope fixture: a synthetic activity moving fast enough that a
+// two-second clip covers a whole kilometre, and a clip stamped eight seconds
+// into it.
+//
+// The speed is absurd for a runner, and deliberately so: this is the lever the
+// fixture has for putting a meaningful distance under a clip short enough to
+// generate with ffmpeg in a test. What matters is that the clip's opening
+// cumulative distance (500 m/s x 8 s = 4 000 m) is large and known
+// independently of anything the code under test computes, so "rebased" and
+// "not rebased" are 4.00 km apart rather than a rounding difference.
+const (
+	scopeFixtureSpeedMPS   = 500.0
+	scopeFixtureStart      = "2026-07-04T21:05:45Z"
+	scopeClipCreationTime  = "2026-07-04T21:05:53Z"
+	scopeClipStartSeconds  = 8
+	scopeClipStartDistance = scopeFixtureSpeedMPS * scopeClipStartSeconds / 1000 // km
+)
+
+// scopeFITPath writes the scope fixture described above into the test's temp
+// directory. 40 records at 1 Hz from 21:05:45 brackets the two-second clip at
+// 21:05:53 comfortably, so Resolve lands on FullOverlap and no partial-overlap
+// warning muddies the comparison.
+func scopeFITPath(t *testing.T) string {
+	t.Helper()
+	return scopeFITPathRecords(t, 40)
+}
+
+// scopeFITPathRecords is scopeFITPath with the record count exposed, so a test
+// can build a fixture that STOPS partway through the clip (see
+// TestTelemetry_Apply_ClipScopeUnderPartialOverlap). The count is the only
+// thing that varies: same start, same speed, so the distance a given record
+// carries is the same in every fixture this builds.
+func scopeFITPathRecords(t *testing.T, count int) string {
+	t.Helper()
+	start, err := time.Parse(time.RFC3339, scopeFixtureStart)
+	if err != nil {
+		t.Fatalf("parsing the fixture start: %v", err)
+	}
+	opts := fittest.DefaultOptions()
+	opts.Start = start
+	opts.Count = count
+	opts.SpeedMPS = scopeFixtureSpeedMPS
+
+	data, err := fittest.Build(opts)
+	if err != nil {
+		t.Fatalf("building the scope FIT fixture: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "activity.fit")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("writing the scope FIT fixture: %v", err)
+	}
+	return path
+}
+
+// scopeRun applies the telemetry effect once at the given scope against the
+// scope fixture and returns the two sidecars it wrote plus everything it
+// logged. Each run gets its own temp dir so the three modes' sidecars can be
+// compared byte for byte rather than overwriting one another.
+func scopeRun(t *testing.T, fitPath string, scope telemetry.Scope) (srt, gpx []byte, logged string) {
+	t.Helper()
+	dir := t.TempDir()
+	src := generateSyntheticSource(t, dir, "src.mp4", scopeClipCreationTime)
+	outputPath := filepath.Join(dir, "clip_telemetry.mp4")
+
+	var buf bytes.Buffer
+	tel := &Telemetry{
+		Runner:     &fakeRunner{},
+		FitPath:    fitPath,
+		SRTFormat:  "readable", // the DJI layout carries no distance at all
+		SRTSidecar: true,
+		GPX:        true,
+		Scope:      scope,
+	}
+	if err := tel.Apply(context.Background(), Input{
+		SourcePath: src,
+		OutputPath: outputPath,
+		Log:        logging.New(&buf, logging.LevelInfo),
+	}); err != nil {
+		t.Fatalf("Apply(scope=%v): %v", scope, err)
+	}
+
+	srt, err := os.ReadFile(srtSidecarPath(outputPath))
+	if err != nil {
+		t.Fatalf("reading the SRT sidecar: %v", err)
+	}
+	gpx, err = os.ReadFile(gpxSidecarPath(outputPath))
+	if err != nil {
+		t.Fatalf("reading the GPX sidecar: %v", err)
+	}
+	return srt, gpx, buf.String()
+}
+
+// srtDistanceColumn pulls the leading "N.NN km" figure out of every readable
+// SRT cue's readout line. The readout is pipe-separated with distance first
+// (see telemetry.formatSRTCueBody); the GPS line above it has no pipes and no
+// km suffix, and the pace field renders "M:SS/km" rather than "N.NN km", so
+// neither is picked up here.
+func srtDistanceColumn(t *testing.T, srt []byte) []float64 {
+	t.Helper()
+	var out []float64
+	for _, line := range strings.Split(string(srt), "\n") {
+		field := strings.SplitN(line, " | ", 2)[0]
+		if !strings.HasSuffix(field, " km") {
+			continue
+		}
+		km, err := strconv.ParseFloat(strings.TrimSuffix(field, " km"), 64)
+		if err != nil {
+			continue
+		}
+		out = append(out, km)
+	}
+	if len(out) < 2 {
+		t.Fatalf("found %d distance readings in the SRT, want at least 2:\n%s", len(out), srt)
+	}
+	return out
+}
+
+// TestTelemetry_Apply_ScopeRebasesOnlyTheSRTDistanceColumn is the gate for
+// clip scoping in the telemetry effect, and it is an exact comparison rather
+// than a statistical one: three runs over one clip, diffed.
+//
+// The two claims it makes are separate, and the second is the surprising one:
+//
+//   - clip-rebased restarts the SRT's cumulative distance at 0.00 km, offset
+//     from the unscoped figure by exactly the clip's opening distance, which
+//     the fixture fixes at 500 m/s x 8 s = 4.00 km independently of this code.
+//   - clip-absolute is BYTE-IDENTICAL to full. That is the correct answer, not
+//     a wiring failure: every other value this effect emits was already
+//     windowed to the clip, and the one whole-activity number in it is the
+//     cumulative distance, which clip-absolute deliberately preserves. If this
+//     equality ever breaks, something started differing between a track and a
+//     window of that same track -- worth understanding before "fixing".
+func TestTelemetry_Apply_ScopeRebasesOnlyTheSRTDistanceColumn(t *testing.T) {
+	requireFFmpeg(t)
+	fitPath := scopeFITPath(t)
+
+	fullSRT, _, fullLog := scopeRun(t, fitPath, telemetry.ScopeActivity)
+	rebasedSRT, _, rebasedLog := scopeRun(t, fitPath, telemetry.ScopeClipRebased)
+	absoluteSRT, _, absoluteLog := scopeRun(t, fitPath, telemetry.ScopeClipAbsolute)
+
+	if !bytes.Equal(fullSRT, absoluteSRT) {
+		t.Errorf("clip-absolute's SRT differs from full's:\n--- full ---\n%s\n--- clip-absolute ---\n%s",
+			fullSRT, absoluteSRT)
+	}
+
+	full := srtDistanceColumn(t, fullSRT)
+	rebased := srtDistanceColumn(t, rebasedSRT)
+
+	// The control. Without this the rebased assertions below could pass
+	// against a fixture that never got past its own start line.
+	if full[0] != scopeClipStartDistance {
+		t.Fatalf("the clip's first cue reads %.2f km, want %.2f km -- the fixture is not what these assertions assume",
+			full[0], scopeClipStartDistance)
+	}
+	if full[len(full)-1] <= full[0] {
+		t.Fatalf("the clip's distance does not advance (%.2f -> %.2f km), so a rebased span of zero would prove nothing",
+			full[0], full[len(full)-1])
+	}
+
+	if rebased[0] != 0 {
+		t.Errorf("clip-rebased's first cue reads %.2f km, want 0.00 km", rebased[0])
+	}
+	if len(rebased) != len(full) {
+		t.Fatalf("clip-rebased emitted %d cues, full emitted %d -- rebasing must not change which points resolve",
+			len(rebased), len(full))
+	}
+	for i := range full {
+		if want := full[i] - scopeClipStartDistance; rebased[i] != want {
+			t.Errorf("cue %d: clip-rebased reads %.2f km, want %.2f km (%.2f km less the clip's %.2f km origin)",
+				i, rebased[i], want, full[i], scopeClipStartDistance)
+		}
+	}
+	// The last cue is the clip's distance span, which is the number the mode
+	// exists to show.
+	if got, want := rebased[len(rebased)-1], full[len(full)-1]-scopeClipStartDistance; got != want {
+		t.Errorf("clip-rebased's last cue reads %.2f km, want the clip's span of %.2f km", got, want)
+	}
+
+	// Scoping must be observable in the log, or a wrong --offset narrows to
+	// the wrong stretch of the activity and looks exactly like a good run.
+	if strings.Contains(fullLog, "clip scope") {
+		t.Errorf("the whole-activity default announced a clip scope: %q", fullLog)
+	}
+	for _, c := range []struct {
+		mode string
+		log  string
+	}{
+		{"clip-rebased", rebasedLog},
+		{"clip-absolute", absoluteLog},
+	} {
+		if !strings.Contains(c.log, "clip scope "+c.mode) {
+			t.Errorf("%s did not announce its scope: %q", c.mode, c.log)
+		}
+		// Reported in the activity's own numbers in both modes, so the line
+		// answers "where in the run is this clip" the same way either way.
+		if !strings.Contains(c.log, "4.00-") {
+			t.Errorf("%s's scope line does not report the clip's position in the activity: %q", c.mode, c.log)
+		}
+	}
+	if !strings.Contains(rebasedLog, "rebased by 4.00 km") {
+		t.Errorf("clip-rebased did not report what it rebased by: %q", rebasedLog)
+	}
+	if strings.Contains(absoluteLog, "rebased by") {
+		t.Errorf("clip-absolute claims to have rebased something: %q", absoluteLog)
+	}
+}
+
+// TestTelemetry_Apply_ScopeNeverRebasesGPXTime_ItIsWhatGarminSyncMatchesOn is
+// the regression test for the wall-clock rule, and the name is the assertion:
+// a failure here is broken Garmin telemetry sync, not a formatting change.
+//
+// Telemetry Overlay (and every comparable tool) aligns a GPX track to a video
+// by matching the container's creation_time against the GPX <time> elements.
+// The video's creation_time is a real instant and clip scoping does not touch
+// it, so the moment a scope mode shifts <time> -- by "rebasing elapsed time"
+// along with distance, the obvious next step -- the overlay silently lands on
+// the wrong part of the track. Nothing about the resulting GPX looks wrong; it
+// is a valid file describing the wrong minute.
+//
+// The GPX also carries no distance at all, so for this fixture there is
+// genuinely nothing in it for any scope mode to change and identical bytes
+// across all three is the whole assertion.
+//
+// That equality is a property of THIS fixture, not a universal law, and the
+// distinction matters if someone lands here after a real clip's GPX moved. A
+// recording gap straddling a clip boundary can legitimately change the trkpt
+// COUNT under clip scoping -- Track.At snaps into a gap and returns the
+// nearest sample with its own timestamp, and when that sample is the window's
+// first native one the scoped track's coverage starts after the boundary
+// instant, so BuildClipPoints drops a point the full track still emits. That
+// is a coverage difference, not a rebasing one; the fixture below is 1 Hz
+// throughout and has no gap for it to happen in. What the test name claims,
+// and what must never become false for any fixture, is that no <time> MOVES.
+func TestTelemetry_Apply_ScopeNeverRebasesGPXTime_ItIsWhatGarminSyncMatchesOn(t *testing.T) {
+	requireFFmpeg(t)
+	fitPath := scopeFITPath(t)
+
+	_, fullGPX, _ := scopeRun(t, fitPath, telemetry.ScopeActivity)
+
+	// The control: the clip's creation_time must actually appear, or "the
+	// bytes match" below would be satisfied by three empty files.
+	if !strings.Contains(string(fullGPX), "2026-07-04T21:05:53Z") {
+		t.Fatalf("the GPX does not carry the clip's creation_time, so this comparison proves nothing:\n%s", fullGPX)
+	}
+
+	for _, scope := range []telemetry.Scope{telemetry.ScopeClipRebased, telemetry.ScopeClipAbsolute} {
+		t.Run(scope.String(), func(t *testing.T) {
+			_, gpx, _ := scopeRun(t, fitPath, scope)
+			if !bytes.Equal(fullGPX, gpx) {
+				t.Errorf("%v changed the GPX sidecar -- if <time> moved, this clip's telemetry no longer syncs to the video:\n--- full ---\n%s\n--- %v ---\n%s",
+					scope, fullGPX, scope, gpx)
+			}
+		})
+	}
+}
+
+// TestTelemetry_Apply_ClipScopeUnderPartialOverlap covers clip scoping over a
+// clip the FIT file only partly covers. Every other scope test here uses a
+// fully-contained clip, and partial overlap is not an exotic case: it is what
+// an --offset that is a few seconds out produces, and it is the likeliest real
+// route to a wrong origin, because clip-rebased turns the first sample in the
+// window into the zero of every distance it prints.
+//
+// The fixture stops at 21:05:54, one second into the two-second clip stamped
+// 21:05:53, so the clip runs off the end of the recording. What must hold:
+//
+//   - the partial-overlap warning still fires. Scoping happens after Resolve
+//     and Resolve still sees the full track, so narrowing the data must not
+//     cost the user the one message telling them their clip is half-empty.
+//   - the origin is the first IN-COVERAGE distance-bearing sample, which the
+//     fixture fixes at 500 m/s x 8 s = 4.00 km. A run that took its origin
+//     from the clip's nominal start instead -- a second of clock that has no
+//     sample behind it -- would be rebasing against a number no record
+//     carries.
+//
+// The whole-activity run of the same truncated fixture is the control: it
+// establishes what the un-rebased distances are, so the rebased ones are
+// checked against a measured 4.00 km offset rather than against themselves.
+func TestTelemetry_Apply_ClipScopeUnderPartialOverlap(t *testing.T) {
+	requireFFmpeg(t)
+	// 10 records at 1 Hz from 21:05:45 cover 21:05:45..21:05:54.
+	fitPath := scopeFITPathRecords(t, 10)
+
+	fullSRT, _, fullLog := scopeRun(t, fitPath, telemetry.ScopeActivity)
+	rebasedSRT, _, rebasedLog := scopeRun(t, fitPath, telemetry.ScopeClipRebased)
+
+	// The premise. Without this the rest is just another fully-covered clip.
+	for _, c := range []struct{ mode, log string }{
+		{"full", fullLog},
+		{"clip-rebased", rebasedLog},
+	} {
+		if !strings.Contains(c.log, "only partially overlaps") {
+			t.Fatalf("%s: expected a partial-overlap warning, got: %q", c.mode, c.log)
+		}
+	}
+
+	full := srtDistanceColumn(t, fullSRT)
+	rebased := srtDistanceColumn(t, rebasedSRT)
+
+	if full[0] != scopeClipStartDistance {
+		t.Fatalf("the clip's first in-coverage cue reads %.2f km, want %.2f km -- the fixture is not what this test assumes",
+			full[0], scopeClipStartDistance)
+	}
+	if len(rebased) != len(full) {
+		t.Fatalf("clip-rebased emitted %d cues against full's %d: scoping must narrow the numbers, not the coverage",
+			len(rebased), len(full))
+	}
+	if rebased[0] != 0 {
+		t.Errorf("clip-rebased's first cue reads %.2f km, want 0.00 km", rebased[0])
+	}
+	for i := range full {
+		if want := full[i] - scopeClipStartDistance; rebased[i] != want {
+			t.Errorf("cue %d: clip-rebased reads %.2f km, want %.2f km -- the origin is not the first in-coverage sample",
+				i, rebased[i], want)
+		}
+	}
+	if !strings.Contains(rebasedLog, "rebased by 4.00 km") {
+		t.Errorf("the scope line does not report the in-coverage origin it rebased by: %q", rebasedLog)
+	}
+}
+
+// TestTelemetry_Apply_ClipScopeKeepsTheDeveloperFields is the end-to-end half
+// of telemetry.TestBuildScopedActivity_ScopedSamplesKeepTheirDeveloperFields,
+// and it is here because developer fields are the one thing clip scoping could
+// drop without changing a single number anyone else asserts.
+//
+// Sample.DevFields is a map header, so a scoped Sample shares its map with the
+// original rather than owning a copy. Anyone who notices that -- and it is
+// worth noticing, because writing into one corrupts the caller's Track -- is
+// one step away from "copy the samples defensively", and a defensive copy that
+// forgets the map leaves it nil. Every other assertion in this file still
+// passes: the distance column, the GPX bytes, the cue count, the mux argv. The
+// only visible consequence is that --telemetry-stryd stops emitting running
+// dynamics, in the clip modes only, which is exactly the shape of failure this
+// package's tests exist to refuse.
+//
+// full is in the table as the control: if the developer field were missing
+// from all three the fixture would be at fault, not the scoping.
+func TestTelemetry_Apply_ClipScopeKeepsTheDeveloperFields(t *testing.T) {
+	requireFFmpeg(t)
+
+	const fieldName = "Synthetic Metric" // fabricated; see fittest's doc comment
+	// Record 8 covers the clip's first second (the clip is stamped 21:05:53,
+	// the fixture starts at 21:05:45 at 1 Hz) and is written unscaled, so the
+	// SRT renders it with formatStrydLine's single decimal.
+	wantEntry := fmt.Sprintf("%s=%.1f", fieldName, float64(fittest.DeveloperFieldRaw(8)))
+	fitPath := devFieldFITPath(t, fieldName)
+
+	for _, scope := range []telemetry.Scope{
+		telemetry.ScopeActivity,
+		telemetry.ScopeClipRebased,
+		telemetry.ScopeClipAbsolute,
+	} {
+		t.Run(scope.String(), func(t *testing.T) {
+			dir := t.TempDir()
+			src := generateSyntheticSource(t, dir, "src.mp4", "2026-07-04T21:05:53Z")
+			outputPath := filepath.Join(dir, "clip_telemetry.mp4")
+
+			tel := &Telemetry{
+				Runner:       &fakeRunner{},
+				FitPath:      fitPath,
+				SRTFormat:    "readable", // the DJI layout ignores Fields entirely
+				SRTSidecar:   true,
+				IncludeStryd: true,
+				Scope:        scope,
+			}
+			if err := tel.Apply(context.Background(), Input{SourcePath: src, OutputPath: outputPath}); err != nil {
+				t.Fatalf("Apply(scope=%v): %v", scope, err)
+			}
+
+			data, err := os.ReadFile(srtSidecarPath(outputPath))
+			if err != nil {
+				t.Fatalf("SRT sidecar not written at %s: %v", srtSidecarPath(outputPath), err)
+			}
+			if !strings.Contains(string(data), wantEntry) {
+				t.Errorf("scope %v produced an SRT without the developer field %q:\n%s", scope, wantEntry, data)
+			}
+		})
+	}
+}
+
+// scopedFor builds a ScopedActivity for logClipScope out of a literal list of
+// (distance, present) pairs at 1 Hz, so a case can put a dropout wherever it
+// wants one. The absent samples carry a deliberately absurd POISON distance so
+// that a rule reading them anyway prints something unmistakable (99.99 km)
+// rather than a plausible zero.
+//
+// It DERIVES HasOrigin and StartDistance from the samples it was handed, using
+// BuildScopedActivity's own rules, instead of taking them as parameters. That
+// is deliberate and it is the whole design of this helper: a hand-written
+// ScopedActivity can otherwise express states the real constructor cannot --
+// clip-absolute samples at 10 200 m alongside StartDistance 0, say -- and a
+// test pinning behaviour on an impossible value pins the wrong thing. It would
+// have locked in "the log line must survive an inconsistent ScopedActivity",
+// which nobody needs, at the price of keeping a second derivation of the
+// origin alive in the effect.
+//
+// Consequently this helper does NOT test the origin rule; BuildScopedActivity
+// owns that, and telemetry.TestBuildScopedActivity_UsesTheFirstDistanceBearing
+// SampleAsTheOrigin is where a leading dropout is proved to be skipped. What
+// the cases below still prove is everything downstream of the origin: which
+// mode announces what, that RebasedBy is added back, that the far end skips a
+// TRAILING dropout, and the no-distance wording.
+func scopedFor(scope telemetry.Scope, rebasedBy float64, dists []float64, present []bool) *telemetry.ScopedActivity {
+	base := time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC)
+	samples := make([]telemetry.Sample, len(dists))
+	for i := range dists {
+		samples[i] = telemetry.Sample{
+			Time:        base.Add(time.Duration(i) * time.Second),
+			HasDistance: present[i],
+			Distance:    dists[i],
+		}
+	}
+
+	scoped := &telemetry.ScopedActivity{
+		Scope: scope,
+		Track: &telemetry.Track{Samples: samples},
+	}
+	for _, s := range samples {
+		if !s.HasDistance {
+			continue // the origin is the first DISTANCE-BEARING sample
+		}
+		scoped.HasOrigin = true
+		if scope == telemetry.ScopeClipAbsolute {
+			scoped.StartDistance = s.Distance
+		}
+		break
+	}
+	// RebasedBy is ignored outside the one mode that can carry it, so a case
+	// cannot ask for a rebased clip-absolute view -- there is no such thing.
+	if scope == telemetry.ScopeClipRebased {
+		scoped.RebasedBy = rebasedBy
+	}
+	return scoped
+}
+
+// TestLogClipScope_ReportsTheClipsPlaceInTheActivity covers the one line that
+// makes clip scoping observable at all, and the cases are chosen for the ways
+// it can be wrong while still printing something plausible.
+//
+// Scoping changes nothing a person can see in this effect's output except one
+// column of an SRT nobody opens, so a run whose --offset was a minute out
+// narrows to the wrong stretch of the activity and looks exactly like a
+// correct one. This log line is the whole answer to that, which means a line
+// reporting the wrong stretch is worse than no line: it is a wrong answer to
+// the only question being asked.
+//
+// The expected strings are derived from the fixtures, not read back:
+//
+//   - The span is stated in the ACTIVITY's own kilometres in both clip modes,
+//     so the same clip prints 10.20-12.40 km whether it was rebased or not.
+//     For the rebased case that means the samples read 0/1100/2200 m and
+//     RebasedBy supplies the 10 200 m that puts them back where they belong --
+//     if the line printed the track's own numbers it would say 0.00-2.20 km,
+//     which answers a different question.
+//   - Both ends skip a dropout, so a clip opening and closing on a sample with
+//     no distance still reports its first and last real ones. The dropouts
+//     carry 99 999 m, which would print as 99.99 km. The two ends reach that
+//     answer by different routes, and only one of them is on trial here: the
+//     near end was already resolved when BuildScopedActivity set the origin
+//     (see scopedFor), while the far end is skipped by trackTotalDistance on
+//     every call, which is what these cases pin.
+//   - A window with no distance at all says so in words rather than printing
+//     a 0.00-0.00 km span that reads as "stood on the start line".
+//   - ScopeActivity prints nothing whatsoever: it is what every run did before
+//     scoping existed and needs no announcement.
+func TestLogClipScope_ReportsTheClipsPlaceInTheActivity(t *testing.T) {
+	const poison = 99999.0
+
+	for _, c := range []struct {
+		name   string
+		scoped *telemetry.ScopedActivity
+		want   []string
+		absent []string
+	}{
+		{
+			name: "whole activity says nothing",
+			scoped: scopedFor(telemetry.ScopeActivity, 0,
+				[]float64{0, 1000, 2000}, []bool{true, true, true}),
+			absent: []string{"clip scope"},
+		},
+		{
+			name: "clip-absolute reports the activity's own kilometres",
+			scoped: scopedFor(telemetry.ScopeClipAbsolute, 0,
+				[]float64{poison, 10200, 11300, 12400, poison},
+				[]bool{false, true, true, true, false}),
+			want:   []string{"clip scope clip-absolute: 5 samples, 10.20-12.40 km"},
+			absent: []string{"rebased by", "99.99"},
+		},
+		{
+			name: "clip-rebased adds its origin back to report the same span",
+			scoped: scopedFor(telemetry.ScopeClipRebased, 10200,
+				[]float64{poison, 0, 1100, 2200, poison},
+				[]bool{false, true, true, true, false}),
+			want:   []string{"clip scope clip-rebased: 5 samples, 10.20-12.40 km, rebased by 10.20 km"},
+			absent: []string{"99.99", "0.00-2.20"},
+		},
+		{
+			name: "a window with no distance says so instead of printing zeroes",
+			scoped: scopedFor(telemetry.ScopeClipRebased, 0,
+				[]float64{poison, poison, poison}, []bool{false, false, false}),
+			want:   []string{"clip scope clip-rebased: 3 samples, no distance data in the clip's window"},
+			absent: []string{" km"},
+		},
+		{
+			name: "an empty window is reported, not skipped",
+			scoped: scopedFor(telemetry.ScopeClipAbsolute, 0,
+				[]float64{}, []bool{}),
+			want:   []string{"clip scope clip-absolute: 0 samples, no distance data in the clip's window"},
+			absent: []string{" km"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logClipScope(logging.New(&buf, logging.LevelInfo), c.scoped)
+			got := buf.String()
+
+			for _, want := range c.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("log line %q does not contain %q", got, want)
+				}
+			}
+			for _, absent := range c.absent {
+				if strings.Contains(got, absent) {
+					t.Errorf("log line %q should not contain %q", got, absent)
+				}
 			}
 		})
 	}
