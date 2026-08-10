@@ -62,6 +62,33 @@ type TelemetryHUD struct {
 	// Layout, when non-nil, overrides LayoutMode with an explicit arrangement
 	// (for programmatic callers/tests).
 	Layout *hud.Layout
+	// Scope selects how much of the activity the gauges describe. The ZERO
+	// VALUE is telemetry.ScopeActivity -- the whole activity, which is what
+	// this effect has always drawn -- so a caller that never sets it gets
+	// today's HUD. See telemetry.Scope on why an unset enum is the documented
+	// default here rather than a trap.
+	//
+	// It changes far more here than it does on the Telemetry effect, where
+	// only one column of the SRT moves. Every gauge fed by the course --
+	// the progress bar's extent and labels, the elevation profile's distance
+	// and elevation ranges, the gain/loss totals, the splits table's km
+	// numbering, and the course map's route and zoom -- is built from the
+	// scoped track, so a clip cut from 10.2 km into a marathon draws that
+	// stretch of it instead of a 5% sliver of the whole day.
+	//
+	// The two clip modes produce IDENTICAL gauge geometry and differ only in
+	// the numbers printed: ScopeClipRebased subtracts the clip's opening
+	// distance so everything restarts at zero, ScopeClipAbsolute keeps the
+	// activity's own numbering. One value is clip-relative even under
+	// ScopeClipAbsolute, and cannot be otherwise: the gain/loss gauge counts
+	// from the clip's first sample, because FIT carries no per-record
+	// cumulative ascent to carry a running total forward from.
+	//
+	// What neither mode touches is the wall clock --
+	// the time/date gauge, and the instants the per-frame lookup and the
+	// course map's covered-so-far split are keyed on -- because that is what
+	// the FIT sync itself is built on.
+	Scope telemetry.Scope
 }
 
 // trackTotalDistance is the activity's final cumulative distance (m) -- the
@@ -99,6 +126,50 @@ func buildRoute(track *telemetry.Track) []hud.GeoPoint {
 		out[i] = pts[idx]
 	}
 	return out
+}
+
+// buildCourse assembles the whole-render context every graphical gauge reads
+// (see hud.Course) from an already-scoped activity. elevOpts carries the
+// caller's explicit elevation smoothing request; everything else comes out of
+// scoped.
+//
+// It takes the *ScopedActivity rather than a *Track because two of the five
+// fields below cannot be derived from a track alone. Splits must be the ones
+// built alongside the scoping -- clip-absolute's need the km origin, which only
+// the scoping code knows -- and StartDistance is the origin itself, which the
+// struct is the single source of truth for. Handed a bare track, this would
+// have to rebuild both, and would rebuild them wrong.
+//
+// It is split out of Apply so the course can be asserted without ffmpeg. Apply
+// itself is a decode/probe/encode pipeline whose only testable output is a
+// video file, and the end-to-end tests over it can establish that SOMETHING was
+// burned in but not which activity it describes -- a scope that quietly did
+// nothing would satisfy every one of them.
+//
+// # The elevation target falls through on its own
+//
+// The condition below is the one that was already here, unchanged: with no
+// explicit sigma or targets, aim the smoothing at the FIT device's own
+// ascent/descent totals, which are a far better anchor for noisy barometric
+// elevation than any raw sum. It reads them off the SCOPED track, and
+// BuildScopedActivity clears HasElevationTotals on one, so a clip mode falls
+// through to the package's default sigma with no second condition here. That
+// is deliberate: a clip-length model tuned to hit the whole day's 180 m of
+// ascent would be smoothed to the far end of its range, and the profile it
+// drew would not be the terrain.
+func buildCourse(scoped *telemetry.ScopedActivity, elevOpts telemetry.ElevationOptions) *hud.Course {
+	track := scoped.Track
+	if elevOpts.Sigma <= 0 && elevOpts.TargetGain <= 0 && elevOpts.TargetLoss <= 0 && track.HasElevationTotals {
+		elevOpts.TargetGain = track.TotalAscent
+		elevOpts.TargetLoss = track.TotalDescent
+	}
+	return &hud.Course{
+		TotalDistance: trackTotalDistance(track),
+		StartDistance: scoped.StartDistance,
+		Elevation:     telemetry.BuildElevationModel(track, elevOpts),
+		Splits:        scoped.Splits,
+		Route:         buildRoute(track),
+	}
 }
 
 func (t *TelemetryHUD) Name() string                     { return "telemetry-hud" }
@@ -168,26 +239,44 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	// up. For an unrotated clip these equal the coded Width/Height.
 	dw, dh := info.DisplayWidth(), info.DisplayHeight()
 
-	// Build the whole-course elevation model once (see telemetry.Elevation
-	// Options). With no explicit smoothing or targets, default the targets to
-	// the FIT device's own total ascent/descent -- a far better anchor for
-	// noisy GPS elevation than a raw sum.
-	elevOpts := telemetry.ElevationOptions{
+	// Scoping happens HERE, after the Resolve switch above, for the same
+	// reason it does in the telemetry effect: sync is what tells it which
+	// window to scope to. See BuildScopedActivity's doc comment, which also
+	// records why reversing the two would NOT quietly break the
+	// partial-overlap warning -- a plausible hazard that was checked and found
+	// to be false.
+	scoped := telemetry.BuildScopedActivity(track, sync, t.Scope)
+	logClipScope(log, scoped)
+
+	// From here on `track` IS the scoped track.
+	//
+	// Today this rebinding serves exactly one consumer, the per-frame
+	// Track.At below, and that one matters: it reads the distances the
+	// course's axes were drawn from, so if the two came from different tracks
+	// a rebased render would place every playhead against an un-rebased
+	// number -- pinned at the right-hand end of a bar it agrees with in no
+	// other way. It renders, it does not warn, and only a pixel measurement
+	// tells the difference (see the effect's progress-fill test).
+	//
+	// Its real value, though, is prospective: a consumer added below this line
+	// is scoped because it cannot reach anything else, which is the whole
+	// thesis of doing this at the Track level rather than per gauge. That is
+	// worth one rebinding even while there is a single reader.
+	//
+	// The sibling Telemetry effect handles the same step the other way, passing
+	// scoped.Track explicitly to its one consumer and never rebinding. Both are
+	// defensible -- an explicit argument is clearer where there is exactly one
+	// call, a rebinding is safer where a loop and future code follow -- but a
+	// reader moving between the two effects meets the same idea in two dialects
+	// and should not read the difference as significant.
+	track = scoped.Track
+
+	// The whole-course context every graphical gauge reads, built once.
+	course := buildCourse(scoped, telemetry.ElevationOptions{
 		Sigma:      t.ElevationSmoothing,
 		TargetGain: t.ElevationGain,
 		TargetLoss: t.ElevationLoss,
-	}
-	if t.ElevationSmoothing <= 0 && t.ElevationGain <= 0 && t.ElevationLoss <= 0 && track.HasElevationTotals {
-		elevOpts.TargetGain = track.TotalAscent
-		elevOpts.TargetLoss = track.TotalDescent
-	}
-	elevModel := telemetry.BuildElevationModel(track, elevOpts)
-	course := &hud.Course{
-		TotalDistance: trackTotalDistance(track),
-		Elevation:     elevModel,
-		Splits:        telemetry.BuildSplits(track),
-		Route:         buildRoute(track),
-	}
+	})
 
 	layout := hud.SelectLayout(t.LayoutMode, dw, dh)
 	if t.Layout != nil {
