@@ -62,11 +62,11 @@ type TelemetryHUD struct {
 	// Layout, when non-nil, overrides LayoutMode with an explicit arrangement
 	// (for programmatic callers/tests).
 	Layout *hud.Layout
-	// Scope selects how much of the activity the gauges describe. The ZERO
-	// VALUE is telemetry.ScopeActivity -- the whole activity, which is what
-	// this effect has always drawn -- so a caller that never sets it gets
-	// today's HUD. See telemetry.Scope on why an unset enum is the documented
-	// default here rather than a trap.
+	// Scope selects how much of the activity the gauges describe. Wired from
+	// --telemetry-scope. The ZERO VALUE is telemetry.ScopeActivity -- the whole
+	// activity, which is what this effect has always drawn -- so a caller that
+	// never sets it gets today's HUD. See telemetry.Scope on why an unset enum
+	// is the documented default here rather than a trap.
 	//
 	// It changes far more here than it does on the Telemetry effect, where
 	// only one column of the SRT moves. Every gauge fed by the course --
@@ -76,18 +76,31 @@ type TelemetryHUD struct {
 	// scoped track, so a clip cut from 10.2 km into a marathon draws that
 	// stretch of it instead of a 5% sliver of the whole day.
 	//
-	// The two clip modes produce IDENTICAL gauge geometry and differ only in
-	// the numbers printed: ScopeClipRebased subtracts the clip's opening
-	// distance so everything restarts at zero, ScopeClipAbsolute keeps the
-	// activity's own numbering. One value is clip-relative even under
-	// ScopeClipAbsolute, and cannot be otherwise: the gain/loss gauge counts
-	// from the clip's first sample, because FIT carries no per-record
-	// cumulative ascent to carry a running total forward from.
+	// The two clip modes cover the same stretch of the activity:
+	// ScopeClipRebased subtracts the clip's opening distance so everything
+	// restarts at zero, ScopeClipAbsolute keeps the activity's own numbering.
+	// For the progress bar and the elevation profile that is the ONLY
+	// difference -- same extent, same geometry, different numbers on the axes.
 	//
-	// What neither mode touches is the wall clock --
-	// the time/date gauge, and the instants the per-frame lookup and the
-	// course map's covered-so-far split are keyed on -- because that is what
-	// the FIT sync itself is built on.
+	// The SPLITS TABLE is the exception, and an unavoidable one: a rebased
+	// track opens at 0 m, which BuildSplits records as a kilometre boundary in
+	// its own right, while an absolute track opens mid-kilometre and has no
+	// such instant. The same 10.2-12.4 km stretch therefore completes TWO laps
+	// rebased (numbered 1-2, header "lap 3/2") and ONE absolute (km 12, header
+	// "lap 13/12"). Different row counts and different denominators on the same
+	// footage is correct, not a splits bug -- do not "fix" the two into
+	// agreement, and do not describe the modes as differing only in their
+	// numbers.
+	//
+	// One value is clip-relative even under ScopeClipAbsolute, and cannot be
+	// otherwise: the gain/loss gauge counts from the clip's first sample,
+	// because FIT carries no per-record cumulative ascent to carry a running
+	// total forward from.
+	//
+	// What neither mode touches is the wall clock -- the time/date gauge, and
+	// the instants the per-frame lookup and the course map's covered-so-far
+	// split are keyed on -- because that is what the FIT sync itself is built
+	// on.
 	Scope telemetry.Scope
 }
 

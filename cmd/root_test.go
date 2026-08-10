@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"videofx/internal/calibrate"
 	"videofx/internal/cliutil"
 	"videofx/internal/effects"
+	"videofx/internal/fittest"
 	"videofx/internal/logging"
 	"videofx/internal/stabilize"
 	"videofx/internal/telemetry"
@@ -1332,8 +1334,10 @@ func names(effs []effects.Effect) []string {
 // (or panic on) an effect of a different concrete type.
 func TestConfigureTelemetry(t *testing.T) {
 	origFit, origOffset, origSRT, origShow, origSidecar, origGPX, origStryd, origLoc := fitPath, offsetSeconds, srtFormat, showSubtitle, srtSidecar, gpx, telemetryStryd, location
+	origScope := telemetryScope
 	t.Cleanup(func() {
 		fitPath, offsetSeconds, srtFormat, showSubtitle, srtSidecar, gpx, telemetryStryd, location = origFit, origOffset, origSRT, origShow, origSidecar, origGPX, origStryd, origLoc
+		telemetryScope = origScope
 	})
 
 	fitPath = "test_videos/run.fit"
@@ -1349,6 +1353,10 @@ func TestConfigureTelemetry(t *testing.T) {
 	// value. Setting it to true instead would expect false, which is what a
 	// deleted assignment also produces.
 	location = false
+	// Same reasoning: "full" maps to ScopeActivity, which IS the field's zero
+	// value, so a clip mode is the only value that distinguishes an assignment
+	// from a deleted one here.
+	telemetryScope = "clip-absolute"
 
 	tel := &effects.Telemetry{}
 	configureTelemetry(tel)
@@ -1377,6 +1385,9 @@ func TestConfigureTelemetry(t *testing.T) {
 	if tel.OmitLocation != !location {
 		t.Errorf("OmitLocation = %v, want %v (--location=%v is an opt-out, so the field is its inverse)",
 			tel.OmitLocation, !location, location)
+	}
+	if tel.Scope != telemetry.ScopeClipAbsolute {
+		t.Errorf("Scope = %v, want clip-absolute -- --telemetry-scope did not reach the effect", tel.Scope)
 	}
 
 	// Must not panic, and must not affect a different effect type, when
@@ -1503,7 +1514,7 @@ func TestValidateSRTOptions(t *testing.T) {
 // otherwise just report "unknown flag" at runtime, not a build failure).
 func TestNewRootCmd_TelemetryFlagsRegistered(t *testing.T) {
 	root := NewRootCmd()
-	for _, name := range []string{"fit", "offset", "srt-format", "show-subtitle", "srt-sidecar", "gpx", "telemetry-stryd"} {
+	for _, name := range []string{"fit", "offset", "srt-format", "show-subtitle", "srt-sidecar", "gpx", "telemetry-stryd", "telemetry-scope"} {
 		if root.Flags().Lookup(name) == nil {
 			t.Errorf("flag --%s not registered", name)
 		}
@@ -1977,12 +1988,14 @@ func TestConfigureEffect_TelemetryHUDAllFields(t *testing.T) {
 		elevSmoothing, elevGain float64
 		elevLoss                float64
 		hudLayout, powerSource  string
-	}{fitPath, offsetSeconds, quality, hudTimeZone, elevSmoothing, elevGain, elevLoss, hudLayout, powerSource}
+		telemetryScope          string
+	}{fitPath, offsetSeconds, quality, hudTimeZone, elevSmoothing, elevGain, elevLoss, hudLayout, powerSource, telemetryScope}
 	t.Cleanup(func() {
 		fitPath, offsetSeconds, quality = origs.fitPath, origs.offsetSeconds, origs.quality
 		hudTimeZone = origs.hudTimeZone
 		elevSmoothing, elevGain, elevLoss = origs.elevSmoothing, origs.elevGain, origs.elevLoss
 		hudLayout, powerSource = origs.hudLayout, origs.powerSource
+		telemetryScope = origs.telemetryScope
 	})
 
 	fitPath = "run.fit"
@@ -2007,11 +2020,13 @@ func TestConfigureEffect_TelemetryHUDAllFields(t *testing.T) {
 			ElevationLoss:      -1,
 			LayoutMode:         "POISON",
 			PowerSource:        telemetry.PowerStryd,
+			Scope:              telemetry.ScopeClipAbsolute,
 		}
 	}
 
 	t.Run("every field", func(t *testing.T) {
 		powerSource = "native"
+		telemetryScope = "clip-rebased"
 		h := poisoned()
 		if err := configureEffect(h, pflag.NewFlagSet("test", pflag.ContinueOnError)); err != nil {
 			t.Fatalf("configureEffect: %v", err)
@@ -2037,6 +2052,9 @@ func TestConfigureEffect_TelemetryHUDAllFields(t *testing.T) {
 		if h.PowerSource != telemetry.PowerNative {
 			t.Errorf("PowerSource = %v, want PowerNative -- --power-source did not reach the effect", h.PowerSource)
 		}
+		if h.Scope != telemetry.ScopeClipRebased {
+			t.Errorf("Scope = %v, want clip-rebased -- --telemetry-scope did not reach the effect", h.Scope)
+		}
 	})
 
 	t.Run("power-source auto, whose expected value is the zero value", func(t *testing.T) {
@@ -2047,6 +2065,22 @@ func TestConfigureEffect_TelemetryHUDAllFields(t *testing.T) {
 		}
 		if h.PowerSource != telemetry.PowerAuto {
 			t.Errorf("PowerSource = %v, want PowerAuto", h.PowerSource)
+		}
+	})
+
+	// The same zero-value hazard as --power-source auto, and worth its own
+	// subtest for the same reason: "full" maps to ScopeActivity, which is the
+	// field's zero value, so on a struct built from scratch a deleted
+	// assignment and a working default are the same picture. Starting from
+	// ScopeClipAbsolute is what makes reaching ScopeActivity evidence.
+	t.Run("telemetry-scope full, whose expected value is the zero value", func(t *testing.T) {
+		telemetryScope = "full"
+		h := poisoned()
+		if err := configureEffect(h, pflag.NewFlagSet("test", pflag.ContinueOnError)); err != nil {
+			t.Fatalf("configureEffect: %v", err)
+		}
+		if h.Scope != telemetry.ScopeActivity {
+			t.Errorf("Scope = %v, want full -- --telemetry-scope full must restore the whole-activity default, not leave whatever was there", h.Scope)
 		}
 	})
 }
@@ -2065,5 +2099,438 @@ func TestConfigureEffect_RotateAllFields(t *testing.T) {
 	}
 	if rot.Degrees != 270 {
 		t.Errorf("Degrees = %d, want 270 -- --rotate did not reach the effect", rot.Degrees)
+	}
+}
+
+// TestNewRootCmd_TelemetryScopeDefaultsToFull pins the default, which is the
+// whole point of shipping this opt-in: "full" maps to telemetry.ScopeActivity,
+// the behaviour every existing invocation already gets. Flipping the default to
+// a clip mode would silently re-origin every HUD gauge and every SRT distance
+// column in a run whose command line did not change.
+func TestNewRootCmd_TelemetryScopeDefaultsToFull(t *testing.T) {
+	f := NewRootCmd().Flags().Lookup("telemetry-scope")
+	if f == nil {
+		t.Fatal("flag --telemetry-scope not registered")
+	}
+	if f.DefValue != "full" {
+		t.Errorf("--telemetry-scope default = %q, want \"full\"", f.DefValue)
+	}
+	if got := parseTelemetryScope(f.DefValue); got != telemetry.ScopeActivity {
+		t.Errorf("the default value %q parses to %v, want the whole activity", f.DefValue, got)
+	}
+}
+
+// TestValidateTelemetryScope_AcceptsExactlyTheThreeCanonicalValues covers the
+// accepted set and, deliberately, the two spellings a user is most likely to
+// reach for and NOT get: "clip" (rejected on purpose -- there is no alias, so
+// that the error message can teach the whole three-way choice and so that
+// "clip" is never read as "the not-absolute one") and a capitalised value, the
+// same case-sensitivity the sibling validators have.
+func TestValidateTelemetryScope_AcceptsExactlyTheThreeCanonicalValues(t *testing.T) {
+	cases := []struct {
+		mode    string
+		wantErr bool
+	}{
+		{"full", false},
+		{"clip-rebased", false},
+		{"clip-absolute", false},
+		{"", true},
+		{"clip", true},     // no alias, by decision
+		{"activity", true}, // the enum's Go name, not its CLI spelling
+		{"Clip-Rebased", true},
+		{"clip_rebased", true},
+	}
+	for _, c := range cases {
+		t.Run(c.mode, func(t *testing.T) {
+			if err := validateTelemetryScope(c.mode); (err != nil) != c.wantErr {
+				t.Errorf("validateTelemetryScope(%q) = %v, wantErr %v", c.mode, err, c.wantErr)
+			}
+		})
+	}
+
+	// The message is the only place a user learns what the three values mean,
+	// since there is no alias to fall back on when they guess wrong.
+	err := validateTelemetryScope("clip")
+	if err == nil {
+		t.Fatal("expected an error for \"clip\"")
+	}
+	for _, want := range []string{"full", "clip-rebased", "clip-absolute"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error must name every accepted value; %q is missing from: %v", want, err)
+		}
+	}
+}
+
+// TestTelemetryScopeModes_RoundTripsEveryScopeSpelling binds the two tables
+// that spell these three words: telemetryScopeModes here, and
+// telemetry.Scope.String() in the other package. Nothing in the type system
+// connects them, so renaming a value in one leaves the other -- the flag the
+// user types, or the log line that narrates what it did -- saying the old word,
+// with every existing test still green.
+//
+// It scans past the last defined Scope rather than listing the three by hand.
+// A fourth mode added to the enum and forgotten here is exactly the drift worth
+// catching, and a round trip over only the values it already knew about could
+// not see one: the new scope would simply never be visited.
+//
+// The scan is not exhaustive, and should not be read as such. A fourth Scope
+// added with NEITHER a String() case NOR a map entry is invisible to it: it
+// renders "unknown", is skipped, and the count still matches. What is covered
+// is the realistic drift -- one of the two tables updated and not the other, in
+// either direction -- which for a three-value hand-written enum is the right
+// amount. A scope defined in neither table is not caught by any test here or in
+// internal/telemetry; what it has instead is a loud runtime symptom, since
+// every log line naming it reads "unknown".
+func TestTelemetryScopeModes_RoundTripsEveryScopeSpelling(t *testing.T) {
+	// 32 is arbitrary but far past any plausible count; Scope is a small
+	// hand-written enum, not a namespace.
+	const scan = 32
+
+	named := 0
+	for i := range scan {
+		s := telemetry.Scope(i)
+		name := s.String()
+		if name == "unknown" {
+			continue // not a defined scope
+		}
+		named++
+		got, ok := telemetryScopeModes[name]
+		if !ok {
+			t.Errorf("telemetry.Scope(%d) spells itself %q, but --telemetry-scope does not accept that value; add it to telemetryScopeModes and to the flag's help text", i, name)
+			continue
+		}
+		if got != s {
+			t.Errorf("telemetryScopeModes[%q] = Scope(%d), want Scope(%d): the CLI maps that word to a different scope than the one that spells itself with it", name, got, s)
+		}
+	}
+	if named != len(telemetryScopeModes) {
+		t.Errorf("telemetry defines %d named scopes but --telemetry-scope accepts %d values; the two vocabularies have drifted apart", named, len(telemetryScopeModes))
+	}
+
+	// The other direction, which the count alone does not prove: an accepted
+	// value must be spelled back identically, or a log line reporting the scope
+	// would name something the user cannot type.
+	for name, s := range telemetryScopeModes {
+		if s.String() != name {
+			t.Errorf("--telemetry-scope %q selects a scope that spells itself %q; a log line would name a value the flag does not accept", name, s)
+		}
+	}
+}
+
+// TestRunRoot_InvalidTelemetryScopeIsRejected pins that the validator is
+// actually CALLED, which is a separate fact from it being correct.
+//
+// parseTelemetryScope is a bare map lookup, so an unvalidated typo does not
+// fail: it misses the map, yields the zero value, and renders the whole
+// activity. `--telemetry-scope clipp` would then produce a perfectly good HUD
+// of the wrong thing and exit 0. The input file deliberately does not exist --
+// the flag validators run before ValidateInputFiles and before any external
+// tool is probed, so reaching a different error here would itself be the
+// finding.
+func TestRunRoot_InvalidTelemetryScopeIsRejected(t *testing.T) {
+	err, logged := runRootCmd(t, "--effect", "telemetry", "--fit", "activity.fit",
+		"--telemetry-scope", "clip", filepath.Join(t.TempDir(), "no-such-clip.mp4"))
+	if err == nil {
+		t.Fatalf("an invalid --telemetry-scope exited 0; it would have silently fallen back to the whole activity\n%s", logged)
+	}
+	if !strings.Contains(err.Error(), "--telemetry-scope") {
+		t.Errorf("error = %v, want it to name --telemetry-scope", err)
+	}
+}
+
+// TestConfigureEffect_TelemetryScopeReachesTheImpliedTelemetryEffect closes the
+// gap between "the flag reached the effect the user named" and "the flag
+// reached every effect that runs".
+//
+// `--effect telemetry-hud` alone runs TWO effects: impliedEffects appends a
+// telemetry pass behind the HUD, which stream-copies the burned-in result while
+// adding the location tag and any --gpx/--srt-format. A --telemetry-scope wired
+// only into configureEffect's *effects.TelemetryHUD block would give clip-scoped
+// gauges sitting on top of an SRT still counting from the activity's start --
+// exit 0, every frame plausible, and nothing on the command line to point at
+// the effect that was missed.
+//
+// It walks the three steps runRoot does (resolve, imply, configure each) rather
+// than executing the command, which would need a FIT file, a clip and an
+// encoder to reach the same assertion. impliedEffects' own behaviour is pinned
+// by TestImpliedEffects; what is proved here is that the configure loop covers
+// what it appends. Flags are parsed rather than assigned so the flag NAME is
+// exercised too.
+func TestConfigureEffect_TelemetryScopeReachesTheImpliedTelemetryEffect(t *testing.T) {
+	origEffects, origScope := effectNames, telemetryScope
+	t.Cleanup(func() { effectNames, telemetryScope = origEffects, origScope })
+
+	root := NewRootCmd()
+	if err := root.Flags().Parse([]string{"--effect", "telemetry-hud", "--telemetry-scope", "clip-rebased"}); err != nil {
+		t.Fatalf("parsing flags: %v", err)
+	}
+
+	effs, err := resolveEffects(effectNames)
+	if err != nil {
+		t.Fatalf("resolveEffects: %v", err)
+	}
+	effs = impliedEffects(effs)
+	for _, e := range effs {
+		if err := configureEffect(e, root.Flags()); err != nil {
+			t.Fatalf("configureEffect(%s): %v", e.Name(), err)
+		}
+	}
+
+	var sawHUD, sawTelemetry bool
+	for _, e := range effs {
+		switch eff := e.(type) {
+		case *effects.TelemetryHUD:
+			sawHUD = true
+			if eff.Scope != telemetry.ScopeClipRebased {
+				t.Errorf("telemetry-hud Scope = %v, want clip-rebased", eff.Scope)
+			}
+		case *effects.Telemetry:
+			sawTelemetry = true
+			if eff.Scope != telemetry.ScopeClipRebased {
+				t.Errorf("the implied telemetry effect's Scope = %v, want clip-rebased -- its SRT would describe the whole activity under a clip-scoped HUD", eff.Scope)
+			}
+		}
+	}
+	if !sawHUD || !sawTelemetry {
+		t.Fatalf("chain was %v, want both telemetry-hud and the telemetry pass it implies", names(effs))
+	}
+}
+
+// TestParseTelemetryScope_UnknownValueFallsBackToTheWholeActivity pins the
+// second line of defence, which the validator's existence makes easy to leave
+// unasserted.
+//
+// parseTelemetryScope is a bare map lookup, so a value nobody validated does
+// not fail -- it misses, and the caller gets whatever the miss yields. Its doc
+// comment promises that miss is ScopeActivity, i.e. today's whole-activity
+// behaviour, and that promise is load-bearing precisely because it is what
+// makes an unvalidated call site (a config file, a second command, a
+// refactoring that reorders runRoot's checks) degrade to "did nothing" rather
+// than to "silently re-originned every distance, split and progress bar".
+//
+// Nothing asserted it: rewriting the lookup to return ScopeClipRebased on a
+// miss left the entire suite green, which is the same shape of failure as a
+// correction that quietly stops correcting.
+//
+// The three canonical values are in the table too, so the fallback cases are
+// read against a lookup that demonstrably works rather than against one that
+// might be returning the zero value for everything.
+func TestParseTelemetryScope_UnknownValueFallsBackToTheWholeActivity(t *testing.T) {
+	cases := []struct {
+		mode string
+		want telemetry.Scope
+		why  string
+	}{
+		{"full", telemetry.ScopeActivity, "the canonical spelling"},
+		{"clip-rebased", telemetry.ScopeClipRebased, "the canonical spelling"},
+		{"clip-absolute", telemetry.ScopeClipAbsolute, "the canonical spelling"},
+		{"", telemetry.ScopeActivity, "an unset flag must not select a clip mode"},
+		{"clip", telemetry.ScopeActivity, "the alias that deliberately does not exist"},
+		{"clipabsolute", telemetry.ScopeActivity, "the typo that motivated the validator"},
+		{"Clip-Rebased", telemetry.ScopeActivity, "the lookup is case-sensitive, and a near-miss must not narrow anything"},
+		{"activity", telemetry.ScopeActivity, "the enum's Go name is not a CLI value"},
+	}
+	for _, c := range cases {
+		t.Run(c.mode, func(t *testing.T) {
+			if got := parseTelemetryScope(c.mode); got != c.want {
+				t.Errorf("parseTelemetryScope(%q) = %v, want %v -- %s", c.mode, got, c.want, c.why)
+			}
+		})
+	}
+}
+
+// The synthetic activity behind TestRunRoot_TelemetryScopeReachesTheImplied
+// TelemetryPass. Every expected distance in that test is arithmetic over these
+// three numbers, not a figure copied out of a previous run: at a constant
+// scopeE2ESpeedMPS from second zero, the cumulative distance at second N is
+// exactly N x scopeE2ESpeedMPS metres, so a clip stamped
+// scopeE2EClipOffsetSeconds into the recording opens at
+// scopeE2EClipStartKm kilometres.
+// The speed is 10 m/s so that one second of the activity is exactly 10 m, one
+// hundredth of a kilometre -- the SRT's own printing resolution. Every cue
+// therefore lands on a printed grid point in both modes, and the comparison
+// below can be exact instead of carrying a tolerance that would also swallow a
+// genuine off-by-one-sample window.
+const (
+	scopeE2ESpeedMPS          = 10.0
+	scopeE2EClipOffsetSeconds = 200
+	scopeE2EClipSeconds       = 2
+
+	// 10 m/s x 200 s = 2000 m, in hundredths of a km as the SRT prints them.
+	// Comfortably clear of both the 0.00 km a rebased clip must read and the
+	// 0.01 km per cue the clip itself advances, so the two modes cannot be
+	// confused for one another.
+	scopeE2EClipStartCentiKm = scopeE2ESpeedMPS * scopeE2EClipOffsetSeconds / 10
+)
+
+func scopeE2EActivityStart() time.Time {
+	return time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+}
+
+// scopeE2EFIT writes the synthetic activity described above. 300 one-second
+// records cover 09:00:00..09:04:59, which brackets the clip's 09:03:20..22
+// window with room on both sides, so Resolve reports FullOverlap and no
+// partial-overlap warning muddies the comparison.
+func scopeE2EFIT(t *testing.T, dir string) string {
+	t.Helper()
+	opts := fittest.DefaultOptions()
+	opts.Start = scopeE2EActivityStart()
+	opts.Count = 300
+	opts.SpeedMPS = scopeE2ESpeedMPS
+	path := filepath.Join(dir, "activity.fit")
+	if err := fittest.WriteFile(path, opts); err != nil {
+		t.Fatalf("writing the synthetic FIT activity: %v", err)
+	}
+	return path
+}
+
+// genHUDClipAt writes a clip the HUD can actually draw on. genClipAt's 64x48
+// is too small for a gauge layout, so this is the 320x240 the HUD's own tests
+// use, with audio for the same reason: it exercises the stream-copy mux the
+// implied telemetry pass performs, rather than a video-only special case.
+func genHUDClipAt(t *testing.T, path string, seconds int, creation time.Time) {
+	t.Helper()
+	out, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration="+strconv.Itoa(seconds),
+		"-f", "lavfi", "-i", "sine=frequency=440:duration="+strconv.Itoa(seconds),
+		"-metadata", "creation_time="+creation.UTC().Format(time.RFC3339),
+		"-c:v", "libx264", "-pix_fmt", "yuv420p",
+		"-c:a", "aac", "-shortest",
+		"-y", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("generating the HUD clip: %v\n%s", err, out)
+	}
+}
+
+// soleSRTSidecar returns the parsed distance column of the one .srt file in
+// dir. Finding it by extension rather than predicting its name keeps this
+// about the scope and not about naming.Resolve.
+//
+// The readout line is pipe-separated with distance first (see
+// telemetry.formatSRTCueBody); the GPS line above it has no pipes and no km
+// suffix, and the pace field renders "M:SS/km" rather than "N.NN km", so
+// neither is picked up here.
+// It returns hundredths of a kilometre as integers, which is exactly the
+// precision the file carries: comparing the parsed decimals as float64 would
+// make "2.01 - 0.01 == 2.00" a question about binary rounding rather than
+// about the rebase.
+func soleSRTSidecarDistancesCentiKm(t *testing.T, dir string) []int {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, "*.srt"))
+	if err != nil {
+		t.Fatalf("globbing for the SRT sidecar: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("found %d .srt sidecars in %s, want exactly 1: %v", len(matches), dir, matches)
+	}
+	body, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatalf("reading %s: %v", matches[0], err)
+	}
+	var out []int
+	for _, line := range strings.Split(string(body), "\n") {
+		field := strings.SplitN(line, " | ", 2)[0]
+		if !strings.HasSuffix(field, " km") {
+			continue
+		}
+		km, err := strconv.ParseFloat(strings.TrimSuffix(field, " km"), 64)
+		if err != nil {
+			continue
+		}
+		out = append(out, int(math.Round(km*100)))
+	}
+	if len(out) < 2 {
+		t.Fatalf("found %d distance readings in %s, want at least 2:\n%s", len(out), matches[0], body)
+	}
+	return out
+}
+
+// TestRunRoot_TelemetryScopeReachesTheImpliedTelemetryPass is the executed
+// version of TestConfigureEffect_TelemetryScopeReachesTheImpliedTelemetryEffect,
+// and it exists because that test MIRRORS runRoot's resolve -> imply ->
+// configure sequence rather than running it. The mirror can drift, and this was
+// checked rather than assumed: moving runRoot's `effs = impliedEffects(effs)`
+// to after the configure loop -- so the appended telemetry pass is handed no
+// flags at all, not --telemetry-scope, not --gpx, not --fit -- leaves every
+// other test in this package green. Only a run that actually goes through
+// runRoot can see it.
+//
+// It also executes the DEFAULT, which is the entire promise of this flag: the
+// first run names no --telemetry-scope at all and must produce the
+// whole-activity numbering every existing invocation already gets. A DefValue
+// assertion cannot show that, because "full" is also the enum's zero value, so
+// a default that never reached the effect looks identical to one that did.
+//
+// Every expected figure is derived from the fixture, not recorded:
+//
+//   - the default run's first cue must read 2.00 km, which is
+//     scopeE2ESpeedMPS x scopeE2EClipOffsetSeconds;
+//   - the clip-rebased run's first cue must read 0.00 km;
+//   - the two columns must differ by exactly that opening distance at every
+//     cue, which is the property that separates "rebased" from "narrowed to a
+//     clip that happens to start near zero" and from "the SRT lost its
+//     distance channel" (that would print "-- km" and fail the parse instead).
+//
+// The clip-rebased half is what proves the flag reached an effect the user
+// never named: --effect telemetry-hud alone, and it is the appended telemetry
+// pass -- not the HUD -- that writes this sidecar.
+func TestRunRoot_TelemetryScopeReachesTheImpliedTelemetryPass(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+
+	// runRootCmd's fresh NewRootCmd resets these on every call, but they are
+	// left holding this test's values afterwards; restore them so a later test
+	// reading a package-level flag var directly is not reading ours.
+	origEffects, origFit, origSRT, origSidecar, origOut, origScope :=
+		effectNames, fitPath, srtFormat, srtSidecar, outputDir, telemetryScope
+	t.Cleanup(func() {
+		effectNames, fitPath, srtFormat, srtSidecar, outputDir, telemetryScope =
+			origEffects, origFit, origSRT, origSidecar, origOut, origScope
+	})
+
+	dir := t.TempDir()
+	fit := scopeE2EFIT(t, dir)
+	clip := filepath.Join(dir, "clip.mp4")
+	genHUDClipAt(t, clip, scopeE2EClipSeconds,
+		scopeE2EActivityStart().Add(scopeE2EClipOffsetSeconds*time.Second))
+
+	run := func(extra ...string) []int {
+		t.Helper()
+		out := t.TempDir()
+		args := append([]string{
+			"--effect", "telemetry-hud", "--fit", fit,
+			"--srt-format", "readable", "--srt-sidecar",
+			"--output-dir", out,
+		}, extra...)
+		err, logged := runRootCmd(t, append(args, clip)...)
+		if err != nil {
+			t.Fatalf("videofx %v: %v\n%s", args, err, logged)
+		}
+		return soleSRTSidecarDistancesCentiKm(t, out)
+	}
+
+	full := run()
+	rebased := run("--telemetry-scope", "clip-rebased")
+
+	// The control: without this, the rebased assertion below would also pass
+	// against a fixture whose clip never got past the activity's start line.
+	if full[0] != scopeE2EClipStartCentiKm {
+		t.Fatalf("the default run's first cue reads %.2f km, want %.2f km -- the fixture is not what these assertions assume, or --telemetry-scope's default is no longer the whole activity",
+			float64(full[0])/100, float64(scopeE2EClipStartCentiKm)/100)
+	}
+	if rebased[0] != 0 {
+		t.Errorf("the clip-rebased run's first cue reads %.2f km, want 0.00 km -- --telemetry-scope never reached the telemetry pass that --effect telemetry-hud implies",
+			float64(rebased[0])/100)
+	}
+	if len(full) != len(rebased) {
+		t.Fatalf("the two runs produced %d and %d cues; they must describe the same clip", len(full), len(rebased))
+	}
+	for i := range full {
+		if diff := full[i] - rebased[i]; diff != scopeE2EClipStartCentiKm {
+			t.Errorf("cue %d: full %.2f km - rebased %.2f km = %.2f km, want exactly %.2f km (the clip's opening distance, subtracted uniformly)",
+				i, float64(full[i])/100, float64(rebased[i])/100,
+				float64(diff)/100, float64(scopeE2EClipStartCentiKm)/100)
+		}
 	}
 }

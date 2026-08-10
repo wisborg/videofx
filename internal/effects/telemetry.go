@@ -133,6 +133,7 @@ type Telemetry struct {
 	OmitLocation bool
 
 	// Scope selects how much of the activity the emitted telemetry describes.
+	// Wired from --telemetry-scope.
 	// The ZERO VALUE is telemetry.ScopeActivity -- the whole activity, which
 	// is what this effect has always emitted -- so a caller that never sets it
 	// gets today's behaviour. See telemetry.Scope on why an unset enum is the

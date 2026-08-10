@@ -146,6 +146,9 @@ Flags:
 - `--mesh-strength` — gocv-stabilizer only, `--warp-model mesh`: the mesh correction gain, `0.0`–`1.0`. A spatially-varying warp inherently trades some picture distortion (a per-frame bend/swim) **and crop** for stabilization, so **lower this to reduce both** at a little less shake removal; `1.0` is full strength, `0` disables the mesh (falls back to similarity). `-1` (default) uses the built-in default of `0.3`. Unlike `--mesh-grid`, this is applied at **render time**, so it can be swept against a cached `--sidecar` without re-analyzing.
 - `--fit` — **telemetry / telemetry-hud only**, and **required** when either is in `--effect` (Cobra can't express a conditional-required flag, so this is validated by hand at startup with a clear error if missing). Path to the Garmin FIT activity file to sync GPS/telemetry from.
 - `--offset` — clock-skew offset in seconds between the camera and the FIT-recording device, signed and fractional. Default `0`. See Telemetry below for the sync model. It shifts an absolute `--start`/`--end` timestamp **for any effect**, not just the telemetry ones — the trim resolves through the same `fit_time = creation_time + offset + pts` relation, so a cut and the telemetry it lines up with move together. A **non-zero** offset also rewrites the `telemetry` output's `creation_time` to the corrected instant (and re-bases the GPX/subtitle timeline to match), so the clip finally carries its true wall-clock start. It shifts the HUD's telemetry sync identically.
+- `--telemetry-scope` — **telemetry / telemetry-hud only**: how much of the activity the clip's telemetry describes. `full` (**default**, and what this has always done) means the **whole recording**: the HUD's course map, elevation profile, splits and progress bar cover the entire run, and distances stay cumulative from its start, however short the clip cut out of it is. `clip-rebased` narrows everything to the stretch of the activity that runs underneath the clip, with distance, splits/lap numbering and the progress bar **restarting at zero at the clip's first frame** — the clip read as its own activity. `clip-absolute` narrows to that same stretch but keeps distance and lap numbers **as the FIT recorded them**, so a clip cut from 10.2 km into a marathon reads `10.2`–`12.4 km` and its one complete lap is km 12. The two clip modes place the progress bar and the elevation profile over the **same stretch**, differing only in the numbers on their axes. **The splits table additionally differs**: a rebased clip's origin is a kilometre boundary by construction, an absolute clip's is not, so the same 10.2–12.4 km completes two laps rebased (header `1 km lap 3/2`) and one absolute (km 12, header `1 km lap 13/12`). Different row counts on the same footage is what the modes mean, not a splits bug.
+
+  **The wall clock is never rebased, in any mode** — the on-screen clock, the GPX `<time>` and the SRT datetime stay on real time, because Telemetry Overlay (and anything else matching on `creation_time`) depends on that. With `--start`/`--end`, the overlapping stretch is measured against the **trimmed** clip. For the `telemetry` effect the clip modes move only the SRT's cumulative distance column — its GPX/SRT already cover just the clip window — so `full` and `clip-absolute` there normally produce identical output (they can differ where a recording gap straddles a clip boundary); it is `telemetry-hud` where this flag visibly changes what you get.
 - `--hud-timezone` — telemetry-hud only: the timezone the on-screen clock displays in — an IANA name (e.g. `Australia/Brisbane`) or a fixed offset (e.g. `+10:00`). Default: **UTC**. Only the clock gauge is affected; telemetry sync is always UTC.
 - `--elevation-gain` / `--elevation-loss` — telemetry-hud only: the known total elevation gain / loss for the activity in **meters** (e.g. an official course figure). The elevation smoothing is auto-tuned so the computed totals match — GPS/barometric elevation overcounts, so a known figure is the most reliable target. Default `0` = use the FIT device's own totals.
 - `--elevation-smoothing` — telemetry-hud only: an explicit Gaussian smoothing width (in FIT samples, ≈ seconds) for the elevation series, instead of the gain/loss auto-tuning. Default `0` = auto.
@@ -394,12 +397,20 @@ its embedded subtitle/location dropped by that encode.
   with min/max-elevation + start/end-distance labels.
 - Lower-right **total elevation gain / loss** so far.
 
+All of the above describe the **whole activity**, which is the default;
+`--telemetry-scope` narrows the course-driven gauges (splits, progress bar, course map,
+elevation profile and gain/loss) to the stretch running under the clip.
+
 **Elevation smoothing.** GPS/barometric elevation is noisy, and a raw per-sample sum
 wildly overcounts gain/loss (and jitters the incline). The elevation gauges smooth it
 first; by default the smoothing is **auto-tuned to the FIT device's own total
 ascent/descent**. Override with `--elevation-gain`/`--elevation-loss` (meters — e.g.
 an official course figure) to tune to those instead, or `--elevation-smoothing` for an
-explicit Gaussian width.
+explicit Gaussian width. Either clip mode of `--telemetry-scope` drops the device
+totals — they describe the whole day, and tuning a 20-second clip's profile to hit them
+would overcount it a hundredfold — so a clip-scoped run falls back to a mild default
+width unless `--elevation-gain`/`--elevation-loss`/`--elevation-smoothing` says
+otherwise.
 
 The seven gauges above are the **default** (landscape) layout. Portrait clips get a
 trimmed **vertical** layout — distance progress bar (top), course map (middle-right),
@@ -414,7 +425,11 @@ them before publishing one:
 
 - **The course map draws the entire GPS route**, start point included, in every frame —
   not just the part covered so far. If the activity started at home, the map shows where
-  that is, from the first frame on.
+  that is, from the first frame on. That is the default (`--telemetry-scope full`); either
+  clip mode narrows the map to the stretch of route running under the clip — but **do not
+  reach for it to keep a location out of the pixels**. Every metre of route that runs
+  under the clip is still drawn, and the start point goes only incidentally: a clip
+  filmed near home still puts home on the map.
 - **The default layout shows heart rate**, alongside cadence, power, incline, pace and
   speed.
 

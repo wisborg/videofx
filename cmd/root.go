@@ -71,6 +71,7 @@ var (
 	hudTimeZone    string
 	hudLayout      string
 	powerSource    string
+	telemetryScope string
 	elevSmoothing  float64
 	elevGain       float64
 	elevLoss       float64
@@ -168,6 +169,8 @@ func NewRootCmd() *cobra.Command {
 		"telemetry and telemetry-hud: path to a Garmin FIT activity file to sync GPS/telemetry from (required with either effect)")
 	root.Flags().Float64Var(&offsetSeconds, "offset", 0,
 		"clock-skew offset in seconds between the camera and the FIT-recording device, signed and fractional -- fit_time = creation_time + offset + pts, so a positive offset means the camera's clock reads behind the watch's. Applies to ANY effect whenever --start/--end is an absolute timestamp: the trim resolves through the same relation, so a cut and the telemetry it lines up with move together. With telemetry/telemetry-hud it also drives the FIT sync, and a non-zero offset rewrites the output's creation_time to the corrected instant (and re-bases the GPX/subtitle to match)")
+	root.Flags().StringVar(&telemetryScope, "telemetry-scope", "full",
+		"telemetry and telemetry-hud: how much of the activity the clip's telemetry describes -- \"full\" (default, and what this has always done: the WHOLE recording, so the HUD's course map, elevation profile, splits and progress bar cover the entire run and distances stay cumulative from its start, however short the clip cut out of it is), \"clip-rebased\" (only the part of the activity that runs underneath the clip, with distance, splits/lap numbering and the progress bar all restarting at zero at the clip's first frame, as if the clip were its own activity), or \"clip-absolute\" (that same part, but with distance and lap numbers kept as the FIT recorded them, so a clip cut from 10.2 km into a marathon reads 10.2-12.4 km). The WALL CLOCK is never rebased, in any mode: the on-screen clock, the GPX <time> and the SRT datetime stay on real time, because Telemetry Overlay -- and anything else matching on creation_time -- depends on that. With --start/--end the overlapping part is measured against the TRIMMED clip. For the telemetry effect specifically the clip modes move only the SRT's cumulative distance column (its GPX/SRT already cover just the clip window), so \"full\" and \"clip-absolute\" there normally produce identical output -- they can differ where a recording gap straddles a clip boundary")
 	root.Flags().StringVar(&srtFormat, "srt-format", "none",
 		"telemetry only: embed a telemetry subtitle track in this format -- \"none\" (default), \"readable\" (a human-readable per-second readout), or \"dji\" (the DJI-drone SRT layout that Telemetry Overlay reads directly from the video). The location tag is produced regardless. A muxed track is hidden by default (see --show-subtitle)")
 	root.Flags().BoolVar(&showSubtitle, "show-subtitle", false,
@@ -388,6 +391,54 @@ func validatePowerSource(mode string) error {
 // (already rejected by validatePowerSource) falls back to PowerAuto.
 func parsePowerSource(mode string) telemetry.PowerSource {
 	return powerSourceModes[mode] // zero value is PowerAuto
+}
+
+// telemetryScopeModes maps the --telemetry-scope flag values to their telemetry
+// enum; like powerSourceModes it is the single source of truth for both
+// validation and parsing.
+//
+// The three keys are also exactly what telemetry.Scope.String() renders, and
+// nothing in the type system ties the two tables together -- rename a value in
+// one and the other keeps spelling it the old way, so the flag and the log line
+// that narrates what it did drift apart. That is bound by
+// TestTelemetryScopeModes_RoundTripsEveryScopeSpelling instead.
+//
+// Deriving these keys from String() was the other option and was rejected on
+// two grounds. Drift would become SILENT IN ONE DIRECTION: a change to a
+// log-line spelling would rename a user's CLI value with nothing failing,
+// whereas the round-trip test makes drift loud in both. And Scope has no
+// enumeration API, so deriving would mean exporting an AllScopes() from
+// internal/telemetry whose only caller is this map. The vocabulary is written
+// out here because it is a published interface; the test is what makes the
+// duplication safe.
+//
+// There is deliberately no "clip" alias for clip-rebased. Three canonical
+// values let the error message below teach the whole choice in one line, and
+// "clip" beside "clip-absolute" would read as "the not-absolute one" rather
+// than naming what it actually does.
+var telemetryScopeModes = map[string]telemetry.Scope{
+	"full":          telemetry.ScopeActivity,
+	"clip-rebased":  telemetry.ScopeClipRebased,
+	"clip-absolute": telemetry.ScopeClipAbsolute,
+}
+
+// validateTelemetryScope rejects an unknown --telemetry-scope up front. The
+// message names what each value does, because the choice between the two clip
+// modes is not guessable from their names alone.
+func validateTelemetryScope(mode string) error {
+	if _, ok := telemetryScopeModes[mode]; !ok {
+		return fmt.Errorf("--telemetry-scope %q is invalid; use full (the whole activity, the default), "+
+			"clip-rebased (only the clip's stretch of it, with distance and lap numbering restarting at zero), "+
+			"or clip-absolute (only the clip's stretch of it, keeping the activity's own distances and lap numbers)", mode)
+	}
+	return nil
+}
+
+// parseTelemetryScope maps a --telemetry-scope value to its enum; an unknown
+// value (already rejected by validateTelemetryScope) falls back to
+// ScopeActivity, which is today's whole-activity behaviour.
+func parseTelemetryScope(mode string) telemetry.Scope {
+	return telemetryScopeModes[mode] // zero value is ScopeActivity
 }
 
 // buildForcedLens turns --lens/--lens-focal into an explicit camera model, or
@@ -754,6 +805,12 @@ func configureEffect(effect effects.Effect, flags *pflag.FlagSet) error {
 		h.ElevationLoss = elevLoss
 		h.LayoutMode = hudLayout
 		h.PowerSource = parsePowerSource(powerSource)
+		// Set on BOTH telemetry effects, here and in configureTelemetry:
+		// selecting telemetry-hud appends a telemetry pass (see
+		// impliedEffects), and a scope that reached only the HUD would leave
+		// that pass's SRT describing the whole activity underneath gauges that
+		// describe the clip.
+		h.Scope = parseTelemetryScope(telemetryScope)
 	}
 	if rot, ok := effect.(*effects.Rotate); ok {
 		rot.Degrees = rotateDeg
@@ -807,12 +864,18 @@ func parseUTCOffset(s string) (int, bool) {
 }
 
 // configureTelemetry applies --fit/--offset/--srt-format/--show-subtitle/
-// --srt-sidecar/--gpx/--telemetry-stryd/--location to effect if it is a
-// *effects.Telemetry.
+// --srt-sidecar/--gpx/--telemetry-stryd/--location/--telemetry-scope to effect
+// if it is a *effects.Telemetry.
+//
+// This is the path a telemetry effect the user never asked for takes:
+// impliedEffects appends one behind telemetry-hud, and configureEffect runs
+// over every effect in the chain, so the appended pass is configured from the
+// same flags as an explicit one.
 func configureTelemetry(effect effects.Effect) {
 	if tel, ok := effect.(*effects.Telemetry); ok {
 		tel.FitPath = fitPath
 		tel.OffsetSeconds = offsetSeconds
+		tel.Scope = parseTelemetryScope(telemetryScope)
 		tel.SRTFormat = srtFormat
 		tel.ShowSubtitle = showSubtitle
 		tel.SRTSidecar = srtSidecar
@@ -906,6 +969,9 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := validatePowerSource(powerSource); err != nil {
+		return err
+	}
+	if err := validateTelemetryScope(telemetryScope); err != nil {
 		return err
 	}
 	if err := validateWarpModel(warpModel); err != nil {
