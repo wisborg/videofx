@@ -83,34 +83,73 @@ func (ElevationProfileGauge) Name() string { return "elevation-profile" }
 
 // elevPlot is the elevation profile's box geometry, shared by DrawStatic and
 // Draw so the profile line and the position marker line up exactly.
+//
+// startD/endD are the distance axis's two ends, and they come from the
+// elevation MODEL's own first and last profile points -- not from
+// Course.StartDistance/TotalDistance, which describe the progress bar's axis.
+// The two can legitimately differ by a few metres; see
+// telemetry.ElevationModel.StartDistance for why they are not reconciled.
 type elevPlot struct {
-	px, lblPx                float64
-	left, right, top, axisY  float64
-	minE, maxE, span, totalD float64
+	px, lblPx               float64
+	left, right, top, axisY float64
+	minE, maxE, elevSpan    float64
+	startD, endD            float64
 }
 
-func (g elevPlot) xAt(d float64) float64 { return g.left + d/g.totalD*(g.right-g.left) }
-func (g elevPlot) yAt(e float64) float64 { return g.axisY - (e-g.minE)/g.span*(g.axisY-g.top) }
+// xAt maps a cumulative distance onto the plot by its position in the distance
+// SPAN; elevGeometry guarantees that span is positive.
+func (g elevPlot) xAt(d float64) float64 {
+	return axisX(d, g.startD, g.endD, g.left, g.right)
+}
+func (g elevPlot) yAt(e float64) float64 { return g.axisY - (e-g.minE)/g.elevSpan*(g.axisY-g.top) }
+
+// distAt returns the distance the k-th of n+1 evenly spaced profile samples
+// falls at, across the axis's OWN range (see DrawStatic, which strokes the
+// profile line through them).
+//
+// It is a method rather than one line inside that loop because it is the part
+// of the polyline with a right answer -- the rest is rasterization, only
+// assertable as ink on a bitmap. Spreading the samples over 0..endD instead
+// would still draw a plausible-looking profile on a clip-scoped model: the
+// portion inside the axis is correct, it is merely sampled coarsely, with the
+// rest of the line running off the left of the frame at the first point's
+// elevation. That is the shape of failure this project's tests keep missing.
+func (g elevPlot) distAt(k, n int) float64 {
+	return g.startD + float64(k)/float64(n)*(g.endD-g.startD)
+}
 
 func elevGeometry(r *Renderer, box Box, f Frame) (elevPlot, bool) {
 	if f.Course == nil || f.Course.Elevation == nil || f.Course.Elevation.Empty() {
 		return elevPlot{}, false
 	}
 	em := f.Course.Elevation
+	// Empty() only says the model has fewer than two profile points; two or
+	// more points can still share one distance, because BuildElevationModel
+	// skips a sample whose distance went BACKWARDS but keeps one that did not
+	// move. A clip of someone standing still is exactly that -- several
+	// samples, one distance -- and dividing by the resulting zero span puts
+	// NaN into every x coordinate of the profile line. gg renders that as
+	// nothing, with no error, so the guard belongs on the span, not on the
+	// point count. See progressGeometry for the same guard on the bar.
+	startD, endD := em.StartDistance(), em.TotalDistance()
+	if endD-startD <= 0 {
+		return elevPlot{}, false
+	}
 	px := r.FontPx(f)
 	lblPx := px * 0.7
 	pw := float64(f.Width) * orient(f, 0.42, 0.85) // wider on a portrait frame
 	ph := float64(f.Height) * 0.12
 	minE, maxE := em.Range()
-	span := maxE - minE
-	if span < 1 {
-		span = 1 // a dead-flat course still gets a centered line, not a divide-by-zero
+	elevSpan := maxE - minE
+	if elevSpan < 1 {
+		elevSpan = 1 // a dead-flat course still gets a centered line, not a divide-by-zero
 	}
 	axisY := box.Y - lblPx*1.3 // leave room for the km labels below the plot
 	return elevPlot{
 		px: px, lblPx: lblPx,
 		left: box.X - pw/2, right: box.X + pw/2, top: axisY - ph, axisY: axisY,
-		minE: minE, maxE: maxE, span: span, totalD: em.TotalDistance(),
+		minE: minE, maxE: maxE, elevSpan: elevSpan,
+		startD: startD, endD: endD,
 	}, true
 }
 
@@ -137,7 +176,7 @@ func (ElevationProfileGauge) DrawStatic(r *Renderer, dc *gg.Context, box Box, f 
 	dc.SetLineWidth(math.Max(1.5, g.px*0.045))
 	dc.SetRGBA(1, 1, 1, 0.95)
 	for k := 0; k <= n; k++ {
-		d := float64(k) / float64(n) * g.totalD
+		d := g.distAt(k, n)
 		e, _, _ := em.AtDistance(d)
 		if k == 0 {
 			dc.MoveTo(g.xAt(d), g.yAt(e))
@@ -149,8 +188,9 @@ func (ElevationProfileGauge) DrawStatic(r *Renderer, dc *gg.Context, box Box, f 
 
 	r.Text(dc, fmt.Sprintf("%.0f m", g.maxE), g.left, g.top, 0, g.lblPx)
 	r.Text(dc, fmt.Sprintf("%.0f m", g.minE), g.left, g.axisY-g.lblPx*1.15, 0, g.lblPx)
-	r.Text(dc, "0 km", g.left, g.axisY+g.lblPx*0.15, 0, g.lblPx)
-	r.Text(dc, fmt.Sprintf("%.0f km", g.totalD/1000), g.right, g.axisY+g.lblPx*0.15, 1, g.lblPx)
+	startLbl, endLbl := elevAxisLabels(g.startD, g.endD)
+	r.Text(dc, startLbl, g.left, g.axisY+g.lblPx*0.15, 0, g.lblPx)
+	r.Text(dc, endLbl, g.right, g.axisY+g.lblPx*0.15, 1, g.lblPx)
 }
 
 // Draw draws the per-frame position marker: a vertical playhead line through
@@ -161,7 +201,7 @@ func (ElevationProfileGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame)
 		return
 	}
 	em := f.Course.Elevation
-	d := math.Max(0, math.Min(f.Sample.Distance, g.totalD))
+	d := clampToAxis(f.Sample.Distance, g.startD, g.endD)
 	e, _, _ := em.AtDistance(d)
 	mx, my := g.xAt(d), g.yAt(e)
 

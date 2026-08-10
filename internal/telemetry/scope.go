@@ -92,10 +92,19 @@ type ScopedActivity struct {
 	// flag. A consumer cannot infer it: a clip that genuinely opens at the
 	// activity's own start line and a clip whose every sample lost its
 	// distance channel both present StartDistance == 0 and RebasedBy == 0, and
-	// they need opposite treatment. Anything dividing by a distance span (the
-	// progress bar, the elevation profile's x axis) must consult this first;
-	// over a whole activity a zero span is impossible, but over a 20-second
-	// clip of someone standing still it is routine, and the quotient is NaN.
+	// they need opposite treatment. logClipScope is the use -- it reports "no
+	// distance data in the clip's window" rather than a spurious 0.00-0.00 km.
+	//
+	// It is NOT the guard for anything dividing by a distance span, and an
+	// earlier draft of this comment said it was. The hazard is real -- over a
+	// whole activity a zero span is impossible, but over a 20-second clip of
+	// someone waiting at a traffic light it is routine, and the quotient is
+	// NaN, which gg draws as nothing at all -- but this flag does not detect
+	// it. Every sample in that clip carries a perfectly good cumulative
+	// distance; they are simply all the same one, so HasOrigin is true and the
+	// span is zero. The HUD's two distance gauges therefore guard on the span
+	// itself (see hud.progressGeometry and hud.elevGeometry), which is
+	// strictly stronger and is what a third one must copy.
 	HasOrigin bool
 
 	// StartDistance is the clip's opening cumulative distance in metres, for a
@@ -188,10 +197,19 @@ func BuildScopedActivity(track *Track, sync Sync, scope Scope) *ScopedActivity {
 	if scope == ScopeActivity {
 		// HasOrigin is set here too, cheaply (firstDistance returns at the
 		// first distance-bearing sample, which is Samples[0] for any ordinary
-		// file). Leaving it false on this path would be the trap the flag
-		// exists to remove: a whole-activity Track plainly carrying distance
-		// would report that it has no origin, and stage 4's span guards would
-		// read that as "no distance data" for every unscoped run.
+		// file), and no shipped code reads it on this path: logClipScope, its
+		// only consumer, returns immediately for a whole activity.
+		//
+		// It is set for uniformity, and the reason to keep doing so is that the
+		// field DESCRIBES the Track rather than the mode -- "does this carry any
+		// cumulative distance" has the same answer whoever asks. A flag that is
+		// only meaningful in two of three modes is one a future consumer reads
+		// in the third and gets a confident false from. There is a test pinning
+		// it in all three modes for exactly that reason.
+		//
+		// An earlier draft justified it instead by claiming the HUD's span
+		// guards consult it. They do not, and must not: see the field's own doc
+		// comment, which retracts that.
 		//
 		// StartDistance stays 0, and that is not the same statement. The
 		// activity's own origin IS zero by definition -- StartDistance answers

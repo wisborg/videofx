@@ -67,21 +67,66 @@ type Frame struct {
 	// FIT power field; the zero value is telemetry.PowerAuto (prefer Stryd,
 	// fall back to native). See telemetry.Sample.ResolvedPower.
 	PowerSource telemetry.PowerSource
-	// Course carries whole-activity context (elevation profile, GPS track,
-	// splits) for the graphical gauges; nil until those phases populate it.
+	// Course carries the render-wide context (elevation profile, GPS track,
+	// splits, distance axis) the graphical gauges draw from; nil when the
+	// caller has none. It is the same pointer on every frame -- see Course.
 	Course *Course
 }
 
-// Course is whole-activity context shared by every frame (computed once).
+// Course is the context shared by every frame of one render, computed once.
+//
+// "Whole activity" is what it usually describes and no longer what it means:
+// the telemetry-hud effect can scope it to the stretch of an activity that
+// runs underneath the clip (telemetry.Scope), in which case every field here
+// describes that stretch. Nothing in this package needs to know which -- the
+// gauges draw whatever course they are given -- but a reader assuming the
+// numbers span a whole recording will misread StartDistance below.
 type Course struct {
-	TotalDistance float64 // meters
-	// Elevation is the smoothed whole-activity elevation model the elevation
-	// gauges (profile, gain/loss, incline) read; nil / Empty() when the FIT
-	// carried no usable elevation, in which case those gauges show
-	// placeholders or draw nothing.
+	// TotalDistance is the cumulative distance (m) the progress bar's axis
+	// ENDS at: the whole activity's total, or -- for a clip-scoped course --
+	// the clip's last cumulative distance. Paired with StartDistance it is an
+	// axis range, not a length.
+	TotalDistance float64
+	// StartDistance is the cumulative distance (m) that axis BEGINS at, so a
+	// clip scoped to 10.2..12.4 km of an activity draws and labels that
+	// stretch rather than 0..12.4 km. It is 0 for a whole activity and for a
+	// clip-rebased one (whose origin has already been subtracted from every
+	// sample) -- i.e. for everything but telemetry.ScopeClipAbsolute.
+	//
+	// A zero origin leaves the bar's GEOMETRY exactly as it always was, and
+	// its labels too. It does not by itself leave the whole HUD unchanged, and
+	// an earlier draft of this sentence claimed it did: the labels on both
+	// gauges also follow the axis's SPAN, so a course spanning less than a
+	// kilometre is labelled in metres and a profile spanning less than ten
+	// gains a decimal, origin or no origin. See metreAxisSpan for the rule and
+	// elevAxisLabels for which whole-activity renders it moves.
+	//
+	// It lives HERE, on the per-render Course, and must never move onto the
+	// per-frame Frame. The HUD's static layer -- the bar's white line and its
+	// two end labels -- is rasterized ONCE from a Frame carrying nothing but
+	// the frame dimensions and this Course (see the telemetry-hud effect's
+	// RenderStatic call), so an origin supplied per frame would be absent
+	// there: the axis would be labelled and scaled against 0 while the
+	// playhead composited on top of it was placed against the clip's real
+	// origin. That is the static-layer cache trap in another costume, and it
+	// fails silently -- both layers draw, they just disagree.
+	//
+	// The elevation profile does NOT read this. Its axis is the elevation
+	// model's own (telemetry.ElevationModel.StartDistance), which can
+	// legitimately differ; see that method for why the two must not be
+	// unified. Note that only THIS one responds to scoping -- the profile's is
+	// a property of the data its model was built from -- so the two axes can
+	// begin at slightly different distances even on an unscoped render.
+	StartDistance float64
+	// Elevation is the smoothed elevation model the elevation gauges
+	// (profile, gain/loss, incline) read; nil / Empty() when the FIT carried
+	// no usable elevation, in which case those gauges show placeholders or
+	// draw nothing. It carries its OWN distance axis -- see StartDistance.
 	Elevation *telemetry.ElevationModel
-	// Splits are the whole-activity kilometre boundaries the splits gauge
-	// reads; nil / Empty() when the FIT carried no distance.
+	// Splits are the kilometre boundaries the splits gauge reads, numbered by
+	// the kilometres of whatever the course describes; nil / Empty() when
+	// there is no distance, or no lap with both of its bounding crossings in
+	// the data.
 	Splits *telemetry.Splits
 	// Route is the (downsampled) GPS track the course-map gauge draws; each
 	// point carries its time so the gauge can highlight the covered portion.

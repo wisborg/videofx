@@ -104,21 +104,62 @@ type ProgressBarGauge struct{}
 
 func (ProgressBarGauge) Name() string { return "progress" }
 
+// progressPlot is the bar's geometry. Its distance axis runs from startD to
+// endD rather than from zero to a total: a clip-scoped course keeping the
+// activity's own numbering (telemetry.ScopeClipAbsolute) measures and labels
+// the 10.2..12.4 km it actually covers. startD is 0 for a whole activity and
+// for a rebased clip, in which case the span IS the total and every number
+// here is what it has always been.
 type progressPlot struct {
-	px, left, right, barY, barH, totalD float64
+	px, left, right, barY, barH, startD, endD float64
 }
 
-func (g progressPlot) xAt(d float64) float64 { return g.left + d/g.totalD*(g.right-g.left) }
+// xAt maps a cumulative distance onto the bar by its position in the axis
+// SPAN. Dividing by endD alone happens to be right only while startD is 0.
+// progressGeometry guarantees the span is positive, so this cannot divide by
+// zero.
+func (g progressPlot) xAt(d float64) float64 {
+	return axisX(d, g.startD, g.endD, g.left, g.right)
+}
+
+// currentDistance is the cumulative distance the bar's playhead and its
+// readout show for frame f: the sample's own, clamped into the axis.
+//
+// A frame with no sample -- outside the FIT's coverage, or inside a recording
+// gap -- reads as the axis's ORIGIN rather than as zero. Zero is a real
+// position on a whole-activity bar (the start line) and is nowhere at all on a
+// clip-absolute one, where it would print "0.0" under a bar labelled from
+// 10.2 km and drag the fill off the left of the frame.
+func (g progressPlot) currentDistance(f Frame) float64 {
+	if !f.HasSample || !f.Sample.HasDistance {
+		return g.startD
+	}
+	return clampToAxis(f.Sample.Distance, g.startD, g.endD)
+}
 
 func progressGeometry(r *Renderer, box Box, f Frame) (progressPlot, bool) {
-	if f.Course == nil || f.Course.TotalDistance <= 0 {
+	// The guard is on the SPAN, not on the total, and that is the whole
+	// difference from what it replaced. Over a whole activity a zero distance
+	// span is impossible, so testing the total was sufficient; over a
+	// 20-second clip of someone stopped at a traffic light it is routine --
+	// every sample in the window carries the same cumulative distance -- and
+	// then xAt is 0/0. gg draws NaN coordinates as nothing at all, silently,
+	// so the bar would simply vanish for that clip with no error anywhere.
+	//
+	// Written as "<= 0" rather than "== 0" because the span can also come out
+	// NEGATIVE: telemetry's clip origin deliberately does not skip a backwards
+	// distance blip the way BuildSplits does (see telemetry.firstDistance), so
+	// a clip opening on one rebases to negative distances. A negative span
+	// would draw the bar's fill leftwards off the frame.
+	if f.Course == nil || f.Course.TotalDistance-f.Course.StartDistance <= 0 {
 		return progressPlot{}, false
 	}
 	px := r.FontPx(f)
 	barW := float64(f.Width) * orient(f, 0.5, 0.85) // wider on a portrait frame
 	return progressPlot{
 		px: px, left: box.X - barW/2, right: box.X + barW/2,
-		barY: box.Y + px*1.5, barH: math.Max(3, px*0.11), totalD: f.Course.TotalDistance,
+		barY: box.Y + px*1.5, barH: math.Max(3, px*0.11),
+		startD: f.Course.StartDistance, endD: f.Course.TotalDistance,
 	}, true
 }
 
@@ -136,8 +177,9 @@ func (ProgressBarGauge) DrawStatic(r *Renderer, dc *gg.Context, box Box, f Frame
 	dc.Stroke()
 
 	lblPx := g.px * 0.65
-	r.Text(dc, "0.0 km", g.left, g.barY+g.barH, 0, lblPx)
-	r.Text(dc, fmt.Sprintf("%.1f km", g.totalD/1000), g.right, g.barY+g.barH, 1, lblPx)
+	startLbl, endLbl := progressAxisLabels(g.startD, g.endD)
+	r.Text(dc, startLbl, g.left, g.barY+g.barH, 0, lblPx)
+	r.Text(dc, endLbl, g.right, g.barY+g.barH, 1, lblPx)
 }
 
 // Draw draws the per-frame parts: the orange fill to the current position and
@@ -147,10 +189,7 @@ func (ProgressBarGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
 	if !ok {
 		return
 	}
-	curD := 0.0
-	if f.HasSample && f.Sample.HasDistance {
-		curD = math.Max(0, math.Min(f.Sample.Distance, g.totalD))
-	}
+	curD := g.currentDistance(f)
 	xCur := g.xAt(curD)
 
 	dc.SetRGBA(1.0, 0.45, 0.1, 1)
@@ -158,7 +197,25 @@ func (ProgressBarGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
 	dc.DrawLine(g.left, g.barY, xCur, g.barY)
 	dc.Stroke()
 
-	r.TextColored(dc, fmt.Sprintf("%.1f", curD/1000), xCur, box.Y, 0.5, g.px*1.05, 1.0, 0.45, 0.1)
+	r.TextColored(dc, g.readout(curD), xCur, box.Y, 0.5, g.px*1.05, 1.0, 0.45, 0.1)
+}
+
+// readout is the live distance number drawn above the playhead.
+//
+// It carries no unit of its own -- the axis's two end labels supply that --
+// which is exactly why it cannot pick its own scale: on a bar labelled
+// "0 m".."100 m" a readout of "0.0" is not a smaller number, it is a different
+// quantity. So it follows the unit its labels chose.
+//
+// On any axis of a kilometre or more this is "%.1f" of kilometres, byte for
+// byte what it has always been, and a whole-activity bar can be nothing else.
+// The metre form is reachable only through a clip-scoped course, which is to
+// say only through a code path that did not exist before it did.
+func (g progressPlot) readout(d float64) string {
+	if axisInMetres(g.endD - g.startD) {
+		return fmt.Sprintf("%.0f", d)
+	}
+	return fmt.Sprintf("%.1f", d/1000)
 }
 
 // CourseMapGauge is the middle-left course outline: the whole GPS route drawn

@@ -92,6 +92,41 @@ func (m *ElevationModel) TotalDistance() float64 {
 	return m.dist[len(m.dist)-1]
 }
 
+// StartDistance is the distance (m) of the FIRST profile point -- where the
+// model's x axis begins. It is 0 for a whole activity recorded from its own
+// start line, and the clip's opening cumulative distance for a model built
+// from a clip-scoped track that kept the activity's numbering (see
+// BuildScopedActivity and ScopeClipAbsolute).
+//
+// A plot of this model spans StartDistance..TotalDistance, not
+// 0..TotalDistance. The difference is invisible while the first point sits at
+// 0, which is why the HUD's profile got away with dividing by TotalDistance
+// alone; over a clip cut from 10.2 km in, dividing by the total would squeeze
+// the whole profile into the right-hand fifth of its box.
+//
+// This is deliberately NOT the same number as hud.Course.StartDistance, though
+// both answer "where does this clip begin". That one is the first sample
+// carrying a DISTANCE; this one is the first carrying distance AND elevation,
+// and BuildElevationModel skips any sample missing either. A clip opening on a
+// sample whose barometer reading was absent has the two several metres apart,
+// and each plot must span its own series -- reconciling them would draw one of
+// the two plots off the end of its own axis.
+//
+// The deeper asymmetry, which the values alone do not show: only one of the
+// two responds to scoping. hud.Course.StartDistance is a SCOPE property, zero
+// unless the caller asked for ScopeClipAbsolute, whereas this is a DATA
+// property of whatever series the model was built from. So on a file whose
+// opening records carry distance but no valid altitude, the two axes begin at
+// slightly different distances even under the default whole-activity scope.
+// Harmless -- they are separate plots with separate labels -- but it is why
+// "the origin is non-zero" does not mean "this is a clip".
+func (m *ElevationModel) StartDistance() float64 {
+	if len(m.dist) == 0 {
+		return 0
+	}
+	return m.dist[0]
+}
+
 // Range returns the smoothed elevation's min and max (m).
 func (m *ElevationModel) Range() (min, max float64) { return m.minElev, m.maxElev }
 

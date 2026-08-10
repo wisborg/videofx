@@ -407,9 +407,14 @@ func TestBuildScopedActivity_UsesTheFirstDistanceBearingSampleAsTheOrigin(t *tes
 // The distinction is the reason the field exists. A clip that opens exactly on
 // the activity's start line and a clip whose every sample lost its distance
 // channel both present StartDistance == 0 and RebasedBy == 0; only this flag
-// separates them, and stage 4's progress bar divides by a span computed from
-// those numbers. Leaving it false on the whole-activity path would make every
-// unscoped run look like the second case.
+// separates them, which is what lets logClipScope report "no distance data in
+// the clip's window" instead of a confident 0.00-0.00 km.
+//
+// The whole-activity mode is covered here even though nothing reads the flag
+// there, and that is the point of the test rather than an oversight: a field
+// describing the Track must answer the same way whoever asks, or a consumer
+// added later reads it in the one mode that was never filled in and gets a
+// false. This is the pin BuildScopedActivity's ScopeActivity branch refers to.
 func TestBuildScopedActivity_HasOriginIsATrackProperty(t *testing.T) {
 	withDistance := scopeTrack(11, 10)
 
