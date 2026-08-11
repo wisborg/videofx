@@ -2,7 +2,6 @@ package vidio
 
 import (
 	"context"
-	"errors"
 	"math"
 	"os/exec"
 	"path/filepath"
@@ -83,170 +82,126 @@ func TestTrimClip(t *testing.T) {
 	})
 }
 
-// TestTrimTagShift_FallsBackToTheRequestedStartWhenTheProbeCannotAnswer covers
-// every branch of the decision that turns a requested start into the number
-// creation_time is shifted by, with a stand-in probe so no video file is
-// needed. The property under test is that only a probe answer that is
-// self-consistent with the request is believed; everything else keeps the
-// pre-existing behaviour of shifting by the requested start, because a trim
-// that runs with a slightly wrong tag beats a trim that does not run.
-func TestTrimTagShift_FallsBackToTheRequestedStartWhenTheProbeCannotAnswer(t *testing.T) {
-	failing := func(context.Context, string, float64) (float64, error) {
-		return 0, errors.New("ffprobe exploded")
-	}
-	answering := func(v float64) keyframeProbe {
-		return func(context.Context, string, float64) (float64, error) { return v, nil }
-	}
-	// Records what absolute instant the probe was asked about, so the
-	// start_time conversion can be asserted on the way in as well as out.
-	var askedAt float64
-	recording := func(v float64) keyframeProbe {
-		return func(_ context.Context, _ string, at float64) (float64, error) {
-			askedAt = at
-			return v, nil
-		}
-	}
-
+// TestTrimContainerExt_KeepsMP4FamilyAndRewritesEverythingElse pins which
+// container a trim lands in.
+//
+// The rule is not "match the source". An exact --start is implemented with an
+// edit list, and only the MP4 family can carry one -- a Matroska or WebM
+// destination silently reverts to presenting the pre-roll, which is the bug the
+// whole feature exists to avoid. So anything outside the family is rewritten,
+// and the two members of it are left alone.
+//
+// Case-insensitivity is not decoration: cameras write .MOV and .MP4 in capitals
+// (this project's own footage does), and a case-sensitive comparison would
+// quietly relabel every one of them -- harmless, but it would mean the rule was
+// not doing what it says.
+func TestTrimContainerExt_KeepsMP4FamilyAndRewritesEverythingElse(t *testing.T) {
 	tests := []struct {
-		name        string
-		start       float64
-		streamStart float64
-		probe       keyframeProbe
-		want        float64
-		wantAskedAt float64 // NaN when the probe must not be consulted
-	}{{
-		name: "a keyframe one GOP back shifts by the keyframe, not the request",
-		// -ss 4.400 on a 3 s-GOP clip copies from 3.000, so the output's
-		// first frame is the source's 3.000 and the tag must say so.
-		start: 4.4, probe: recording(3.0), want: 3.0, wantAskedAt: 4.4,
-	}, {
-		name:  "start_time is added on the way in and taken off on the way out",
-		start: 4.4, streamStart: 5.0,
-		// ffmpeg's -ss 4.400 means absolute 9.400 on this timeline; the
-		// keyframe ffprobe reports there is absolute 8.000, i.e. 3.000 into
-		// the clip. Believing ffprobe's 8.000 unconverted would be 3.6 s out.
-		probe: recording(8.0), want: 3.0, wantAskedAt: 9.4,
-	}, {
-		name:  "an exact seek shifts by exactly the request",
-		start: 2.0, probe: answering(2.0), want: 2.0, wantAskedAt: math.NaN(),
-	}, {
-		name:  "a failed probe keeps the old behaviour",
-		start: 4.4, probe: failing, want: 4.4, wantAskedAt: math.NaN(),
-	}, {
-		name: "a keyframe reported past the request is not believed",
-		// A snap can only ever go backwards, so this means the probe and
-		// ffmpeg are not describing the same seek.
-		start: 4.4, probe: answering(4.9), want: 4.4, wantAskedAt: math.NaN(),
-	}, {
-		name:  "a keyframe reported before the timeline is not believed",
-		start: 4.4, streamStart: 5.0, probe: answering(2.0), want: 4.4, wantAskedAt: math.NaN(),
-	}, {
-		name: "a zero start is not probed at all",
-		// The first frame of a decodable stream is a keyframe, so there is
-		// nothing to learn -- and an untrimmed start must not pay for it.
-		start: 0, probe: failing, want: 0, wantAskedAt: math.NaN(),
-	}}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			askedAt = math.NaN()
-			got := trimTagShift(context.Background(), "clip.mp4", tt.start, tt.streamStart, tt.probe)
-			if math.Abs(got-tt.want) > 1e-9 {
-				t.Errorf("trimTagShift(start=%.3f, streamStart=%.3f) = %.3f, want %.3f",
-					tt.start, tt.streamStart, got, tt.want)
-			}
-			if !math.IsNaN(tt.wantAskedAt) && math.Abs(askedAt-tt.wantAskedAt) > 1e-9 {
-				t.Errorf("probed at %.3f, want %.3f (absolute, i.e. start + start_time)", askedAt, tt.wantAskedAt)
-			}
-		})
-	}
-}
-
-// TestTrimTagShift_AZeroStartCostsNoProbe asserts the early return actually
-// returns early, which no assertion on the RESULT can: a probe of the first
-// keyframe of a decodable stream answers 0, and the fallback for a zero start
-// is also 0, so the guard could be deleted outright and every value-based
-// assertion in this file would still pass. What it buys is an ffprobe
-// subprocess not being spawned -- the only observable difference -- so that is
-// what has to be observed. A negative start is included because --start is
-// clamped elsewhere, not here, and it takes the same branch.
-func TestTrimTagShift_AZeroStartCostsNoProbe(t *testing.T) {
-	for _, start := range []float64{0, -1.5} {
-		probed := false
-		probe := func(context.Context, string, float64) (float64, error) {
-			probed = true
-			return 0, nil
-		}
-		if got := trimTagShift(context.Background(), "clip.mp4", start, 0, probe); got != 0 {
-			t.Errorf("trimTagShift(start=%v) = %v, want 0", start, got)
-		}
-		if probed {
-			t.Errorf("trimTagShift(start=%v) ran an ffprobe; the first frame of a decodable "+
-				"stream is a keyframe, so there is nothing to learn and nothing to pay for", start)
-		}
-	}
-}
-
-// TestParseKeyframePTS_TreatsEveryUnusableShapeAsAFallback pins which ffprobe
-// outputs yield a usable instant and which must return an error, since an
-// error here is what makes TrimClip keep its old tag rather than write a
-// nonsense one. An empty frames array is a real, expected shape: ffprobe emits
-// it when the one packet it was asked to read was not a keyframe.
-func TestParseKeyframePTS_TreatsEveryUnusableShapeAsAFallback(t *testing.T) {
-	tests := []struct {
-		name    string
-		json    string
-		want    float64
-		wantErr bool
+		source string
+		want   string
 	}{
-		{name: "a keyframe", json: `{"frames":[{"pts_time":"9.000000"}]}`, want: 9},
-		{name: "the first frame wins", json: `{"frames":[{"pts_time":"9.0"},{"pts_time":"12.0"}]}`, want: 9},
-		{name: "a keyframe at the very start", json: `{"frames":[{"pts_time":"0.000000"}]}`, want: 0},
-		{name: "no keyframe in the interval", json: `{"frames":[]}`, wantErr: true},
-		{name: "no frames key at all", json: `{}`, wantErr: true},
-		{name: "pts_time absent", json: `{"frames":[{}]}`, wantErr: true},
-		{name: "pts_time is N/A", json: `{"frames":[{"pts_time":"N/A"}]}`, wantErr: true},
-		{name: "pts_time is not a number", json: `{"frames":[{"pts_time":"soon"}]}`, wantErr: true},
-		{name: "not JSON at all", json: `ffprobe: command not found`, wantErr: true},
+		{"clip.mp4", ".mp4"},
+		{"clip.mov", ".mov"},
+		{"CLIP.MOV", ".mov"},
+		{"CLIP.MP4", ".mp4"},
+		{"clip.mkv", ".mp4"},
+		{"clip.webm", ".mp4"},
+		{"clip.ts", ".mp4"},
+		{"clip.avi", ".mp4"},
+		{"noextension", ".mp4"},
+		{"/some/dir.mkv/clip.mp4", ".mp4"},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseKeyframePTS([]byte(tt.json))
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("parseKeyframePTS(%s) error = %v, wantErr %v", tt.json, err, tt.wantErr)
+		t.Run(tt.source, func(t *testing.T) {
+			got := TrimContainerExt(tt.source)
+			if got != tt.want {
+				t.Errorf("TrimContainerExt(%q) = %q, want %q", tt.source, got, tt.want)
 			}
-			if err == nil && got != tt.want {
-				t.Errorf("parseKeyframePTS(%s) = %v, want %v", tt.json, got, tt.want)
+			// Whatever it answers must be a destination TrimClip accepts, or
+			// the two halves of this rule have drifted apart and every trim of
+			// such a source fails at the guard.
+			if err := checkTrimContainer("trimmed" + got); err != nil {
+				t.Errorf("TrimClip would refuse the destination TrimContainerExt chose: %v", err)
 			}
 		})
 	}
 }
 
-// TestTrimArgs_TagsTheKeyframeInstantNotTheRequestedStart checks that the
-// reconciled shift, not the requested start, is what reaches the argv -- the
-// one thing that could silently undo trimTagShift while every other test
-// still passes.
-func TestTrimArgs_TagsTheKeyframeInstantNotTheRequestedStart(t *testing.T) {
+// TestTrimClip_RefusesAContainerThatCannotHideThePreRoll covers the guard that
+// makes the rule above impossible to bypass by accident.
+//
+// It matters because the failure it prevents is invisible. A Matroska trim
+// SUCCEEDS: ffmpeg writes a valid, playable file, exit 0, no warning. It simply
+// starts up to a GOP before the requested instant while carrying a
+// creation_time that names the instant -- so a caller building the destination
+// path the obvious way, from the source's own extension, gets a clip whose
+// pictures and clock disagree, and nothing tells them. Refusing up front is the
+// only report available.
+//
+// No ffmpeg runs here: the guard must reject before any work, and a test that
+// needed a real clip could not tell "refused" from "the copy failed".
+func TestTrimClip_RefusesAContainerThatCannotHideThePreRoll(t *testing.T) {
+	for _, dst := range []string{"trimmed.mkv", "trimmed.webm", "trimmed.avi", "trimmed.ts", "trimmed"} {
+		t.Run(dst, func(t *testing.T) {
+			err := TrimClip(context.Background(), "nonexistent-source.mp4", dst, 1, 3)
+			if err == nil {
+				t.Fatalf("TrimClip into %q returned no error", dst)
+			}
+			// The source does not exist, so a probe failure is also an error --
+			// which would make this pass for the wrong reason. The guard has to
+			// be what spoke.
+			if !strings.Contains(err.Error(), "edit list") {
+				t.Errorf("TrimClip into %q failed with %v\nwant the container guard, which names the edit list", dst, err)
+			}
+		})
+	}
+	for _, dst := range []string{"trimmed.mp4", "trimmed.MOV"} {
+		t.Run("accepted: "+dst, func(t *testing.T) {
+			err := TrimClip(context.Background(), "nonexistent-source.mp4", dst, 1, 3)
+			if err != nil && strings.Contains(err.Error(), "edit list") {
+				t.Errorf("TrimClip refused %q, which is an MP4-family container: %v", dst, err)
+			}
+		})
+	}
+}
+
+// TestTrimArgs_TagsTheRequestedStartAndLeavesTheEditListAlone pins the two
+// halves of "--start means exactly --start" at the argv level.
+//
+// The tag is the requested start because that is where the output PRESENTS
+// from: the seek below lands on the keyframe at or before it, but the packets
+// in between keep their negative timestamps and the container's edit list hides
+// them. Naming the keyframe instead -- which this did, back when the pre-roll
+// was un-hidden -- would put the tag up to a GOP early and drag every FIT
+// lookup in the trimmed clip with it.
+//
+// The absence of -avoid_negative_ts is asserted rather than assumed. Any value
+// of it (make_zero, make_non_negative, 1) rewrites those negative timestamps,
+// which is exactly what un-hides the pre-roll, and nothing else in the argv
+// would look wrong.
+func TestTrimArgs_TagsTheRequestedStartAndLeavesTheEditListAlone(t *testing.T) {
 	info := Info{
 		HasCreationTime: true,
 		CreationTime:    time.Date(2026, 7, 4, 21, 5, 53, 0, time.UTC),
 	}
-	// Requested 4.400 s in, actually copying from 3.000 s in:
-	// 21:05:53 + 3 s = 21:05:56, not 21:05:57.400.
-	args := trimArgs("in.mp4", "out.mp4", 4.4, 6.4, 3.0, info)
+	// Requested 4.400 s in: 21:05:53 + 4.4 s = 21:05:57.400.
+	args := trimArgs("in.mp4", "out.mp4", 4.4, 6.4, info)
 
 	i := slices.Index(args, "-metadata")
 	if i < 0 || i+1 >= len(args) {
 		t.Fatalf("no -metadata in %v", args)
 	}
-	const want = "creation_time=2026-07-04T21:05:56.000000Z"
+	const want = "creation_time=2026-07-04T21:05:57.400000Z"
 	if args[i+1] != want {
 		t.Errorf("creation_time arg = %q, want %q", args[i+1], want)
 	}
-	// -ss still asks for the requested start: the tag is corrected, the seek
-	// is not moved. Moving it would mean an exact seek and a full decode.
 	if j := slices.Index(args, "-ss"); j < 0 || args[j+1] != "4.400" {
-		t.Errorf("-ss = %v, want 4.400 (the tag is corrected, not the seek)", args)
+		t.Errorf("-ss = %v, want 4.400", args)
+	}
+	if slices.Contains(args, "-avoid_negative_ts") {
+		t.Errorf("argv carries -avoid_negative_ts: %v\n"+
+			"it shifts the copied pre-roll's negative timestamps up to zero, which un-hides frames "+
+			"the edit list exists to hide, and --start is then ignored back to the previous keyframe", args)
 	}
 }
 
@@ -255,17 +210,64 @@ func TestTrimArgs_TagsTheKeyframeInstantNotTheRequestedStart(t *testing.T) {
 // demonstrably snaps backwards -- the opposite of genClip's -g 1. extraOutput
 // is appended before the output path, for fixtures that need to bend the
 // container (-output_ts_offset).
+//
+// -bf 0 keeps it free of b-frames, which matters for any assertion about the
+// TRIMMED clip's reported duration: with reordering in play, ffmpeg derives the
+// edit list from decode-order timestamps but drops frames by presentation
+// order, and the duration it writes then overstates the frames actually
+// presented by up to the reorder depth. This project's action-camera footage
+// carries no b-frames either, so the fixture is the honest one to reason from.
 func genLongGOPClip(t *testing.T, path string, durationSec int, creation time.Time, extraOutput ...string) {
 	t.Helper()
 	args := []string{"-hide_banner", "-loglevel", "error",
 		"-f", "lavfi", "-i", "testsrc=size=64x48:rate=10:duration=" + strconv.Itoa(durationSec),
-		"-c:v", "libx264", "-g", "30", "-keyint_min", "30", "-sc_threshold", "0", "-pix_fmt", "yuv420p",
+		"-c:v", "libx264", "-g", "30", "-keyint_min", "30", "-sc_threshold", "0", "-bf", "0", "-pix_fmt", "yuv420p",
 		"-metadata", "creation_time=" + creation.UTC().Format(time.RFC3339)}
 	args = append(args, extraOutput...)
 	cmd := exec.Command("ffmpeg", append(args, "-y", path)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("generating long-GOP clip: %v\n%s", err, out)
 	}
+}
+
+// decodedFrameCount is how many frames path actually decodes to -- what a
+// player, a filtergraph or a Decoder sees -- as opposed to the nb_frames the
+// container advertises, which counts stored samples an edit list may hide.
+func decodedFrameCount(t *testing.T, path string) int {
+	t.Helper()
+	out, err := exec.Command("ffprobe", "-v", "error", "-select_streams", "v:0",
+		"-count_frames", "-show_entries", "stream=nb_read_frames",
+		"-of", "default=nw=1:nk=1", path).Output()
+	if err != nil {
+		t.Fatalf("counting frames in %s: %v", path, err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(strings.Split(string(out), "\n")[0]))
+	if err != nil {
+		t.Fatalf("parsing frame count of %s: %v", path, err)
+	}
+	return n
+}
+
+// containerStartTime is the format-level start_time ffprobe reports for path,
+// i.e. where the file's own timeline begins. Probe no longer carries it -- the
+// field went out with the keyframe machinery that was its only reader -- so a
+// fixture that needs a non-zero one has to ask ffprobe itself.
+func containerStartTime(t *testing.T, path string) float64 {
+	t.Helper()
+	out, err := exec.Command("ffprobe", "-v", "error",
+		"-show_entries", "format=start_time", "-of", "default=nw=1:nk=1", path).Output()
+	if err != nil {
+		t.Fatalf("probing start_time of %s: %v", path, err)
+	}
+	raw := strings.TrimSpace(strings.Split(string(out), "\n")[0])
+	if raw == "" || raw == "N/A" {
+		return 0
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		t.Fatalf("parsing start_time %q of %s: %v", raw, path, err)
+	}
+	return v
 }
 
 // frameHashes returns a per-frame checksum of path's video stream, in
@@ -309,202 +311,171 @@ func contentStartOf(t *testing.T, src, dst string) float64 {
 	return float64(idx) / 10.0
 }
 
-// TestTrimClip_CreationTimeNamesTheOutputsActualFirstFrame is the end-to-end
-// check that the tag TrimClip writes describes the frame the copy really
-// begins at, on footage where the keyframe snap actually bites.
+// TestInfo_PresentedFrames_MatchesARealDecodeOfATrimmedClip closes the loop
+// between PresentedFrames' arithmetic and the thing it is arithmetic ABOUT.
 //
-// The expected instant is not taken from ffprobe -- that would only prove the
-// code agrees with itself. It is recovered by locating the trimmed clip's
-// first frame in the source by content hash: frame n of a 10 fps constant-rate
-// source is at n/10 seconds, so the shift the tag claims can be compared
-// against where the output demonstrably starts, to within half a frame.
-func TestTrimClip_CreationTimeNamesTheOutputsActualFirstFrame(t *testing.T) {
+// Its table-driven sibling in probe_test.go feeds the method hand-written Info
+// values; nothing there would notice if ffmpeg changed how it writes the edit
+// list, or if the whole premise -- that the container's duration is
+// post-edit-list while nb_frames is not -- stopped being true. This asserts the
+// method against `ffprobe -count_frames`, i.e. against frames that really come
+// out of a decoder, for both shapes of source in one place:
+//
+//   - the untrimmed fixture, where nothing is hidden and the answer must be the
+//     exact stored count. This is the row that keeps the method honest in the
+//     ordinary case: a version that always returned duration*fps would still
+//     satisfy the trimmed row below.
+//   - its trim, where a mid-GOP start leaves pre-roll in the file. The stored
+//     count is then strictly larger than the decoded one, which is asserted
+//     rather than assumed -- if it ever stops holding, the second row is
+//     testing the first row's case over again.
+func TestInfo_PresentedFrames_MatchesARealDecodeOfATrimmedClip(t *testing.T) {
 	requireFFmpeg(t)
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	created := time.Date(2026, 7, 4, 21, 5, 53, 0, time.UTC)
 	src := filepath.Join(dir, "longgop.mp4")
-	genLongGOPClip(t, src, 9, created) // keyframes at 0 s, 3 s, 6 s
-
-	const start = 4.4 // mid-GOP: the copy has to fall back to the 3 s keyframe
-	dst := filepath.Join(dir, "trimmed.mp4")
-	if err := TrimClip(ctx, src, dst, start, 8); err != nil {
+	genLongGOPClip(t, src, 9, time.Date(2026, 7, 4, 21, 5, 53, 0, time.UTC)) // keyframes at 0/3/6 s
+	trimmed := filepath.Join(dir, "trimmed.mp4")
+	if err := TrimClip(ctx, src, trimmed, 4, 8); err != nil { // mid-GOP: snaps back to 3 s
 		t.Fatalf("TrimClip: %v", err)
 	}
 
-	actual := contentStartOf(t, src, dst)
-
-	// Guard the fixture itself: if libx264 ever stops honouring -g 30 here,
-	// actual would equal start and the assertion below would pass while
-	// testing nothing.
-	if actual > start-0.5 {
-		t.Fatalf("the fixture is not long-GOP: the copy started at %.3fs for a requested %.3fs", actual, start)
-	}
-
-	info, err := Probe(ctx, dst)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !info.HasCreationTime {
-		t.Fatal("trimmed clip lost creation_time")
-	}
-	shift := info.CreationTime.Sub(created).Seconds()
-	// MP4's mvhd creation_time is whole seconds, and the muxer TRUNCATES rather
-	// than rounds, so the error it adds is one-directional and up to a full
-	// second -- not half a second either way. The 0.51 tolerance is safe here
-	// only because this fixture's keyframes land on exact integer seconds
-	// (10 fps, -g 30, scene detection off => 0, 3, 6 s), so truncation loses
-	// nothing and the honest answer is an exact 3.000. A fixture whose GOP
-	// length stopped dividing into whole seconds would need a tolerance near 1,
-	// which would still separate the right answer from this fixture's 1.4 s
-	// snap, the error under test.
-	if math.Abs(shift-actual) > 0.51 {
-		t.Errorf("creation_time is shifted by %.3fs but the copy starts at %.3fs (requested %.3fs)\n"+
-			"a shift of %.3f means the tag was written from the request and ignored the keyframe snap",
-			shift, actual, start, start)
-	}
-}
-
-// TestTrimClip_CreationTimeAccountsForTheContainersStartTime is the same
-// end-to-end check on a container whose timeline does NOT start at zero, which
-// is the one case where reading info.StartTime is load-bearing and the only
-// test in this package where it is non-zero.
-//
-// ffmpeg counts an input -ss from the container's start_time; ffprobe's
-// -read_intervals positions and pts_time values are absolute. The fixture's
-// content begins at absolute 5 s, so a requested --start of 4.4 s means
-// absolute 9.4 s, snapping back to the keyframe at absolute 8 s -- 3 s of
-// content in. Three separate things have to be right for the tag to say 3 s:
-// probe.go must read start_time at all, trimTagShift must ADD it before asking
-// ffprobe, and it must SUBTRACT it from the answer.
-//
-// Each of those failing independently is detectable here, and the failures do
-// not cancel: dropping start_time entirely makes the probe answer absolute 5 s,
-// which exceeds the 4.4 s request, so the self-consistency guard rejects it and
-// the tag falls back to 4.4 s; forgetting only the subtraction tags 8 s, which
-// is past the end of the requested span. Both are more than a second from 3 s.
-//
-// As with its sibling the expected 3 s is not taken from ffprobe: it is
-// recovered by finding the trimmed clip's opening frame in the source by
-// content hash.
-func TestTrimClip_CreationTimeAccountsForTheContainersStartTime(t *testing.T) {
-	requireFFmpeg(t)
-	ctx := context.Background()
-	dir := t.TempDir()
-
-	created := time.Date(2026, 7, 4, 21, 5, 53, 0, time.UTC)
-	src := filepath.Join(dir, "offset.mp4")
-	// -output_ts_offset shifts the whole timeline, so the container reports
-	// start_time 5 and its keyframes sit at absolute 5, 8, 11 s.
-	genLongGOPClip(t, src, 9, created, "-output_ts_offset", "5", "-muxdelay", "0", "-muxpreload", "0")
-
-	// Guard the fixture: with a zero start_time this test would silently
-	// degrade into a duplicate of its sibling and prove nothing about the
-	// conversion.
 	srcInfo, err := Probe(ctx, src)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if math.Abs(srcInfo.StartTime-5) > 0.01 {
-		t.Fatalf("fixture start_time = %v, want 5 -- either ffmpeg no longer honours -output_ts_offset "+
-			"or Probe has stopped reading start_time (see TestParseProbeJSON_StartTime)", srcInfo.StartTime)
-	}
-
-	const start = 4.4
-	dst := filepath.Join(dir, "trimmed.mp4")
-	if err := TrimClip(ctx, src, dst, start, 8); err != nil {
-		t.Fatalf("TrimClip: %v", err)
-	}
-
-	actual := contentStartOf(t, src, dst)
-	if math.Abs(actual-3.0) > 0.05 {
-		t.Fatalf("the copy started %.3fs into the content, want 3.0 -- the fixture's GOP structure has changed", actual)
-	}
-
-	info, err := Probe(ctx, dst)
+	trimInfo, err := Probe(ctx, trimmed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !info.HasCreationTime {
-		t.Fatal("trimmed clip lost creation_time")
+	if trimInfo.NBFrames <= decodedFrameCount(t, trimmed) {
+		t.Fatalf("the trimmed clip stores %d frames and decodes %d, i.e. it hides no pre-roll -- "+
+			"this test then only covers the untrimmed case twice", trimInfo.NBFrames, decodedFrameCount(t, trimmed))
 	}
-	shift := info.CreationTime.Sub(created).Seconds()
-	// mvhd creation_time is whole seconds, so the tag is truncated, never
-	// rounded; the truth here is an exact 3.000 so nothing is lost, and the
-	// competing wrong answers (4.4 -> 4, or 8) are a second or more away.
-	if math.Abs(shift-actual) > 0.51 {
-		t.Errorf("creation_time is shifted by %.3fs but the copy starts %.3fs into the content (requested %.3fs)\n"+
-			"0.000 means start_time was never added before probing; 4.000 means it was ignored on both sides and the\n"+
-			"probe answer rejected; 8.000 means the probe's absolute answer was never converted back",
-			shift, actual, start)
-	}
-}
 
-// TestProbeKeyframeAtOrBefore_FindsTheKeyframeFFmpegWillSnapTo exercises the
-// real ffprobe invocation, which everything else in this file replaces with a
-// stub. What it pins is the argv shape -- specifically that "T%+#1" reads one
-// packet AFTER a backward seek to T rather than the first packet of the file,
-// and that -skip_frame nokey is what makes that packet a keyframe.
-//
-// The expected answers come from the fixture's construction (10 fps, -g 30,
-// scene detection off => keyframes at exactly 0, 3 and 6 s), not from running
-// the function and writing down what it said.
-func TestProbeKeyframeAtOrBefore_FindsTheKeyframeFFmpegWillSnapTo(t *testing.T) {
-	requireFFmpeg(t)
-	ctx := context.Background()
-	dir := t.TempDir()
-	src := filepath.Join(dir, "longgop.mp4")
-	genLongGOPClip(t, src, 9, time.Date(2026, 7, 4, 21, 5, 53, 0, time.UTC))
-
-	tests := []struct {
+	for _, tt := range []struct {
 		name string
-		at   float64
-		want float64
+		path string
+		info Info
 	}{
-		{name: "mid-GOP snaps back", at: 4.4, want: 3},
-		{name: "the frame just before a keyframe snaps to the previous one", at: 2.9, want: 0},
-		{name: "exactly on a keyframe stays put", at: 3.0, want: 3},
-		{name: "the last GOP", at: 8.9, want: 6},
-		{name: "the very start", at: 0.1, want: 0},
-	}
-	for _, tt := range tests {
+		{"an ordinary source stores exactly what it presents", src, srcInfo},
+		{"a trimmed clip presents fewer frames than it stores", trimmed, trimInfo},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := probeKeyframeAtOrBefore(ctx, src, tt.at)
-			if err != nil {
-				t.Fatalf("probeKeyframeAtOrBefore(%v): %v", tt.at, err)
-			}
-			if math.Abs(got-tt.want) > 1e-6 {
-				t.Errorf("probeKeyframeAtOrBefore(%v) = %v, want %v", tt.at, got, tt.want)
+			if got, want := tt.info.PresentedFrames(), decodedFrameCount(t, tt.path); got != want {
+				t.Errorf("PresentedFrames() = %d but %s decodes %d frames (nb_frames %d, duration %.4f, fps %.4f)",
+					got, tt.path, want, tt.info.NBFrames, tt.info.Duration, tt.info.FPS)
 			}
 		})
 	}
+}
 
-	// A probe that cannot run must return an error, because that error is the
-	// whole fallback: TrimClip keeps its old tag rather than writing one built
-	// from a zero. Returning (0, nil) here would tag every trim with the
-	// source's own creation_time.
-	t.Run("a missing file errors rather than answering zero", func(t *testing.T) {
-		got, err := probeKeyframeAtOrBefore(ctx, filepath.Join(dir, "nope.mp4"), 4.4)
-		if err == nil {
-			t.Fatalf("probeKeyframeAtOrBefore on a missing file = %v, want an error", got)
-		}
-	})
+// TestTrimClip_PresentsFromExactlyTheRequestedStart is the end-to-end check
+// that a mid-GOP --start means the instant asked for, on footage where the
+// keyframe snap actually bites (keyframes 3 s apart, start 4.0 s).
+//
+// Where the output starts is recovered by locating its first frame in the
+// source BY CONTENT HASH, not by reading a timestamp: the timestamps are the
+// thing under test, and every wrong version of this code produces a clip whose
+// own metadata says it starts where it was asked to. Frame n of this 10 fps
+// constant-rate fixture is n/10 s of content in, so the answer is exact to
+// within half a frame.
+//
+// The failure this replaces put the first frame at 3.0 s -- a whole GOP early
+// -- and ran a GOP longer than requested, because -avoid_negative_ts make_zero
+// rewrote the copied pre-roll's negative timestamps and so cancelled the edit
+// list that hides it.
+//
+// The offset case covers a container whose own timeline does not start at zero
+// (an edit list or an offset muxer can put start_time anywhere). ffmpeg counts
+// an input -ss from start_time, so the requested 4.0 s is 4.0 s of CONTENT
+// there too, not 4.0 s of absolute timeline; a reading that confused the two
+// would land a full 5 s out.
+func TestTrimClip_PresentsFromExactlyTheRequestedStart(t *testing.T) {
+	requireFFmpeg(t)
+	ctx := context.Background()
 
-	// A position past the end of the stream clamps to the LAST keyframe (6 s
-	// in this 9 s fixture) rather than answering 0 or erroring: ffprobe's
-	// backward seek has nowhere further to go. Asserted because the two
-	// alternatives are both dangerous -- a 0 would tag a trim with the
-	// source's own creation_time, and it must not be a value past the end of
-	// the file either. TrimClip itself cannot reach this: it rejects a start
-	// at or past info.Duration before the probe runs.
-	t.Run("past the end clamps to the last keyframe, never to zero", func(t *testing.T) {
-		got, err := probeKeyframeAtOrBefore(ctx, src, 60)
-		if err != nil {
-			t.Fatalf("probeKeyframeAtOrBefore(60): %v", err)
-		}
-		if math.Abs(got-6) > 1e-6 {
-			t.Errorf("probeKeyframeAtOrBefore(60) = %v, want 6 (the fixture's last keyframe)", got)
-		}
-	})
+	// Mid-GOP for keyframes at 0/3/6 s, and a whole number of seconds so the
+	// creation_time assertion below is not fighting mvhd's one-second
+	// resolution at the same time.
+	const start = 4.0
+	created := time.Date(2026, 7, 4, 21, 5, 53, 0, time.UTC)
+
+	tests := []struct {
+		name          string
+		extra         []string
+		wantStartTime float64
+	}{
+		{name: "ordinary timeline"},
+		{
+			name: "container whose timeline starts at 5 s",
+			// -output_ts_offset shifts the whole timeline, so the container
+			// reports start_time 5 and its keyframes sit at absolute 5, 8, 11 s.
+			extra:         []string{"-output_ts_offset", "5", "-muxdelay", "0", "-muxpreload", "0"},
+			wantStartTime: 5,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := filepath.Join(dir, "longgop.mp4")
+			genLongGOPClip(t, src, 9, created, tt.extra...)
+
+			// Guard the fixture's defining property. This case exists ONLY
+			// because its timeline does not start at zero, and nothing in the
+			// package reads start_time any more (Info dropped the field with the
+			// keyframe probe), so if ffmpeg ever stops honouring
+			// -output_ts_offset this subtest silently becomes a second copy of
+			// the ordinary one and still passes. Asked of ffprobe directly for
+			// that reason.
+			if got := containerStartTime(t, src); math.Abs(got-tt.wantStartTime) > 0.05 {
+				t.Fatalf("fixture start_time = %.3f, want %.3f -- the case this subtest is for is not set up",
+					got, tt.wantStartTime)
+			}
+
+			dst := filepath.Join(dir, "trimmed.mp4")
+			if err := TrimClip(ctx, src, dst, start, 8); err != nil {
+				t.Fatalf("TrimClip: %v", err)
+			}
+
+			// Guard the fixture: the copy must have snapped back and carried
+			// pre-roll, or there is no edit list and this proves nothing. If
+			// libx264 ever stops honouring -g 30 the assertions below would all
+			// pass while testing nothing.
+			info, err := Probe(ctx, dst)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded := decodedFrameCount(t, dst)
+			if info.NBFrames <= decoded {
+				t.Fatalf("the trimmed clip stores %d frames and decodes %d, i.e. it carries no hidden pre-roll: "+
+					"either the fixture stopped being long-GOP (nothing below would then be exercised) or the copy "+
+					"is presenting its pre-roll rather than hiding it, which is the failure everything below is about",
+					info.NBFrames, decoded)
+			}
+
+			if got := contentStartOf(t, src, dst); math.Abs(got-start) > 0.05 {
+				t.Errorf("the output's first frame is %.3fs into the source, want %.3fs\n"+
+					"3.000 is the keyframe the copy physically begins at, i.e. the pre-roll is being presented "+
+					"instead of hidden behind the edit list", got, start)
+			}
+			// 8 - 4 = 4 s requested. A presented pre-roll would make this ~5.
+			if math.Abs(info.Duration-4) > 0.15 {
+				t.Errorf("trimmed duration %.3fs, want ~4.0 (the requested span)", info.Duration)
+			}
+			if !info.HasCreationTime {
+				t.Fatal("trimmed clip lost creation_time")
+			}
+			// The tag names where the clip PRESENTS from, so it is the request
+			// itself: 21:05:53 + 4 s. mvhd stores whole seconds and the muxer
+			// truncates, which costs nothing at a whole-second start. The
+			// competing wrong answer -- the 3 s keyframe -- is a second away.
+			if shift := info.CreationTime.Sub(created).Seconds(); math.Abs(shift-start) > 0.51 {
+				t.Errorf("creation_time is shifted by %.3fs, want %.3fs (the requested start)\n"+
+					"3.000 means the tag was written from the keyframe the copy landed on, which is not where it plays from",
+					shift, start)
+			}
+		})
+	}
 }

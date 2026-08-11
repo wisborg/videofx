@@ -189,6 +189,11 @@ func (t *TelemetryHUD) Name() string                     { return "telemetry-hud
 func (t *TelemetryHUD) FilenameSlug() string             { return "hud" }
 func (t *TelemetryHUD) ValidateStrength(_ float64) error { return nil }
 
+// The gauges are composited onto decoded frames and the result is encoded, so
+// the output is new video rather than the source's stream -- the difference
+// from the sibling telemetry effect, which muxes losslessly. See Reencoder.
+func (t *TelemetryHUD) ReencodesVideo() {}
+
 func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	if t.FitPath == "" {
 		return fmt.Errorf("--fit is required (path to a Garmin FIT activity file)")
@@ -237,9 +242,24 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 			sync.CoverageStart.Format(time.RFC3339), sync.CoverageEnd.Format(time.RFC3339))
 	}
 
-	frameCount := info.NBFrames
+	// PresentedFrames, not NBFrames: the HUD is composited over frames the
+	// source DECODES to, and on a trimmed clip those are fewer than the
+	// container stores. TrimClip leaves up to a GOP of pre-roll in the file
+	// hidden behind an edit list (see vidio.trimArgs), so nb_frames counts
+	// frames no overlay will ever meet -- measured 600 stored against 480
+	// decoded on a 4K clip trimmed to 8 s, which had this loop render 2 s of
+	// HUD past the end of the video and, because the overlay's framesync
+	// repeats the input that ended first, stretch the output to 10.010 s.
+	//
+	// The fallback below is for a container that records no frame count at all
+	// (MKV, MPEG-TS, WebM), which PresentedFrames answers 0 for. It ROUNDS,
+	// matching what PresentedFrames does with the same product: at 59.94 fps a
+	// whole number of frames comes back as x.99999, and truncating drops the
+	// last frame of every such clip -- the one direction this cannot notice
+	// afterwards, since a short HUD leaves the tail frozen rather than failing.
+	frameCount := info.PresentedFrames()
 	if frameCount <= 0 {
-		frameCount = int(info.Duration * info.FPS)
+		frameCount = int(math.Round(info.Duration * info.FPS))
 	}
 	if frameCount <= 0 {
 		return fmt.Errorf("could not determine %s's frame count", in.SourcePath)

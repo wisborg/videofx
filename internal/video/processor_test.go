@@ -1,6 +1,7 @@
 package video
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math"
@@ -14,6 +15,7 @@ import (
 	"testing"
 
 	"videofx/internal/effects"
+	"videofx/internal/logging"
 	"videofx/internal/vidio"
 )
 
@@ -714,6 +716,291 @@ func TestProcessOne_TrimsBeforeTheEffectsRun(t *testing.T) {
 				t.Errorf("output %q is not named after the original input", results[0].OutputPath)
 			}
 		})
+	}
+}
+
+// firstFrameHash is a checksum of the first frame path presents, via ffmpeg's
+// framemd5 muxer. Two clips share it exactly when they present the same
+// picture, which is how a trimmed clip's opening frame is located in its source
+// without consulting a timestamp -- the timestamps being what a container swap
+// silently changes.
+func firstFrameHash(t *testing.T, path string, extra ...string) string {
+	t.Helper()
+	args := append([]string{"-hide_banner", "-loglevel", "error", "-i", path, "-map", "0:v:0"}, extra...)
+	out, err := exec.Command("ffmpeg", append(args, "-f", "framemd5", "-")...).Output()
+	if err != nil {
+		t.Fatalf("framemd5 of %s: %v", path, err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(line, ",")
+		return strings.TrimSpace(fields[len(fields)-1])
+	}
+	t.Fatalf("no frames in %s", path)
+	return ""
+}
+
+// intermediateObservingEffect records the container extension of the clip it
+// was handed and the checksum of that clip's first frame, MEASURED INSIDE
+// Apply, because processOne deletes the trim's temp directory as it returns.
+type intermediateObservingEffect struct {
+	mu         sync.Mutex
+	ext        string
+	firstFrame string
+	t          *testing.T
+}
+
+func (e *intermediateObservingEffect) Name() string                     { return "intermediateobserver" }
+func (e *intermediateObservingEffect) FilenameSlug() string             { return "intermediateobserver" }
+func (e *intermediateObservingEffect) ValidateStrength(_ float64) error { return nil }
+func (e *intermediateObservingEffect) Apply(_ context.Context, in effects.Input) error {
+	hash := firstFrameHash(e.t, in.SourcePath, "-frames:v", "1")
+	e.mu.Lock()
+	e.ext, e.firstFrame = filepath.Ext(in.SourcePath), hash
+	e.mu.Unlock()
+	return os.WriteFile(in.OutputPath, []byte("ok"), 0o644)
+}
+
+// TestProcessOne_TrimsIntoAnMP4IntermediateWhateverTheSourceIs covers the one
+// piece of the exact-start guarantee that lives outside vidio: which container
+// the trim lands in.
+//
+// An exact --start is implemented with an edit list -- the copy begins at the
+// preceding keyframe and the container is told to hide everything before the
+// requested instant. Matroska cannot express that, so ffmpeg falls back to
+// shifting the timestamps and the pre-roll is PRESENTED. Measured on this
+// fixture (2 s GOP, --start 2.5): trimmed into .mkv the effect is handed a clip
+// that opens on source frame 20, half a second early, while its creation_time
+// still names 2.5 s; trimmed into .mp4 it opens on frame 25, the frame asked
+// for.
+//
+// So the assertion is about the PICTURE, not the extension: the file the effect
+// receives must open on the frame the user asked for. The extension check below
+// it only explains a failure, it does not define one.
+//
+// Matroska is the fixture because it is the common non-MP4 input and because
+// internal/naming preserves the source's extension, so .mkv in / .mkv out is a
+// path a user can really take. The remux is not free of risk -- an audio codec
+// with no MP4 tag makes it fail -- which is covered where that decision lives,
+// in vidio; here the audio is AAC, which both containers hold.
+func TestProcessOne_TrimsIntoAnMP4IntermediateWhateverTheSourceIs(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "clip.mkv")
+	// 6 s at 10 fps, keyframes every 2 s, no b-frames: --start 2.5 is mid-GOP,
+	// so the copy demonstrably snaps back and there is pre-roll to hide.
+	if out, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc=size=64x48:rate=10:duration=6",
+		"-f", "lavfi", "-i", "sine=frequency=440:duration=6",
+		"-c:v", "libx264", "-g", "20", "-keyint_min", "20", "-sc_threshold", "0", "-bf", "0",
+		"-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", "-y", src,
+	).CombinedOutput(); err != nil {
+		t.Fatalf("generating the matroska source: %v\n%s", err, out)
+	}
+
+	obs := &intermediateObservingEffect{t: t}
+	results := Run(context.Background(), []Job{{
+		SourcePath:   src,
+		StartSeconds: 2.5,
+		EndSeconds:   5.5,
+	}}, ProcessorConfig{
+		Effects:   []effects.Effect{obs},
+		OutputDir: dir,
+	})
+	if results[0].Err != nil {
+		t.Fatalf("Run: %v", results[0].Err)
+	}
+	if obs.firstFrame == "" {
+		t.Fatal("the effect never ran")
+	}
+
+	want := firstFrameHash(t, src, "-ss", "2.5", "-frames:v", "1")
+	early := firstFrameHash(t, src, "-ss", "2.0", "-frames:v", "1")
+	if want == early {
+		t.Fatal("the fixture's frames at 2.0 s and 2.5 s are identical, so this cannot tell an early start from an exact one")
+	}
+	if obs.firstFrame != want {
+		which := "some other frame"
+		if obs.firstFrame == early {
+			which = "the 2.0 s keyframe, i.e. a GOP early -- the pre-roll is being presented"
+		}
+		t.Errorf("the effect was handed a clip opening on %s, want the frame at the requested 2.5 s\n"+
+			"the trim landed in a %q intermediate; only the MP4 family can hide the pre-roll behind an edit list",
+			which, obs.ext)
+	}
+	if obs.ext != ".mp4" {
+		t.Errorf("the trim intermediate is %q, want \".mp4\" -- the source's own container was used, "+
+			"which is exactly what an exact --start cannot rely on", obs.ext)
+	}
+}
+
+// copyingEffect stands in for rotate/telemetry: it implements Effect and
+// nothing else, which is how an effect says "I copy the source's stream
+// through" (see effects.Reencoder on why silence means that).
+type copyingEffect struct{}
+
+func (e *copyingEffect) Name() string                     { return "copier" }
+func (e *copyingEffect) FilenameSlug() string             { return "copied" }
+func (e *copyingEffect) ValidateStrength(_ float64) error { return nil }
+func (e *copyingEffect) Apply(_ context.Context, in effects.Input) error {
+	return os.WriteFile(in.OutputPath, []byte("ok"), 0o644)
+}
+
+// reencodingEffect stands in for the stabilizers and telemetry-hud: same, plus
+// the marker that says the output is newly encoded video.
+type reencodingEffect struct{ copyingEffect }
+
+func (e *reencodingEffect) Name() string         { return "reencoder" }
+func (e *reencodingEffect) FilenameSlug() string { return "reencoded" }
+func (e *reencodingEffect) ReencodesVideo()      {}
+
+// TestProcessOne_WarnsOnlyWhenAStreamCopyWouldLoseTheExactStart covers the
+// warning that stands in for a fix this deliberately does not make.
+//
+// The trim is exact, and the output's container is the user's choice, so the
+// combination "trimmed from a real start + output that cannot carry an edit list
+// + an effect that copies the video through" delivers a file whose pictures
+// begin up to a GOP before the requested start while its creation_time names
+// the start. Nothing else reports that: the run succeeds, the file plays.
+//
+// Every row below is a case where one of the three conditions is absent, which
+// is the point -- a warning that fires whenever a trim happens would be noise,
+// and the three "no" rows are each a real, common command. The end-only row is
+// the subtle one: with no --start there is no pre-roll to hide (measured: an
+// .mkv trimmed to [0,3) opens on frame 0 and runs 3.0 s), so the container's
+// inability to carry an edit list costs nothing.
+//
+// The chain rows pin that it is the FIRST effect that decides. A re-encoder in
+// front strips the pre-roll for everything behind it; a copier in front exposes
+// it, and a re-encoder behind then faithfully encodes the exposed frames.
+func TestProcessOne_WarnsOnlyWhenAStreamCopyWouldLoseTheExactStart(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	dir := t.TempDir()
+	// One fixture per container, 6 s at 10 fps with keyframes every 2 s.
+	fixtures := map[string]string{}
+	for _, ext := range []string{".mkv", ".mp4"} {
+		path := filepath.Join(dir, "clip"+ext)
+		if out, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+			"-f", "lavfi", "-i", "testsrc=size=64x48:rate=10:duration=6",
+			"-c:v", "libx264", "-g", "20", "-keyint_min", "20", "-sc_threshold", "0", "-bf", "0",
+			"-pix_fmt", "yuv420p", "-y", path,
+		).CombinedOutput(); err != nil {
+			t.Fatalf("generating %s: %v\n%s", path, err, out)
+		}
+		fixtures[ext] = path
+	}
+
+	tests := []struct {
+		name     string
+		ext      string
+		start    float64
+		end      float64
+		chain    []effects.Effect
+		wantWarn bool
+		why      string
+	}{{
+		name: "matroska output, stream copy, real start", ext: ".mkv", start: 2.5, end: 5.5,
+		chain: []effects.Effect{&copyingEffect{}}, wantWarn: true,
+		why: "the delivered file opens a GOP early with a creation_time that says otherwise",
+	}, {
+		name: "mp4 output keeps the edit list", ext: ".mp4", start: 2.5, end: 5.5,
+		chain: []effects.Effect{&copyingEffect{}}, wantWarn: false,
+		why: "the ordinary case; warning here would warn on almost every run",
+	}, {
+		name: "no trim at all", ext: ".mkv", start: 0, end: 0,
+		chain: []effects.Effect{&copyingEffect{}}, wantWarn: false,
+		why: "nothing was cut, so there is no pre-roll and no promise to break",
+	}, {
+		name: "end only", ext: ".mkv", start: 0, end: 3,
+		chain: []effects.Effect{&copyingEffect{}}, wantWarn: false,
+		why: "a trim from the beginning starts on a keyframe: no pre-roll to hide",
+	}, {
+		name: "matroska output, re-encoding effect", ext: ".mkv", start: 2.5, end: 5.5,
+		chain: []effects.Effect{&reencodingEffect{}}, wantWarn: false,
+		why: "measured correct: the re-encode emits the presented frames and the tag matches",
+	}, {
+		name: "chain, re-encoder first", ext: ".mkv", start: 2.5, end: 5.5,
+		chain: []effects.Effect{&reencodingEffect{}, &copyingEffect{}}, wantWarn: false,
+		why: "the first effect already stripped the pre-roll; what follows copies clean frames",
+	}, {
+		name: "chain, copier first", ext: ".mkv", start: 2.5, end: 5.5,
+		chain: []effects.Effect{&copyingEffect{}, &reencodingEffect{}}, wantWarn: true,
+		why: "the pre-roll is exposed at step 0, and a re-encoder behind it encodes those frames too",
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			results := Run(context.Background(), []Job{{
+				SourcePath:   fixtures[tt.ext],
+				StartSeconds: tt.start,
+				EndSeconds:   tt.end,
+			}}, ProcessorConfig{
+				Effects:   tt.chain,
+				OutputDir: t.TempDir(),
+				Log:       logging.New(&buf, logging.LevelWarn),
+			})
+			if results[0].Err != nil {
+				t.Fatalf("Run: %v", results[0].Err)
+			}
+
+			got := strings.Contains(buf.String(), "will not be exact in the output")
+			if got != tt.wantWarn {
+				t.Errorf("warned = %v, want %v -- %s\nlog:\n%s", got, tt.wantWarn, tt.why, buf.String())
+			}
+			if !tt.wantWarn {
+				return
+			}
+			// A warning nobody can act on is not worth firing. It has to name
+			// the container that cannot hold the edit list, the tag that
+			// disagrees with the pictures, and a remedy that is actually a
+			// remedy -- which means saying FIRST (appending a re-encoding effect
+			// instead produces the "chain, copier first" row above, still broken)
+			// and not stopping there, since re-encoding leaves the audio's own
+			// pre-roll exposed and only an MP4/MOV output fixes the whole file.
+			for _, want := range []string{tt.ext, "creation_time", "FIRST in the chain", "MP4/MOV output fixes the file"} {
+				if !strings.Contains(buf.String(), want) {
+					t.Errorf("the warning does not mention %q:\n%s", want, buf.String())
+				}
+			}
+		})
+	}
+}
+
+// TestReencodingEffectNames_ListsTheWayOutFromTheRegistry checks the half of
+// the warning that tells the user what to do instead.
+//
+// It reads the real registry rather than a fixture, because the failure it
+// guards against is a real effect drifting out of the list: an effect that
+// re-encodes but never implements Reencoder is missing from the advice AND
+// warns spuriously, and nothing else would notice either.
+func TestReencodingEffectNames_ListsTheWayOutFromTheRegistry(t *testing.T) {
+	// Split rather than substring-match: "telemetry" is a prefix of
+	// "telemetry-hud", and a Contains check would report the lossless effect as
+	// present whenever the re-encoding one is.
+	listed := map[string]bool{}
+	for _, name := range strings.Split(reencodingEffectNames(), ", ") {
+		listed[name] = true
+	}
+	for _, name := range []string{"gocv-stabilizer", "warp-stabilizer", "telemetry-hud"} {
+		if !listed[name] {
+			t.Errorf("the way out is %v, missing %q -- either it stopped implementing effects.Reencoder "+
+				"(so it now warns spuriously too) or it left the registry", listed, name)
+		}
+	}
+	// The lossless ones must NOT be advertised as a way out; suggesting rotate
+	// to someone whose rotate output is misaligned is worse than saying nothing.
+	for _, name := range []string{"rotate", "telemetry"} {
+		if listed[name] {
+			t.Errorf("the way out is %v, which offers %q -- that effect copies the stream through and has "+
+				"the very problem being warned about", listed, name)
+		}
 	}
 }
 

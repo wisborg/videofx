@@ -1,8 +1,10 @@
 package vidio
 
 import (
+	"context"
 	"fmt"
-	"math"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -308,56 +310,116 @@ func TestParseProbeJSON_NoRotation(t *testing.T) {
 	}
 }
 
-// TestParseProbeJSON_StartTime covers the container's start_time, which
-// TrimClip's keyframe probe converts through: ffmpeg counts an input -ss from
-// start_time while ffprobe's read_intervals positions and pts_time values are
-// absolute, so a clip with a 5 s start_time gets a creation_time 5 s wrong if
-// this field is not read.
+// TestInfo_PresentedFrames_PrefersTheSmallerOfTheStoredCountAndTheDuration
+// covers the arithmetic that turns two disagreeing container claims into the
+// number of frames a decode will actually emit.
 //
-// The cases that carry the test are the ones with a NON-ZERO start_time. Every
-// degradation here answers 0, and 0 is also the zero value of the field, so a
-// version of parseProbeJSON that never looked at start_time at all -- a
-// misspelt json tag, a deleted block -- would satisfy the absent/N/A/garbage
-// rows on its own. Negative is included because it is real (an MP4 edit list
-// or audio priming can put the first sample before zero) and because it is the
-// one value a `if v > 0` guard bolted on later would silently drop.
-func TestParseProbeJSON_StartTime(t *testing.T) {
+// Every expected value below is derived from the fixture's own numbers, not
+// from running the method: an edit list hides stored frames, so what decodes is
+// duration*fps; nothing hides frames when the two agree, so it is the exact
+// integer nb_frames; and a duration LONGER than the stored frames means
+// something other than the video stream set it (a longer audio track, an
+// initial empty edit), where the stored count is still the video's own.
+//
+// The trim row is the measured one: a 4K 59.94 fps clip trimmed to 8 s stores
+// 600 frames -- 2 s of pre-roll behind an edit list -- and decodes 480. The
+// 8.010 s duration it reports gives 480.1, which is why this rounds.
+func TestInfo_PresentedFrames_PrefersTheSmallerOfTheStoredCountAndTheDuration(t *testing.T) {
+	const fps30 = 30.0
 	tests := []struct {
-		name   string
-		format string
-		want   float64
-	}{
-		{name: "a positive start_time is read", format: `"duration": "9.0", "start_time": "5.000000"`, want: 5},
-		{name: "a negative start_time is kept", format: `"duration": "9.0", "start_time": "-0.023000"`, want: -0.023},
-		{name: "a zero start_time", format: `"duration": "9.0", "start_time": "0.000000"`, want: 0},
-		{name: "absent means the timeline starts where it starts", format: `"duration": "9.0"`, want: 0},
-		{name: "N/A is not an error", format: `"duration": "9.0", "start_time": "N/A"`, want: 0},
-		{name: "garbage is not an error", format: `"duration": "9.0", "start_time": "whenever"`, want: 0},
-		{name: "empty is not an error", format: `"duration": "9.0", "start_time": ""`, want: 0},
-	}
+		name string
+		info Info
+		want int
+	}{{
+		name: "no edit list: the exact stored count, not a duration estimate",
+		info: Info{NBFrames: 300, Duration: 10, FPS: fps30},
+		want: 300,
+	}, {
+		name: "a trimmed clip decodes only what its edit list presents",
+		info: Info{NBFrames: 600, Duration: 8.010, FPS: 60000.0 / 1001.0},
+		want: 480,
+	}, {
+		name: "a duration a hair under the stored count is rounded, never truncated",
+		// 634 frames at 59.94: the duration ffprobe prints multiplies back to
+		// 633.99999..., and truncating there would drop a real frame.
+		info: Info{NBFrames: 634, Duration: 10.577233, FPS: 60000.0 / 1001.0},
+		want: 634,
+	}, {
+		name: "a duration set by a longer audio stream does not inflate the count",
+		info: Info{NBFrames: 300, Duration: 12, FPS: fps30},
+		want: 300,
+	}, {
+		name: "an unknown frame count stays unknown rather than becoming an estimate",
+		info: Info{NBFrames: 0, Duration: 10, FPS: fps30},
+		want: 0,
+	}, {
+		// This row is what makes the NBFrames <= 0 guard testable at all. The
+		// zero row above does not: with the guard deleted, 0 still falls
+		// through to "return i.NBFrames" and answers 0, because a positive
+		// duration estimate is never smaller than zero. Only a NEGATIVE count
+		// -- which nothing stops ffprobe printing and strconv.Atoi accepting --
+		// separates the two, and it must come back as the documented "unknown"
+		// sentinel rather than propagating a negative into callers that size
+		// render loops from it.
+		name: "a nonsense negative frame count is normalized to unknown, not passed on",
+		info: Info{NBFrames: -1, Duration: 10, FPS: fps30},
+		want: 0,
+	}, {
+		name: "an unknown duration cannot clamp the stored count to zero",
+		info: Info{NBFrames: 300, Duration: 0, FPS: fps30},
+		want: 300,
+	}, {
+		name: "an unusable fps cannot clamp the stored count to zero",
+		info: Info{NBFrames: 300, Duration: 10, FPS: 0},
+		want: 300,
+	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			data := []byte(`{
-				"streams": [
-					{"codec_type": "video", "width": 640, "height": 480, "r_frame_rate": "25/1", "avg_frame_rate": "25/1"}
-				],
-				"format": {` + tt.format + `}
-			}`)
-			info, err := parseProbeJSON(data)
-			// An unreadable start_time must never fail the probe: nothing but
-			// the trim tag reads it, and the stabilizer must still run.
-			if err != nil {
-				t.Fatalf("parseProbeJSON returned error: %v", err)
-			}
-			if math.Abs(info.StartTime-tt.want) > 1e-9 {
-				t.Errorf("StartTime = %v, want %v", info.StartTime, tt.want)
-			}
-			// The rest of the format object must still have been read, so a
-			// start_time case cannot pass by parsing nothing.
-			if info.Duration != 9.0 {
-				t.Errorf("Duration = %v, want 9.0", info.Duration)
+			if got := tt.info.PresentedFrames(); got != tt.want {
+				t.Errorf("PresentedFrames() = %d, want %d (nb_frames %d, duration %.6f, fps %.4f)",
+					got, tt.want, tt.info.NBFrames, tt.info.Duration, tt.info.FPS)
 			}
 		})
+	}
+}
+
+// TestProbe_AnUnreadableFileErrorsAndCarriesFFprobesOwnComplaint covers
+// runFFprobeJSON's failure branch: an ffprobe that exits non-zero must produce
+// an error that names the path AND repeats what ffprobe said, rather than a
+// bare "exit status 1".
+//
+// It is here because the only test that used to exercise that branch went out
+// with the keyframe probe it was written against. The branch is easy to break
+// invisibly in either direction: dropping the stderr append leaves an error
+// nobody can act on, and swallowing the exit status entirely would hand
+// parseProbeJSON the empty-JSON body ffprobe still prints on failure -- which
+// fails too, but as "no video stream", blaming the file's contents for a file
+// that is not there.
+//
+// A missing file is used rather than a corrupt one because it is the failure
+// with a stable, version-independent message. The assertion is on the shape --
+// the path, and some text beyond the exit status -- not on ffprobe's exact
+// wording.
+func TestProbe_AnUnreadableFileErrorsAndCarriesFFprobesOwnComplaint(t *testing.T) {
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not on PATH")
+	}
+	missing := filepath.Join(t.TempDir(), "nope.mp4")
+
+	info, err := Probe(context.Background(), missing)
+	if err == nil {
+		t.Fatalf("Probe of a nonexistent file returned %+v and no error", info)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, missing) {
+		t.Errorf("error %q does not name the file it failed on (%s)", msg, missing)
+	}
+	// ffprobe's own line is "<path>: No such file or directory". Whatever the
+	// wording, it is not the exit status, and it is what tells a user which of
+	// the many ways a probe can fail happened.
+	if !strings.Contains(msg, "No such file") {
+		t.Errorf("error %q carries no ffprobe stderr; only the exit status survived, "+
+			"so every ffprobe failure now reads the same", msg)
 	}
 }
 

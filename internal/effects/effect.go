@@ -165,6 +165,33 @@ type AvailabilityChecker interface {
 	CheckAvailable() error
 }
 
+// Reencoder is implemented by effects that DECODE their input and encode a new
+// video stream, as opposed to copying the source's stream through untouched
+// (rotate, telemetry). It carries no data: implementing it IS the statement.
+//
+// It exists for one caller, internal/video's trim step, and for one property
+// that is invisible in the Effect interface: whether the output inherits its
+// input's container-level structure. A --start trim hides the pre-roll before
+// the requested instant behind an MP4 edit list, which a stream copy into a
+// container that cannot express one (Matroska, WebM) silently un-hides -- while
+// creation_time keeps naming the requested instant, so the pictures and the
+// clock disagree. An effect that re-encodes cannot have that problem: it emits
+// the frames it decoded, which are the presented ones.
+//
+// # The polarity is the safe way round, deliberately
+//
+// NOT implementing this means "assume a stream copy", i.e. assume the case that
+// needs the warning. A new effect that re-encodes and forgets to say so
+// produces a warning it did not need -- annoying, visible, fixed in one line. A
+// marker on the copying effects instead would mean a new lossless effect that
+// forgets it ships the silent misalignment, which is the failure this whole
+// area exists to remove. Same rule as everywhere else in this tree: the
+// unstated default has to be the one that cannot hurt anybody quietly.
+type Reencoder interface {
+	// ReencodesVideo is a marker. It is never called for its value.
+	ReencodesVideo()
+}
+
 // ValidateStrength: it requires strength to be in [0.0, 1.0].
 func ValidateUnitRange(strength float64) error {
 	if strength < 0.0 || strength > 1.0 {

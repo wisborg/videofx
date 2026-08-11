@@ -46,8 +46,10 @@ type MotionSeries struct {
 	// Transition spans a consecutive pair of frames.
 	FrameCount int `json:"frameCount"`
 
-	// SourceFrames is how many frames the container claimed to hold when
-	// this series was analyzed, or 0 when it did not say. It exists to be
+	// SourceFrames is how many frames the container said would decode when
+	// this series was analyzed (vidio.Info.PresentedFrames -- which is not
+	// nb_frames for a clip whose container hides a pre-roll behind an edit
+	// list), or 0 when it did not say. It exists to be
 	// compared against FrameCount: a decode that stops early because the
 	// source is truncated does not fail, it succeeds and returns fewer
 	// frames (measured: ffmpeg emits 186 of 300 frames from a truncated
@@ -150,6 +152,18 @@ func (s *MotionSeries) hasMesh() bool {
 // stale one is simply overwritten rather than migrated.
 var sidecarMagic = [6]byte{'V', 'F', 'X', 'M', 'O', 'T'}
 
+// sidecarVersion is the format version byte ReadSidecar checks before it parses
+// anything, and it guards the LAYOUT: what fields exist, in what order, at what
+// width. Every bump so far has moved that layout, and a mismatch is a hard
+// error ("delete it to re-analyze"), so bumping invalidates every cached
+// analysis a user holds -- for a 4K clip, minutes of work each.
+//
+// That is the test to apply. A change to a value a field CARRIES is not a
+// layout change: an old sidecar still parses, and what it says is what that
+// analysis measured. SourceFrames changing from nb_frames to
+// vidio.Info.PresentedFrames (see Analyze) is exactly that case, and it did not
+// bump this -- the field is advisory, it steers no rendering, and it only
+// differs at all for a source whose container hides frames behind an edit list.
 const sidecarVersion uint8 = 4
 
 // maxSidecarHeaderLen caps the declared JSON header length ReadSidecar will

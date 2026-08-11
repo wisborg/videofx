@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -30,27 +31,19 @@ type Info struct {
 	// r_frame_rate, falling back to avg_frame_rate for the rare stream
 	// that reports r_frame_rate as 0/0).
 	FPS float64
-	// NBFrames is ffprobe's reported frame count for the video stream.
+	// NBFrames is ffprobe's reported frame count for the video stream: how
+	// many frames are STORED in it, which is not always how many a decoder
+	// presents -- see PresentedFrames, which most callers want instead.
 	// It is 0 when ffprobe cannot determine it up front from the
 	// container's metadata (some containers only know this after a full
 	// decode, which Probe deliberately does not do — it should stay
 	// cheap). Callers that need an exact count regardless should treat 0
 	// as "unknown" and count frames themselves while decoding.
 	NBFrames int
-	// Duration is the container's reported duration in seconds.
+	// Duration is the container's reported duration in seconds. For an MP4
+	// with an edit list this is the PRESENTED duration, i.e. what a player
+	// shows and what a decode produces, not the span of everything stored.
 	Duration float64
-	// StartTime is the container's reported start_time in seconds -- the
-	// timestamp of the first sample on the file's own timeline, which is not
-	// always 0 (an MP4 edit list, or a muxer that offset the timestamps, can
-	// put it elsewhere). It is 0 when the container does not report one.
-	//
-	// It matters because ffmpeg and ffprobe disagree about which end of it
-	// they count from. An INPUT -ss is measured from start_time, while
-	// ffprobe's -read_intervals positions and the pts_time values it prints
-	// are absolute. Anything that has to predict where an -ss will land --
-	// TrimClip's keyframe probe -- has to convert between the two, and a
-	// clip with a 5 s start_time gets the answer 5 s wrong if it does not.
-	StartTime float64
 	// HasAudio reports whether the source has at least one audio stream.
 	// Encoder uses this indirectly (via EncoderConfig.SourcePath)
 	// when deciding whether to map an audio track through.
@@ -84,6 +77,69 @@ type Info struct {
 	// so a later phase can warn the user instead of silently trusting an
 	// ambiguous timestamp. Meaningless when HasCreationTime is false.
 	CreationTimeNaive bool
+}
+
+// PresentedFrames is how many frames a decode of this source will emit, or 0
+// when the container does not say (the same "unknown" convention as NBFrames,
+// and callers must handle it the same way).
+//
+// It is not always NBFrames. nb_frames counts the samples STORED in the
+// stream, while an MP4 edit list can hide a prefix of them: TrimClip's output
+// is exactly that -- a stream copy has to begin at a keyframe, so up to a GOP
+// of pre-roll is present in the file and hidden behind an edit list so the clip
+// presents from the requested instant. Measured on 4K 60fps footage trimmed at
+// --start 2: 600 frames stored, 480 decoded. A caller that sized a render loop
+// from nb_frames there produced 2 s of extra output.
+//
+// The container's duration IS post-edit-list, so duration*fps is the presented
+// count. This takes the SMALLER of the two rather than simply believing the
+// duration, for two reasons: nb_frames is the exact integer when the two agree
+// (which is every ordinary file -- verified equal to within 1e-4 frames across
+// this project's 4K test footage), and duration can legitimately exceed the
+// video when a longer audio stream sets the container's duration or an initial
+// empty edit delays the video.
+//
+// Rounding, not truncation, on purpose: one real file measured duration*fps at
+// a hair BELOW its integer frame count, where truncation would have silently
+// dropped its last frame.
+//
+// # The residual, and who else it lands on
+//
+// What this cannot do is be exact for a B-FRAME stream behind an edit list.
+// ffmpeg writes the edit from the decode-order timestamps but drops frames by
+// presentation order, and the gap between the two is the pts/dts spread at the
+// seek point -- which depends on the b-pyramid structure and where the GOP
+// boundary fell, not on any constant this could subtract.
+//
+// Measured on synthetic libx264 trims (2 s GOP, mid-GOP start): 0 frames with
+// -bf 0; 2-3 with -bf 2..4; 4 at -bf 16; and 8 -- the worst seen -- at -bf 8,
+// 30 fps. Always an OVERSHOOT, never short, and it moves the END: the first
+// presented frame is the requested instant in every case measured, b-frames or
+// not. Every clip TrimClip copies from a b-frame-free source (which this
+// project's action-camera footage is) lands on the exact answer.
+//
+// Chasing the rest would mean decoding the whole clip to count it, against a
+// GOP-sized error it already removes -- so it is documented instead. Two
+// consumers have to know:
+//
+//   - internal/effects' telemetry-hud sizes its render loop from this. An
+//     overshoot draws HUD frames past the end of the video, which the overlay's
+//     framesync answers by repeating the last video frame: a b-frame clip can
+//     therefore still come out a few frames long.
+//   - internal/effects.warnIfShortAnalysis compares this (through
+//     MotionSeries.SourceFrames) against the frames an analysis decoded, and
+//     warns above a tolerance of 2. An 8-frame overshoot is above it, so a
+//     healthy trimmed b-frame clip can still draw the "may be truncated"
+//     warning -- smaller than the GOP-sized one it used to draw, but not gone.
+//     That constant and this residual now bound each other; see its doc.
+func (i Info) PresentedFrames() int {
+	if i.NBFrames <= 0 {
+		return 0
+	}
+	if fromDuration := int(math.Round(i.Duration * i.FPS)); fromDuration > 0 && fromDuration < i.NBFrames {
+		return fromDuration
+	}
+	return i.NBFrames
 }
 
 // DisplayWidth is the on-screen width after any display rotation is applied
@@ -138,9 +194,8 @@ type ffprobeSideData struct {
 }
 
 type ffprobeFormat struct {
-	Duration  string            `json:"duration"`
-	StartTime string            `json:"start_time"`
-	Tags      ffprobeFormatTags `json:"tags"`
+	Duration string            `json:"duration"`
+	Tags     ffprobeFormatTags `json:"tags"`
 }
 
 // ffprobeFormatTags mirrors the subset of ffprobe's format.tags object
@@ -165,54 +220,45 @@ type ffprobeFormatTags struct {
 // why it lives in Probe rather than at each allocation.
 const maxProbeDimension = 16384
 
-// runFFprobeJSON runs ffprobe over path with args and returns its stdout.
+// Probe runs ffprobe against path and extracts the video (and audio
+// presence) information a Decoder/Encoder needs to size buffers and
+// build ffmpeg command lines. It is a single cheap subprocess call —
+// ffprobe reads container metadata only, it does not decode frames.
 //
-// It is to ffprobe what newFFmpegCmd is to ffmpeg: the one place that decides
-// what every invocation in this package has in common. That is three things,
-// each of which was previously duplicated per call site and each of which is
-// silently wrong if a new call site forgets it -- "-v error" (so stdout is
-// parseable JSON and stderr is signal rather than a banner), the JSON print
-// format itself, and PositionalPath on the trailing filename, since ffprobe
-// takes its input as a bare positional and would read "-y.mp4" as an option.
-// args is what actually differs: which sections and entries to show.
+// Three details of the invocation are easy to get wrong and silently wrong when
+// got wrong, so they are spelled out here rather than left to a reader's
+// assumption: -v error keeps stdout parseable JSON with stderr as signal rather
+// than a banner; -print_format json is what makes it JSON at all; and
+// PositionalPath guards the trailing filename, since ffprobe takes its input as
+// a bare positional and would read "-y.mp4" as an option.
 //
-// The caller wraps the returned error with its own "vidio: <what> of <path>"
-// context, because "probing" and "probing the keyframe before 4.400s" are
-// different failures to a reader and only the caller knows which it is.
-// ffprobe's own stderr is appended here, where the pipe is: the bounded
-// stderrCapture rather than a plain buffer, so a pathologically chatty failure
-// cannot put an unbounded string into an error value. Near-theoretical under
-// -v error -- which is the argument for fixing it in the shared helper rather
-// than reasoning about it per call site.
-func runFFprobeJSON(ctx context.Context, path string, args ...string) ([]byte, error) {
-	argv := append([]string{"-v", "error", "-print_format", "json"}, args...)
-	argv = append(argv, PositionalPath(path))
-
-	cmd := exec.CommandContext(ctx, "ffprobe", argv...)
+// The subprocess plumbing used to live in a shared runFFprobeJSON helper, back
+// when TrimClip's keyframe probe was a second caller. That went with the
+// keyframe machinery, and one caller does not need the indirection -- the
+// parsing is still split out (parseProbeJSON) because that is the part worth
+// testing without a subprocess.
+//
+// ffprobe's own stderr goes into the error: a bounded stderrCapture rather than
+// a plain buffer, so a pathologically chatty failure cannot put an unbounded
+// string into an error value. Near-theoretical under -v error, and cheap.
+// Without it every failure reads "exit status 1" -- see this function's test.
+func Probe(ctx context.Context, path string) (Info, error) {
+	cmd := exec.CommandContext(ctx, "ffprobe",
+		"-v", "error", "-print_format", "json",
+		"-show_format", "-show_streams",
+		PositionalPath(path))
 	var stdout bytes.Buffer
 	capture := &stderrCapture{}
 	cmd.Stdout = &stdout
 	cmd.Stderr = capture
 	if err := cmd.Run(); err != nil {
 		if tail := capture.String(); tail != "" {
-			return nil, fmt.Errorf("%w: %s", err, tail)
+			return Info{}, fmt.Errorf("vidio: probing %s: %w: %s", path, err, tail)
 		}
-		return nil, err
-	}
-	return stdout.Bytes(), nil
-}
-
-// Probe runs ffprobe against path and extracts the video (and audio
-// presence) information a Decoder/Encoder needs to size buffers and
-// build ffmpeg command lines. It is a single cheap subprocess call —
-// ffprobe reads container metadata only, it does not decode frames.
-func Probe(ctx context.Context, path string) (Info, error) {
-	data, err := runFFprobeJSON(ctx, path, "-show_format", "-show_streams")
-	if err != nil {
 		return Info{}, fmt.Errorf("vidio: probing %s: %w", path, err)
 	}
 
-	info, err := parseProbeJSON(data)
+	info, err := parseProbeJSON(stdout.Bytes())
 	if err != nil {
 		return Info{}, fmt.Errorf("vidio: parsing ffprobe output for %s: %w", path, err)
 	}
@@ -288,19 +334,6 @@ func parseProbeJSON(data []byte) (Info, error) {
 		}
 	}
 
-	// start_time is absent or "N/A" for plenty of containers, and 0 is the
-	// right reading of both: the timeline starts where it starts. A value
-	// that is present but unparseable is treated the same way rather than
-	// failing Probe, for the same reason creation_time is -- the only caller
-	// that reads it is TrimClip's keyframe probe, so a malformed one must not
-	// take down every Probe the stabilizer pipeline makes.
-	startTime := 0.0
-	if s := parsed.Format.StartTime; s != "" && s != "N/A" {
-		if v, err := strconv.ParseFloat(s, 64); err == nil {
-			startTime = v
-		}
-	}
-
 	creationTime, hasCreationTime, creationTimeNaive := parseCreationTime(parsed.Format.Tags.CreationTime)
 
 	// Display rotation: prefer the display-matrix side-data entry, falling
@@ -325,7 +358,6 @@ func parseProbeJSON(data []byte) (Info, error) {
 		FPS:               fps,
 		NBFrames:          nbFrames,
 		Duration:          duration,
-		StartTime:         startTime,
 		HasAudio:          hasAudio,
 		CreationTime:      creationTime,
 		HasCreationTime:   hasCreationTime,

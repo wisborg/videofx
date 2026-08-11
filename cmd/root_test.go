@@ -864,8 +864,9 @@ func probeDuration(t *testing.T, path string) float64 {
 // The rotate effect is deliberate: it is a lossless metadata-only ffmpeg call,
 // so the output duration is the trim's duration and nothing else, and no
 // OpenCV or encoder is involved. genClipAt writes with -g 1, so every frame is
-// a keyframe and the "start snaps to the nearest keyframe" copy lands exactly
-// where it was asked to -- which is what lets these bounds be tight.
+// a keyframe and the copy carries no hidden pre-roll at all -- which is what
+// lets these bounds be tight, without depending on how faithfully ffprobe
+// reports the duration of a clip that does have one.
 func TestRunRoot_TrimSpanReachesTheOutput(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg not on PATH")

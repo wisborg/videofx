@@ -63,8 +63,19 @@ func Analyze(ctx context.Context, path string, opts Options) (*MotionSeries, err
 		AnalysisWidth:  size.Width,
 		AnalysisHeight: size.Height,
 		FPS:            info.FPS,
-		SourceFrames:   info.NBFrames,
-		Options:        opts,
+		// PresentedFrames, not NBFrames: this number exists to be compared
+		// against how many frames the decode below actually produced, so it has
+		// to be what a decode SHOULD produce. On a clip trimmed by TrimClip
+		// those differ -- up to a GOP of pre-roll sits in the container hidden
+		// behind an edit list -- and nb_frames there reads as a decode that
+		// stopped a hundred frames early, i.e. warnIfShortAnalysis calling a
+		// perfectly healthy trimmed clip truncated or corrupt.
+		//
+		// It changed value here without sidecarVersion moving; the reasoning is
+		// recorded at that constant, which is where anyone weighing the same
+		// question will be reading.
+		SourceFrames: info.PresentedFrames(),
+		Options:      opts,
 	}
 
 	// Two Mats, swapped each iteration below rather than reallocated —

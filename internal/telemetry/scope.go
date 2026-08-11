@@ -187,12 +187,14 @@ type ScopedActivity struct {
 // # Deliberate non-decision: the window's end is not padded
 //
 // A consumer that walks the clip frame by frame can, in principle, ask for an
-// instant a hair past sync.End -- the frame count comes from the container's
-// NBFrames, which has been exact for every MP4/MOV tested, but the
-// duration*fps fallback can round up. Padding the window by a frame would cost
+// instant a hair past sync.End -- the frame count comes from
+// vidio.Info.PresentedFrames, which has been exact for every MP4/MOV tested
+// except a b-frame stream behind an edit list (where it can overshoot by the
+// reorder depth), and the duration*fps fallback it degrades to for a container
+// carrying no frame count at all can round up. Padding the window would cost
 // roughly three metres of fabricated extent on every progress bar and
-// elevation profile, in every clip, to save at most one placeholder frame in
-// the fallback case. The bad trade is the padding, so there is none.
+// elevation profile, in every clip, to save at most a frame or two of
+// placeholders in those cases. The bad trade is the padding, so there is none.
 func BuildScopedActivity(track *Track, sync Sync, scope Scope) *ScopedActivity {
 	if scope == ScopeActivity {
 		// HasOrigin is set here too, cheaply (firstDistance returns at the

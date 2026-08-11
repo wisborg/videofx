@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -284,6 +285,95 @@ func spanFraction(job Job, duration float64) float64 {
 	return span / duration
 }
 
+// warnIfStartCannotSurviveTheOutput reports the one combination in which
+// --start silently does not mean what it says in the DELIVERED file.
+//
+// The trim itself is exact: it copies from the keyframe at or before --start and
+// hides the frames in between behind an MP4 edit list. What can undo that is the
+// output's container, which the user chooses (it follows their input's
+// extension) and which this deliberately does not override -- rewriting someone's
+// .mkv into an .mp4 because they passed --start would be a worse surprise than
+// the problem. Matroska and WebM have no edit list, so a stream copy into one
+// re-exposes the pre-roll: measured on a 2 s-GOP .mkv at --start 2.5, the
+// delivered file opens at 2.000 s while its creation_time says 2.5 s.
+//
+// Three conditions, and each one narrows it to a case that is really wrong:
+//
+//   - StartSeconds > 0. An --end-only trim starts at the first keyframe, so
+//     there is no pre-roll and no edit list to lose. Measured: an .mkv trimmed
+//     to [0, 3) opens on frame 0 and runs 3.0 s, exactly right.
+//   - The output cannot carry an edit list. Every intermediate in a chain shares
+//     that extension, so asking about the final name asks about all of them.
+//   - The FIRST effect does not re-encode. Only the first matters: it is handed
+//     the edit-listed trim, and it either strips the pre-roll by decoding and
+//     re-encoding (after which every later effect sees clean frames) or copies it
+//     through into a container that exposes it (after which no later effect can
+//     tell those frames from wanted ones -- a re-encoder downstream faithfully
+//     encodes all of them).
+//
+// Effects declare re-encoding by implementing effects.Reencoder; saying nothing
+// means "assume a stream copy", which is the direction that over-warns rather
+// than under-warns. See that interface on why the polarity is that way round.
+//
+// # What the third condition exempts, exactly
+//
+// A re-encoding first effect fixes the PICTURES, not the file. Its encoder
+// stream-copies the audio, and the trim's audio carries pre-roll of its own
+// (in an MP4 it sits at a negative pts, hidden by the same edit list) -- which
+// a container without edit lists exposes just as it does the video's. Measured,
+// gocv-stabilizer over the same trim, --start 2.5 --end 5.5:
+//
+//	out.mkv: video start_time 0.480, audio start_time 0.000, duration 3.483
+//	out.mp4: video 0.000 / 3.000,    audio 0.000 / 3.003
+//
+// So the .mkv still opens half a second before the requested instant, in the
+// audio, under a creation_time naming the instant. It is exempted anyway
+// because the exemption is about what the WARNING says: its subject is the
+// pictures beginning early, and that sentence would be false here. The remedy
+// it recommends is worded to match -- re-encoding fixes the pictures, only an
+// MP4/MOV output fixes the file -- rather than sending a user from one half of
+// this problem into the other.
+func warnIfStartCannotSurviveTheOutput(log *logging.Logger, job Job, finalPath string, chain []effects.Effect) {
+	if job.StartSeconds <= 0 || vidio.CanCarryEditList(finalPath) || len(chain) == 0 {
+		return
+	}
+	if _, reencodes := chain[0].(effects.Reencoder); reencodes {
+		return
+	}
+	log.Warnf("--start %.3fs will not be exact in the output: %s cannot carry the edit list that hides the frames "+
+		"before it, and %s copies the video through rather than re-encoding it -- so the pictures begin up to a GOP "+
+		"early, under a creation_time that names the instant you asked for. A re-encoding effect FIRST in the chain "+
+		"(%s) fixes the pictures; only an MP4/MOV output fixes the file, since the audio keeps its pre-roll too.",
+		job.StartSeconds, strings.ToLower(filepath.Ext(finalPath)), chain[0].Name(), reencodingEffectNames())
+}
+
+// reencodingEffectNames lists the registered effects that re-encode, so the
+// warning above can name the way out instead of describing it.
+//
+// Built from the registry rather than hard-coded, because a hard-coded list is
+// exactly the kind of thing that stays right until someone adds an effect. It
+// takes no "except this one" argument: the only caller reaches the warning
+// because its first effect does NOT implement Reencoder, so the effect being
+// complained about can never be in this list anyway.
+//
+// There is no empty-case fallback either. Three registered effects implement
+// the marker, the registry is populated by init() in that same package, and
+// TestReencodingEffectNames_ListsTheWayOutFromTheRegistry names all three --
+// so an empty result is a test failure, not a string to render at a user.
+func reencodingEffectNames() string {
+	var names []string
+	for _, name := range effects.Names() {
+		eff, err := effects.Get(name)
+		if err != nil {
+			continue
+		}
+		if _, ok := eff.(effects.Reencoder); ok {
+			names = append(names, name)
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
 // processOne runs the effect pipeline for one job. finalPath is the output
 // name Run claimed for it before any worker started -- see naming.ResolveBatch
 // for why it cannot be derived here: two workers deriving it independently
@@ -305,6 +395,22 @@ func processOne(ctx context.Context, job Job, finalPath string, cfg ProcessorCon
 	// lossless stream copy into a temp file (removed when the job finishes);
 	// the original is never modified, and the output filename is still derived
 	// from the original (naming.Resolve above), not the temp.
+	//
+	// The intermediate takes its container from vidio.TrimContainerExt, NOT from
+	// the source: an exact --start is implemented with an edit list, which only
+	// the MP4 family can carry, so a Matroska or WebM source trimmed into its own
+	// container would start up to a GOP early -- with a creation_time that says
+	// otherwise. Nothing downstream cares what this temp file is called; the
+	// user's output keeps the source's extension through naming.Resolve above.
+	//
+	// That last part is also the limit of what this fixes. The EFFECTS are now
+	// fed the right frames whatever the source container is, and anything that
+	// re-encodes therefore emits them. An effect that copies the video through
+	// losslessly into a non-MP4 output -- rotate, telemetry, on an .mkv input --
+	// hands the container an edit list it cannot write, and the pre-roll becomes
+	// visible again in the delivered file. Rewriting the user's chosen container
+	// for them is a worse surprise than the problem, so that case is WARNED about
+	// (warnIfStartCannotSurviveTheOutput) rather than silently altered.
 	source := job.SourcePath
 	if job.StartSeconds > 0 || job.EndSeconds > 0 {
 		trimDir, err := os.MkdirTemp("", "videofx-trim-*")
@@ -314,12 +420,14 @@ func processOne(ctx context.Context, job Job, finalPath string, cfg ProcessorCon
 		}
 		defer os.RemoveAll(trimDir)
 
-		trimmed := filepath.Join(trimDir, "trimmed"+ext)
+		trimmed := filepath.Join(trimDir, "trimmed"+vidio.TrimContainerExt(job.SourcePath))
 		if err := vidio.TrimClip(ctx, job.SourcePath, trimmed, job.StartSeconds, job.EndSeconds); err != nil {
 			res.Err = err
 			return res
 		}
 		source = trimmed
+
+		warnIfStartCannotSurviveTheOutput(cfg.Log.WithField("file", job.SourcePath), job, finalPath, cfg.Effects)
 	}
 
 	// Run the effects as a pipeline. Effect 0 reads the original file; each

@@ -141,6 +141,10 @@ func (w *WarpStabilizer) SetAnalysisOptions(a AnalysisOptions) { w.analysis = a 
 func (w *WarpStabilizer) Name() string         { return "warp-stabilizer" }
 func (w *WarpStabilizer) FilenameSlug() string { return "stabilized" }
 
+// The second libvidstab pass filters and re-encodes every frame, so the output
+// is newly encoded video, not the source's stream. See Reencoder.
+func (w *WarpStabilizer) ReencodesVideo() {}
+
 func (w *WarpStabilizer) ValidateStrength(strength float64) error {
 	return ValidateUnitRange(strength)
 }

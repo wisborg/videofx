@@ -243,6 +243,11 @@ const DefaultMeshStrength = 0.3
 func (g *GoCVStabilizer) Name() string         { return "gocv-stabilizer" }
 func (g *GoCVStabilizer) FilenameSlug() string { return "gocv-stabilized" }
 
+// Every frame is decoded, warped and encoded (stabilize.Render), so the output
+// carries the frames this effect saw rather than the source's stream. See
+// Reencoder for the one caller that needs to know.
+func (g *GoCVStabilizer) ReencodesVideo() {}
+
 func (g *GoCVStabilizer) ValidateStrength(strength float64) error {
 	return ValidateUnitRange(strength)
 }
@@ -693,19 +698,39 @@ func warnIfOptionsDiffer(log *logging.Logger, sidecarPath string, was, now stabi
 // stabilized partway through, and with --sidecar the short analysis is cached
 // as though it were the whole story.
 //
-// It is advisory in both directions and deliberately says "may". NBFrames is
-// container metadata: absent for some sources, wrong for variable-frame-rate
-// ones. A mismatch is evidence, not proof, which is why this warns rather than
-// failing -- and why it is called on the sidecar path too. A cache built from a
-// short analysis should keep saying so on every reuse, not only on the run that
-// created it.
+// It is advisory in both directions and deliberately says "may". SourceFrames
+// is container metadata (vidio.Info.PresentedFrames): absent for some sources,
+// wrong for variable-frame-rate ones. A mismatch is evidence, not proof, which
+// is why this warns rather than failing -- and why it is called on the sidecar
+// path too. A cache built from a short analysis should keep saying so on every
+// reuse, not only on the run that created it.
+//
+// # The false positive it cannot rule out
+//
+// A clip trimmed by vidio.TrimClip carries a hidden pre-roll, and
+// PresentedFrames works out how much of the container's frame count that
+// accounts for. It gets that exactly right for a b-frame-free source -- this
+// project's footage, and therefore the trims people actually run -- but for a
+// B-FRAME source it overshoots, by 8 frames in the worst case measured, for the
+// reason its own doc gives. Such a clip lands here as a shortfall of a few
+// frames and draws this warning while being perfectly healthy.
+//
+// The tolerance below is the only thing standing between that and a false
+// alarm, so the two numbers bound each other across the package boundary: raise
+// PresentedFrames' accuracy and this could tighten; widen this and a real
+// truncation of that size stops being reported. It is deliberately NOT set to
+// swallow the measured 8. What this exists to catch is gross damage -- the
+// motivating case decoded 186 frames of 300 -- so keeping it tight enough to
+// notice a 10-frame loss is worth the occasional over-report on a b-frame trim,
+// and moving it is a measured decision rather than a doc-comment one.
 func warnIfShortAnalysis(log *logging.Logger, sourcePath string, series *stabilize.MotionSeries) {
 	if series.SourceFrames <= 0 || series.FrameCount >= series.SourceFrames {
 		return
 	}
 	// A frame or two of disagreement is ordinary container bookkeeping and not
 	// worth a warning; a shortfall big enough to leave a visible stretch of the
-	// clip unstabilized is.
+	// clip unstabilized is. See the doc above before changing it: it is one half
+	// of a bound whose other half lives in vidio.Info.PresentedFrames.
 	const tolerance = 2
 	missing := series.SourceFrames - series.FrameCount
 	if missing <= tolerance {

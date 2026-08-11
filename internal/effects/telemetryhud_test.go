@@ -133,8 +133,9 @@ func countVideoFrames(t *testing.T, path string) int {
 // count Apply predicts must equal the number of frames the source actually
 // decodes to.
 //
-// That prediction is a prediction -- NBFrames, or duration*fps when the
-// container does not carry one -- fed into an overlay filter that is given no
+// That prediction is a prediction -- vidio.Info.PresentedFrames, or duration*fps
+// when the container carries no frame count at all -- fed into an overlay filter
+// that is given no
 // -shortest and no eof_action. What each direction of a wrong guess does was
 // measured rather than assumed, and it is worth writing down, because the
 // obvious expectation is wrong:
@@ -154,11 +155,16 @@ func countVideoFrames(t *testing.T, path string) int {
 //     enough to the natural behaviour to flake. It is left uncovered
 //     deliberately rather than covered badly.
 //
-// Neither is reachable today: NBFrames is present and exact for every MP4/MOV
-// tested -- h264 and hevc_videotoolbox, CFR and VFR, 29.97 and 59.94, and the
-// output of this project's own TrimClip. The duration*fps fallback only runs
-// for containers that record no frame count at all (MKV, MPEG-TS, WebM), where
-// the worst error measured was one frame.
+// Neither is reachable on THIS source, which is why the two sibling tests below
+// exist rather than more assertions here. PresentedFrames is exact for every
+// MP4/MOV tested -- h264 and hevc_videotoolbox, CFR and VFR, 29.97 and 59.94 --
+// but nb_frames alone is not, for the output of this project's own TrimClip: the
+// over-prediction bullet above was measured on exactly that, and
+// TestTelemetryHUD_Apply_OverATrimmedClipRendersOnlyTheFramesThatDecode covers
+// it. The duration*fps fallback only runs for containers that record no frame
+// count at all (MKV, MPEG-TS, WebM), where the worst error measured was one
+// frame; TestTelemetryHUD_Apply_SizesTheRenderFromTheDurationWhenNoFrameCountIsStored
+// covers that branch.
 func TestTelemetryHUD_Apply_OutputMatchesTheSourceFrameForFrame(t *testing.T) {
 	requireFFmpeg(t)
 
@@ -200,6 +206,135 @@ func TestTelemetryHUD_Apply_OutputMatchesTheSourceFrameForFrame(t *testing.T) {
 	if !outInfo.HasCreationTime || !outInfo.CreationTime.Equal(srcInfo.CreationTime) {
 		t.Errorf("output creation_time = %v (present=%v), want the source's %v",
 			outInfo.CreationTime, outInfo.HasCreationTime, srcInfo.CreationTime)
+	}
+}
+
+// TestTelemetryHUD_Apply_OverATrimmedClipRendersOnlyTheFramesThatDecode is the
+// same frame-for-frame property as the test above, on the one source shape
+// where the container's frame count is NOT the number of frames the overlay
+// will meet: the output of vidio.TrimClip.
+//
+// A lossless trim can only cut at a keyframe, so it copies the pre-roll from
+// there to the requested start and hides it behind an edit list. nb_frames
+// counts those hidden frames; a decode does not emit them. Sizing the render
+// loop from nb_frames therefore draws HUD frames past the end of the video, and
+// because the overlay's framesync repeats whichever input ended first, the
+// output comes out LONGER than the clip -- silently, exit 0. Measured on the
+// real case this came from: a 4K clip trimmed to 8 s, 600 stored, 480 decoded,
+// 10.010 s of HUD written over it.
+//
+// The fixture is long-GOP (keyframes 2 s apart) and the trim starts mid-GOP, so
+// there is genuinely a hidden pre-roll; the assertion that the trimmed clip
+// stores more frames than it decodes is what proves that, and without it every
+// assertion here would be satisfied by a keyframe-aligned trim that never
+// exercises the bug.
+func TestTelemetryHUD_Apply_OverATrimmedClipRendersOnlyTheFramesThatDecode(t *testing.T) {
+	requireFFmpeg(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	// 6 s at 10 fps with keyframes at 0/2/4 s. -bf 0 keeps the reported
+	// duration of the trimmed clip exact: with b-frame reordering ffmpeg writes
+	// the edit list from decode-order timestamps but drops frames by
+	// presentation order, and the duration then overstates by up to the reorder
+	// depth. Action-camera footage carries no b-frames either.
+	src := filepath.Join(dir, "longgop.mp4")
+	if out, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=6",
+		"-c:v", "libx264", "-g", "20", "-keyint_min", "20", "-sc_threshold", "0", "-bf", "0",
+		"-pix_fmt", "yuv420p",
+		"-metadata", "creation_time=2026-07-04T21:00:00.000000Z",
+		"-y", src,
+	).CombinedOutput(); err != nil {
+		t.Fatalf("generating the long-GOP HUD source: %v\n%s", err, out)
+	}
+
+	// Mid-GOP: the copy falls back to the keyframe at 2.0 s and carries 5
+	// frames of pre-roll it must not present.
+	trimmed := filepath.Join(dir, "trimmed.mp4")
+	if err := vidio.TrimClip(ctx, src, trimmed, 2.5, 5.5); err != nil {
+		t.Fatalf("TrimClip: %v", err)
+	}
+
+	trimmedInfo, err := vidio.Probe(ctx, trimmed)
+	if err != nil {
+		t.Fatalf("probing the trimmed clip: %v", err)
+	}
+	trimmedFrames := countVideoFrames(t, trimmed)
+	if trimmedInfo.NBFrames <= trimmedFrames {
+		t.Fatalf("the trimmed clip stores %d frames and decodes %d, i.e. it carries no hidden pre-roll -- "+
+			"either the fixture stopped being long-GOP or the trim stopped hiding it, and either way this test "+
+			"no longer covers what it is for", trimmedInfo.NBFrames, trimmedFrames)
+	}
+
+	out := filepath.Join(dir, "out.mp4")
+	e := &TelemetryHUD{FitPath: testFITPath(t)}
+	if err := e.Apply(ctx, Input{SourcePath: trimmed, OutputPath: out}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	if got := countVideoFrames(t, out); got != trimmedFrames {
+		t.Errorf("the HUD render has %d frames, the trimmed source decodes %d (the container claims %d)\n"+
+			"a render sized from the container's count draws over frames that do not exist, and the overlay "+
+			"pads the video out to match instead of failing", got, trimmedFrames, trimmedInfo.NBFrames)
+	}
+}
+
+// TestTelemetryHUD_Apply_SizesTheRenderFromTheDurationWhenNoFrameCountIsStored
+// is the other half of the frame-count decision: the fallback, on a container
+// that records no frame count at all.
+//
+// vidio.Info.PresentedFrames answers 0 for such a source -- deliberately, it is
+// the documented "unknown" sentinel -- and Apply must then fall back to
+// duration*fps. Nothing else in this file reaches that branch: every other
+// fixture is an MP4, where nb_frames is always present, so the fallback could
+// be deleted or mis-derived and the whole suite would stay green. The failure
+// it would silently produce is the same one measured in the sibling tests: a
+// count that is too high does not error, the overlay's framesync freezes the
+// last video frame, and the clip comes out LONGER than the source.
+//
+// Matroska is the fixture because it is one of the containers named in that
+// fallback's rationale (MKV, MPEG-TS, WebM) and the cheapest to write. The
+// assertion that NBFrames really is 0 is what keeps the test honest: if
+// ffprobe ever starts reporting a frame count for MKV, this silently becomes a
+// third copy of the ordinary-source test, and it should fail loudly instead.
+func TestTelemetryHUD_Apply_SizesTheRenderFromTheDurationWhenNoFrameCountIsStored(t *testing.T) {
+	requireFFmpeg(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	// 2 s at 10 fps: duration*fps is 20, and the clip decodes 20.
+	src := filepath.Join(dir, "nocount.mkv")
+	if out, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=2",
+		"-c:v", "libx264", "-pix_fmt", "yuv420p",
+		"-metadata", "creation_time=2026-07-04T21:00:00.000000Z",
+		"-y", src,
+	).CombinedOutput(); err != nil {
+		t.Fatalf("generating the matroska source: %v\n%s", err, out)
+	}
+
+	info, err := vidio.Probe(ctx, src)
+	if err != nil {
+		t.Fatalf("probing the source: %v", err)
+	}
+	if info.PresentedFrames() != 0 {
+		t.Fatalf("the fixture reports %d presented frames (nb_frames %d), so the duration fallback this test "+
+			"exists for is never reached -- pick a container that still records no frame count",
+			info.PresentedFrames(), info.NBFrames)
+	}
+
+	out := filepath.Join(dir, "out.mp4")
+	e := &TelemetryHUD{FitPath: testFITPath(t)}
+	if err := e.Apply(ctx, Input{SourcePath: src, OutputPath: out}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	srcFrames := countVideoFrames(t, src)
+	if got := countVideoFrames(t, out); got != srcFrames {
+		t.Errorf("the HUD render has %d frames, the source decodes %d\n"+
+			"the container carries no frame count, so this is the duration*fps fallback getting it wrong; "+
+			"too many HUD frames stretches the clip instead of failing", got, srcFrames)
 	}
 }
 
