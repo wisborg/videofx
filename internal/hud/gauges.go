@@ -92,8 +92,13 @@ func (ElevationProfileGauge) Name() string { return "elevation-profile" }
 type elevPlot struct {
 	px, lblPx               float64
 	left, right, top, axisY float64
-	minE, maxE, elevSpan    float64
-	startD, endD            float64
+	// minE/maxE are the DATA's smoothed elevation range, which is what the
+	// labels report. baseE/plotRange are the range the box's height is mapped
+	// through, and the two pairs part company on flat ground -- see
+	// elevGeometry.
+	minE, maxE       float64
+	baseE, plotRange float64
+	startD, endD     float64
 }
 
 // xAt maps a cumulative distance onto the plot by its position in the distance
@@ -101,7 +106,27 @@ type elevPlot struct {
 func (g elevPlot) xAt(d float64) float64 {
 	return axisX(d, g.startD, g.endD, g.left, g.right)
 }
-func (g elevPlot) yAt(e float64) float64 { return g.axisY - (e-g.minE)/g.elevSpan*(g.axisY-g.top) }
+
+// yAt maps an elevation onto the plot: baseE at the axis line, baseE+plotRange
+// at the top. It deliberately does not read minE/maxE -- on a range too small
+// to be a profile those describe the labels while baseE/plotRange describe a
+// wider, centred window (elevGeometry). Substituting the data's own range back
+// in here is the floor-pinned trace this replaced.
+func (g elevPlot) yAt(e float64) float64 {
+	return g.axisY - (e-g.baseE)/g.plotRange*(g.axisY-g.top)
+}
+
+// flatTraceY is where the trace of a range too small to plot runs, and so where
+// its single label is hung.
+//
+// It goes through yAt rather than averaging top and axisY, though the two are
+// the same pixel today. The label names that line; deriving it from the same
+// mapping that draws the line is what keeps the two together if the window a
+// flat range is centred in ever stops being symmetric about the data's
+// midpoint. Averaging the box's edges would leave the label naming a line it is
+// no longer beside -- the silent disagreement this gauge was just fixed for, one
+// method along.
+func (g elevPlot) flatTraceY() float64 { return g.yAt((g.minE + g.maxE) / 2) }
 
 // distAt returns the distance the k-th of n+1 evenly spaced profile samples
 // falls at, across the axis's OWN range (see DrawStatic, which strokes the
@@ -140,15 +165,36 @@ func elevGeometry(r *Renderer, box Box, f Frame) (elevPlot, bool) {
 	pw := float64(f.Width) * orient(f, 0.42, 0.85) // wider on a portrait frame
 	ph := float64(f.Height) * 0.12
 	minE, maxE := em.Range()
-	elevSpan := maxE - minE
-	if elevSpan < 1 {
-		elevSpan = 1 // a dead-flat course still gets a centered line, not a divide-by-zero
+	// The plot's vertical range is the data's, except where the data has none
+	// worth plotting. A range under elevProfileFlatRange is barometric noise on
+	// flat ground -- sixteen seconds of level path is about 0.2 m -- and both
+	// of the obvious things to do with it are wrong: stretched over the box it
+	// draws a mountain out of 20 cm, and divided as-is it is a divide-by-zero
+	// on ground that is genuinely level.
+	//
+	// So such a range is CENTRED in a window one elevProfileFlatRange tall. A
+	// dead-flat course then puts its line exactly halfway up the box; a 0.2 m
+	// wobble occupies the middle fifth of it, visible as a wobble and not as
+	// terrain. Its labels collapse to one at the same threshold
+	// (elevRangeLabels), which is the other half of the same decision.
+	//
+	// The guard this replaced raised the DIVISOR to 1 and left minE alone,
+	// under a comment claiming it centred the line. It did not: with baseE at
+	// minE, a dead-flat course has e-baseE == 0 at every point and the whole
+	// trace lands on axisY, the floor of the box. That is what a real render of
+	// flat ground showed.
+	var baseE, plotRange float64
+	if span := maxE - minE; elevRangeFlat(span) {
+		mid := (minE + maxE) / 2
+		baseE, plotRange = mid-elevProfileFlatRange/2, elevProfileFlatRange
+	} else {
+		baseE, plotRange = minE, span
 	}
 	axisY := box.Y - lblPx*1.3 // leave room for the km labels below the plot
 	return elevPlot{
 		px: px, lblPx: lblPx,
 		left: box.X - pw/2, right: box.X + pw/2, top: axisY - ph, axisY: axisY,
-		minE: minE, maxE: maxE, elevSpan: elevSpan,
+		minE: minE, maxE: maxE, baseE: baseE, plotRange: plotRange,
 		startD: startD, endD: endD,
 	}, true
 }
@@ -186,8 +232,17 @@ func (ElevationProfileGauge) DrawStatic(r *Renderer, dc *gg.Context, box Box, f 
 	}
 	dc.Stroke()
 
-	r.Text(dc, fmt.Sprintf("%.0f m", g.maxE), g.left, g.top, 0, g.lblPx)
-	r.Text(dc, fmt.Sprintf("%.0f m", g.minE), g.left, g.axisY-g.lblPx*1.15, 0, g.lblPx)
+	// The y labels: the range's two ends, or -- when no precision worth
+	// printing tells them apart -- one midpoint label beside the centred trace.
+	// Each label hangs its bottom on the line it names (the axis line, or the
+	// midline the flat trace runs along), so it sits above that line rather
+	// than across it.
+	if lbls := elevRangeLabels(g.minE, g.maxE); len(lbls) == 1 {
+		r.Text(dc, lbls[0], g.left, g.flatTraceY()-g.lblPx*1.15, 0, g.lblPx)
+	} else {
+		r.Text(dc, lbls[0], g.left, g.top, 0, g.lblPx)
+		r.Text(dc, lbls[1], g.left, g.axisY-g.lblPx*1.15, 0, g.lblPx)
+	}
 	startLbl, endLbl := elevAxisLabels(g.startD, g.endD)
 	r.Text(dc, startLbl, g.left, g.axisY+g.lblPx*0.15, 0, g.lblPx)
 	r.Text(dc, endLbl, g.right, g.axisY+g.lblPx*0.15, 1, g.lblPx)

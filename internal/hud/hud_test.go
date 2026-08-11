@@ -2,6 +2,7 @@ package hud
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"math"
 	"strings"
@@ -750,6 +751,905 @@ func TestElevGeometry_AZeroDistanceSpanDrawsNothingRatherThanNaN(t *testing.T) {
 	}
 }
 
+// hold appends n samples at v; ramp appends n samples climbing from a to b
+// (excluding a, which the caller has already appended). Together they build the
+// elevation fixtures below.
+func hold(s []float64, v float64, n int) []float64 {
+	for i := 0; i < n; i++ {
+		s = append(s, v)
+	}
+	return s
+}
+
+func ramp(s []float64, a, b float64, n int) []float64 {
+	for i := 1; i <= n; i++ {
+		s = append(s, a+(b-a)*float64(i)/float64(n))
+	}
+	return s
+}
+
+// elevModelOfSeries builds a model from an elevation series at 10 m spacing,
+// smoothed at sigma 1. Every fixture below holds a PLATEAU at each of its
+// extremes, which is what lets the tests name the model's smoothed RANGE
+// exactly instead of reading it back: without one, the Gaussian averages an
+// extreme with its neighbours and pulls it inwards by an amount that is an
+// implementation detail of the smoother.
+//
+// How long the plateau has to be depends on where it is, and the difference has
+// caught someone out. The kernel's radius is ceil(3*sigma) = 3 here, so:
+//
+//   - at the START or END of the series, radius+1 = 4 samples, because
+//     gaussianSmooth pads by repeating the end sample -- the clamp supplies the
+//     other half of the kernel free;
+//   - in the INTERIOR, 2*radius+1 = 7, and the exact point is the middle one.
+//
+// elevProfileClimbing has 40 at each end. elevProfileOpeningMidRange reaches
+// its low point in the INTERIOR and holds 11 samples there, its high point at
+// the end. TestElevFixtures_APlateauAtEachEndIsWhatMakesTheSmoothedRangeTheNamedOne
+// pins the end case, which is the one the fixtures mostly rely on.
+//
+// Reading "four samples" and applying it in the interior is the trap: measured,
+// a 4-sample interior plateau lands about 0.01 m inside the value it holds.
+// That is nothing on a 3.2 m rise and a twentieth of the flat fixture's entire
+// 0.2 m range, where every expected position is a share of the range.
+func elevModelOfSeries(elev []float64) *telemetry.ElevationModel {
+	dist := make([]float64, len(elev))
+	for i := range dist {
+		dist[i] = float64(i) * 10
+	}
+	return telemetry.BuildElevationModel(
+		&telemetry.Track{Samples: elevSamples(dist, elev)},
+		telemetry.ElevationOptions{Sigma: 1},
+	)
+}
+
+// elevProfileClimbing is a course that opens on its lowest ground, climbs
+// through the middle, and finishes on its highest: over the left quarter of the
+// plot the trace therefore sits at the FLOOR of the elevation range, well clear
+// of a label centred on the plot's midline.
+func elevProfileClimbing(loE, hiE float64) *telemetry.ElevationModel {
+	s := hold(nil, loE, 40)
+	s = ramp(s, loE, hiE, 40)
+	return elevModelOfSeries(hold(s, hiE, 40))
+}
+
+// elevProfileOpeningMidRange is a course that runs along the middle of its own
+// elevation range for the whole left half of the plot before dipping to its low
+// point and climbing to its high one. Over that left half the trace sits on the
+// plot's midline, clear of the label bands at the plot's top and bottom edges.
+func elevProfileOpeningMidRange(loE, hiE float64) *telemetry.ElevationModel {
+	mid := (loE + hiE) / 2
+	s := hold(nil, mid, 60)
+	s = ramp(s, mid, loE, 20)
+	s = hold(s, loE, 10)
+	s = ramp(s, loE, hiE, 20)
+	return elevModelOfSeries(hold(s, hiE, 10))
+}
+
+// fracUpThePlot reports where a y coordinate sits between the elevation plot's
+// axis line and its top edge: 0 on the axis (the floor of the box), 1 at the
+// top, 0.5 halfway up. The assertions below are in these fractions rather than
+// pixels so that they follow from the elevation range alone.
+//
+// It is fracOf, the distance axis's helper, read up the plot instead of across
+// it -- the axis line is the near end and the top edge the far one. Spelling it
+// out again as its own subtraction was the first draft and is how two
+// interpolations of one formula start to disagree.
+func fracUpThePlot(g elevPlot, y float64) float64 { return fracOf(y, g.axisY, g.top) }
+
+// TestElevRangeLabels_ThePrecisionFollowsTheRangeAndAFlatCourseGetsOneLabel is
+// the specification of the elevation profile's y labels, as strings -- once
+// drawn they are glyphs.
+//
+// One rule produces both thresholds, the same one the distance axis's units
+// came from: a label's rounding step must not exceed a tenth of the axis it
+// labels. "%.0f m" steps by 1 m and so needs a 10 m range; "%.1f m" steps by
+// 0.1 m and needs 1 m. Below that there is nothing to escalate to -- barometric
+// elevation is not good to the centimetre -- so the range stops being labelled
+// as a range at all and gets one midpoint label.
+//
+// The row that matters most is the first: a whole activity's profile keeps the
+// whole metres it has always been drawn with. The rows either side of each
+// threshold are what keep the two escalations from swallowing the cases they
+// are exceptions to -- a rule that always adds a decimal moves every existing
+// render, and one that collapses to a single label too early silently deletes a
+// real profile's second number.
+func TestElevRangeLabels_ThePrecisionFollowsTheRangeAndAFlatCourseGetsOneLabel(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		minE, maxE float64
+		want       []string
+	}{
+		{
+			// The whole-activity render, unchanged.
+			name: "a whole activity's 40 m of terrain", minE: 13, maxE: 53,
+			want: []string{"53 m", "13 m"},
+		},
+		{
+			name: "exactly the decimal threshold", minE: 12, maxE: 22,
+			want: []string{"22 m", "12 m"},
+		},
+		{
+			// A decimetre below it. Both ends gain the decimal, not just the
+			// one that needs it: "21.9 m" beside "12 m" reads as two
+			// differently measured numbers rather than as one scale.
+			name: "a decimetre short of the decimal threshold", minE: 12, maxE: 21.9,
+			want: []string{"21.9 m", "12.0 m"},
+		},
+		{
+			name: "a 3 m rise, which whole metres cannot place", minE: 12.4, maxE: 15.6,
+			want: []string{"15.6 m", "12.4 m"},
+		},
+		{
+			// The flat threshold from above: at exactly a metre a decimal
+			// still separates the ends by ten steps, so this is a profile.
+			name: "exactly the flat threshold", minE: 12, maxE: 13,
+			want: []string{"13.0 m", "12.0 m"},
+		},
+		{
+			// The defect this stage exists for: sixteen seconds of ordinary
+			// flat ground. Two labels here read "-1 m" and "-1 m".
+			name: "a clip of flat ground", minE: -1.3, maxE: -1.1,
+			want: []string{"-1.2 m"},
+		},
+		{
+			name: "a dead-flat course", minE: 4.2, maxE: 4.2,
+			want: []string{"4.2 m"},
+		},
+		{
+			// Flat ground a few centimetres below sea level: the midpoint
+			// rounds away to zero from underneath, and "-0.0 m" reads as a
+			// typo rather than as an altitude. Shared with the distance
+			// labels -- see fixedNoNegZero.
+			name: "flat ground just below sea level", minE: -0.03, maxE: -0.01,
+			want: []string{"0.0 m"},
+		},
+		{
+			name: "a real profile whose low point is just below sea level", minE: -0.3, maxE: 20,
+			want: []string{"20 m", "0 m"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := elevRangeLabels(c.minE, c.maxE)
+			if len(got) != len(c.want) {
+				t.Fatalf("elevRangeLabels(%v, %v) = %q, want %q", c.minE, c.maxE, got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Errorf("elevRangeLabels(%v, %v) = %q, want %q", c.minE, c.maxE, got, c.want)
+				}
+			}
+		})
+	}
+}
+
+// TestElevGeometry_ARangeTooSmallToPlotIsCentredNotPinnedToTheFloor is the
+// other half of the same decision, on the geometry rather than the labels.
+//
+// The guard this replaced raised the DIVISOR to 1 m and left the base of the
+// mapping at minE, under a comment claiming it gave a dead-flat course a
+// centred line. It did not: with e-minE == 0 at every point, the whole trace
+// landed on axisY -- the floor of the box -- which is what a render of flat
+// ground showed. A 0.2 m range fared no better, drawn along the bottom fifth.
+//
+// The expected positions are derived, not recorded. A range too small to plot
+// is centred in a window elevProfileFlatRange tall, so its two extremes sit
+// symmetrically about the midline at half the range's share of that window; a
+// range large enough to plot fills the box exactly as it always has, floor to
+// ceiling. The 0.99 m and 1.00 m rows are the same range either side of the
+// threshold, and they land 1% apart rather than jumping: that continuity is why
+// the window's height is elevProfileFlatRange and not some other number.
+func TestElevGeometry_ARangeTooSmallToPlotIsCentredNotPinnedToTheFloor(t *testing.T) {
+	r := NewRenderer(DefaultLayout())
+
+	for _, c := range []struct {
+		name       string
+		loE, hiE   float64
+		wantLoFrac float64 // where the range's bottom sits, 0 = the plot's floor
+		wantHiFrac float64
+	}{
+		{
+			name: "a whole activity's terrain fills the box, as it always did",
+			loE:  13, hiE: 53, wantLoFrac: 0, wantHiFrac: 1,
+		},
+		{
+			name: "a 3 m rise still fills the box",
+			loE:  12.4, hiE: 15.6, wantLoFrac: 0, wantHiFrac: 1,
+		},
+		{
+			name: "exactly the flat threshold fills the box",
+			loE:  12, hiE: 13, wantLoFrac: 0, wantHiFrac: 1,
+		},
+		{
+			// A hair under it: centred in a 1 m window, so 0.5% of the box
+			// above and below the midline -- within a pixel of the row above,
+			// which is the point.
+			name: "a hair under the flat threshold is centred, not stretched",
+			loE:  12, hiE: 12.99, wantLoFrac: 0.5 - 0.99/2, wantHiFrac: 0.5 + 0.99/2,
+		},
+		{
+			name: "a clip of flat ground occupies the middle fifth",
+			loE:  -1.3, hiE: -1.1, wantLoFrac: 0.5 - 0.2/2, wantHiFrac: 0.5 + 0.2/2,
+		},
+		{
+			// The degenerate case the old comment claimed to handle: one
+			// elevation, so both ends are the same point, on the midline.
+			name: "a dead-flat course draws its line halfway up the box",
+			loE:  4.2, hiE: 4.2, wantLoFrac: 0.5, wantHiFrac: 0.5,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := elevProfileClimbing(c.loE, c.hiE)
+			if lo, hi := m.Range(); math.Abs(lo-c.loE) > 1e-9 || math.Abs(hi-c.hiE) > 1e-9 {
+				t.Fatalf("the fixture model's smoothed range is %v..%v, want %v..%v -- "+
+					"re-fixture this test rather than reading it as a regression", lo, hi, c.loE, c.hiE)
+			}
+			g, ok := elevGeometry(r, elevBox, axisFrame(&Course{Elevation: m}))
+			if !ok {
+				t.Fatalf("elevGeometry declined a %v..%v m profile", c.loE, c.hiE)
+			}
+
+			if got := fracUpThePlot(g, g.yAt(c.loE)); math.Abs(got-c.wantLoFrac) > 1e-9 {
+				t.Errorf("the range's low point sits %.4f of the way up the plot, want %.4f",
+					got, c.wantLoFrac)
+			}
+			if got := fracUpThePlot(g, g.yAt(c.hiE)); math.Abs(got-c.wantHiFrac) > 1e-9 {
+				t.Errorf("the range's high point sits %.4f of the way up the plot, want %.4f",
+					got, c.wantHiFrac)
+			}
+			// The labels and the geometry are two halves of one decision and
+			// share elevRangeFlat: a centred trace under two end labels, or two
+			// labels beside a floor-pinned trace, is each half a fix.
+			centred := c.wantLoFrac > 0
+			if single := len(elevRangeLabels(c.loE, c.hiE)) == 1; single != centred {
+				t.Errorf("the plot %s this range but its labels %s -- "+
+					"the label rule and the plot geometry disagree about what counts as flat",
+					map[bool]string{true: "centres", false: "stretches"}[centred],
+					map[bool]string{true: "collapse to one", false: "stay at two"}[single])
+			}
+		})
+	}
+}
+
+// TestFlatTraceY_IsTheTracesOwnY_NotTheBoxesMiddle pins how the single label's
+// anchor is DEFINED, which no render can show: for every plot the code builds
+// today the trace's midpoint and the box's centre are the same pixel, so
+// averaging g.top and g.axisY passes every other test in this file, including
+// the one that measures where the label lands.
+//
+// They coincide because the window a flat range is centred in is symmetric
+// about the data's midpoint -- a property of elevGeometry, not of the label.
+// This test builds a plot whose window is NOT symmetric, which elevGeometry
+// cannot currently produce and which is the point: it is the only state in
+// which the two candidate definitions differ, and the one where the difference
+// would be a label naming a line it is not beside. It documents no supported
+// configuration; it fixes which of the two the code means.
+func TestFlatTraceY_IsTheTracesOwnY_NotTheBoxesMiddle(t *testing.T) {
+	// A 0.2 m range sitting at the BOTTOM of a 1 m window rather than centred
+	// in it. Its trace runs a fifth of the way up the plot; the box's middle is
+	// half way up, and half way up is where the wrong definition puts a label
+	// naming that trace.
+	g := elevPlot{top: 100, axisY: 200, minE: 10, maxE: 10.2, baseE: 10, plotRange: 1}
+
+	if got, want := g.flatTraceY(), g.yAt((g.minE+g.maxE)/2); got != want {
+		t.Errorf("flatTraceY = %v, want yAt of the range's midpoint, %v -- the single label is anchored "+
+			"to the plot's box rather than to the trace it names", got, want)
+	}
+	// And it is not the box's centre here, so the assertion above is not two
+	// spellings of one number.
+	if mid := (g.top + g.axisY) / 2; g.flatTraceY() == mid {
+		t.Fatalf("the fixture's trace midpoint coincides with the box centre at y=%v, so this test "+
+			"cannot tell the two definitions apart -- re-fixture it with an asymmetric window", mid)
+	}
+}
+
+// yLabelInk measures the white glyph ink of the profile's y labels in the
+// horizontal band [y0, y1) of img, over x in [x0, x1). It returns the ink's
+// leftmost and rightmost columns, or (0, -1) when the band is empty.
+//
+// It serves the x labels under the axis line as well as the y labels beside it
+// -- one scanner, because two would drift.
+//
+// Only white glyph pixels count: the plot's translucent black band and the
+// text's own drop shadow are premultiplied to nothing in the red channel. The
+// profile's own polyline is white too, which is why every caller either picks a
+// band the fixture's trace cannot reach or restricts x to the part of the plot
+// where it cannot -- the x-label callers get that for free, since their strip
+// is below the plot entirely.
+//
+// The threshold is half coverage, not the near-solid one an earlier version of
+// the x-label scan used, because a below-sea-level label leads with a minus
+// sign: at this size that glyph is a stroke barely a pixel thick and no pixel
+// of it ever reaches full coverage. Measured at 200 it vanishes, and the label
+// appears to be one character shorter than it is.
+func yLabelInk(img *image.RGBA, x0, x1, y0, y1 int) (minX, maxX int) {
+	minX, maxX = img.Rect.Dx(), -1
+	for y := y0; y < y1 && y < img.Rect.Dy(); y++ {
+		for x := max(x0, 0); x < x1 && x < img.Rect.Dx(); x++ {
+			if img.Pix[y*img.Stride+x*4] < 128 {
+				continue
+			}
+			minX, maxX = min(minX, x), max(maxX, x)
+		}
+	}
+	return minX, maxX
+}
+
+// profileStatic rasterizes a resolved profile's static layer and measures one
+// character cell of the label face it drew with -- the two things every pixel
+// test of this gauge needs and neither of which is worth restating. The cell is
+// measured from the same face rather than written down, so an expected width in
+// cells stays correct if the layout's font scale changes.
+//
+// It takes the renderer, frame and geometry rather than building them from a
+// model, so that it composes with elevPlotOf (which resolves the geometry and
+// checks the fixture's range) and also serves the one caller that has neither a
+// named elevation range nor a static-only frame.
+func profileStatic(t *testing.T, r *Renderer, f Frame, g elevPlot) (*image.RGBA, float64) {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, f.Width, f.Height))
+	r.RenderStatic(img, f)
+	dc := gg.NewContext(1, 1)
+	dc.SetFontFace(r.face(g.lblPx))
+	cell, _ := dc.MeasureString("0")
+	return img, cell
+}
+
+// TestRenderStatic_TheProfilesYLabelsCarryThePrecisionItsRangeNeeds is the
+// wiring half of the label rule: that DrawStatic asks elevRangeLabels for the
+// two numbers rather than formatting them itself. elevRangeLabels can be
+// perfect and unused -- the "%.0f m" pair it replaced is still a compiling,
+// silent, passing-every-string-test way to draw this gauge.
+//
+// What is measured is each label's inked WIDTH in character cells, the
+// technique the x-axis label test established: the HUD font is gomono, so an
+// n-character label inks n cells of the label face, and the cell is measured
+// here from that same face rather than written down. "15.6 m" is six cells and
+// the "16 m" the old formatting produces is four -- two cells apart against a
+// tolerance of one.
+//
+// Both ends are measured. A DrawStatic that drew the same end twice, or that
+// escalated only the label needing it, is otherwise invisible: the two are the
+// same length, so the widths alone would not catch it, which is why the fixture
+// has a low end whose whole-metre form is a DIFFERENT length ("12.4 m" against
+// "12 m") from its high end's.
+func TestRenderStatic_TheProfilesYLabelsCarryThePrecisionItsRangeNeeds(t *testing.T) {
+	const w, h = 1200, 800
+	// The labels this range must carry, from the rule rather than from a run: a
+	// 3.2 m range is under elevProfileDecimalRange, so whole metres are too
+	// coarse for it, and it is over elevProfileFlatRange, so it is still a
+	// profile with two ends.
+	const loE, hiE = 12.4, 15.6
+	const wantTop, wantBottom = "15.6 m", "12.4 m"
+
+	m := elevProfileOpeningMidRange(loE, hiE)
+	if got := elevRangeLabels(m.Range()); len(got) != 2 || got[0] != wantTop || got[1] != wantBottom {
+		t.Fatalf("elevRangeLabels over the fixture's range = %q, want %q..%q -- re-fixture this test "+
+			"rather than reading it as a wiring regression", got, wantTop, wantBottom)
+	}
+	r, f, g := elevPlotOf(t, m, loE, hiE, w, h)
+	img, cell := profileStatic(t, r, f, g)
+
+	// Both labels hug the plot's left edge; the scan stops at the plot's
+	// midpoint, over which this fixture's trace runs along the midline and so
+	// enters neither band.
+	band := g.lblPx * 1.15
+	mid := int((g.left + g.right) / 2)
+	for _, c := range []struct {
+		which  string
+		label  string
+		y0, y1 int
+	}{
+		{"top", wantTop, int(g.top), int(g.top + band)},
+		{"bottom", wantBottom, int(g.axisY - band), int(g.axisY)},
+	} {
+		minX, maxX := yLabelInk(img, int(g.left)-2, mid, c.y0, c.y1)
+		if maxX < 0 {
+			t.Errorf("the profile drew no %s elevation label at all", c.which)
+			continue
+		}
+		inkWidth := float64(maxX - minX)
+		if want := float64(len(c.label)) * cell; math.Abs(inkWidth-want) > cell {
+			t.Errorf("the profile's %s elevation label inks %.0f px = %.2f cells, want %q's %d cells "+
+				"(%.0f px) within one cell -- the label drawn is not the one this range's precision produces",
+				c.which, inkWidth, inkWidth/cell, c.label, len(c.label), want)
+		}
+		if math.Abs(float64(minX)-g.left) > 2 {
+			t.Errorf("the profile's %s elevation label starts at x=%d, want the plot's left edge at x=%.0f",
+				c.which, minX, g.left)
+		}
+	}
+}
+
+// TestRenderStatic_AFlatProfileDrawsOneCentredLabelAndNotTwo is the wiring for
+// the other branch, and the only test that sees the two-labels-become-one
+// decision reach a canvas.
+//
+// Three things are asserted, and each is a different silent failure. The
+// midline band must carry a label of the midpoint's width -- a DrawStatic that
+// ignored the branch would draw nothing there. The bands at the plot's top and
+// bottom edge must carry NO ink at all -- a DrawStatic that drew the centred
+// label in ADDITION to the pair would leave two identical "-1 m"s exactly where
+// the defect was. And nothing may reach those bands by accident: the fixture
+// opens on its low point, so its trace runs a tenth of the box below the
+// midline for the whole left of the plot and touches neither edge band, which
+// is checked from the geometry rather than assumed.
+func TestRenderStatic_AFlatProfileDrawsOneCentredLabelAndNotTwo(t *testing.T) {
+	const w, h = 1200, 800
+	// Sixteen seconds of level ground a metre below sea level: a 0.2 m range,
+	// on which no precision worth printing tells the two ends apart.
+	const loE, hiE = -1.3, -1.1
+	const wantLabel = "-1.2 m"
+
+	m := elevProfileClimbing(loE, hiE)
+	if got := elevRangeLabels(m.Range()); len(got) != 1 || got[0] != wantLabel {
+		t.Fatalf("elevRangeLabels over the fixture's range = %q, want the single label %q -- "+
+			"re-fixture this test rather than reading it as a wiring regression", got, wantLabel)
+	}
+	r, f, g := elevPlotOf(t, m, loE, hiE, w, h)
+	img, cell := profileStatic(t, r, f, g)
+	band := g.lblPx * 1.15
+
+	// The trace of a centred 0.2 m range never leaves the middle of the plot,
+	// so the edge bands below can be scanned for ink across the full width.
+	// Checked rather than assumed, since it is what makes those two assertions
+	// about labels and not about the polyline.
+	for _, e := range []float64{loE, hiE} {
+		if y := g.yAt(e); y < g.top+band || y > g.axisY-band {
+			t.Fatalf("the fixture's trace reaches y=%.1f for %v m, inside an edge label band "+
+				"(top %.1f..%.1f, bottom %.1f..%.1f)", y, e, g.top, g.top+band, g.axisY-band, g.axisY)
+		}
+	}
+
+	// One label, on the midline, of the midpoint's width. Searching the band
+	// the code drew into says nothing about WHERE that band is -- see
+	// TestRenderStatic_TheFlatProfilesOneLabelIsHungOnTheMidlineItself, which
+	// measures the position against the plot's own edges instead.
+	quarter := int(g.left + (g.right-g.left)/4)
+	minX, maxX := yLabelInk(img, int(g.left)-2, quarter, int(g.flatTraceY()-band), int(g.flatTraceY()))
+	if maxX < 0 {
+		t.Fatal("a profile too flat to label at both ends drew no centred label either")
+	}
+	inkWidth := float64(maxX - minX)
+	if want := float64(len(wantLabel)) * cell; math.Abs(inkWidth-want) > cell {
+		t.Errorf("the centred label inks %.0f px = %.2f cells, want %q's %d cells (%.0f px) within one cell",
+			inkWidth, inkWidth/cell, wantLabel, len(wantLabel), want)
+	}
+	if math.Abs(float64(minX)-g.left) > 2 {
+		t.Errorf("the centred label starts at x=%d, want the plot's left edge at x=%.0f", minX, g.left)
+	}
+
+	// And nothing at the plot's top or bottom edge, where the pair of identical
+	// labels used to sit.
+	for _, c := range []struct {
+		which  string
+		y0, y1 int
+	}{
+		{"top", int(g.top), int(g.top + band)},
+		{"bottom", int(g.axisY - band), int(g.axisY)},
+	} {
+		if _, maxX := yLabelInk(img, 0, w, c.y0, c.y1); maxX >= 0 {
+			t.Errorf("the %s of a plot too flat to label at both ends still carries ink -- "+
+				"the pair of identical labels is still being drawn beside the centred one", c.which)
+		}
+	}
+}
+
+// TestRender_AFlatCoursesTraceAndMarkerRunThroughTheMiddleOfThePlot is defect 2
+// in pixels, on both layers of the gauge. The geometry test above asserts what
+// yAt returns; this asserts that the stroked polyline and the playhead dot are
+// actually placed by it, which is the part a reader of a render sees.
+//
+// The behaviour it replaces is what a real clip of flat ground rendered: the
+// trace drawn along the very bottom of the box. The old guard raised yAt's
+// divisor to 1 m without moving its base off minE, so a 0.2 m range mapped into
+// the bottom fifth of the plot and a dead-flat one onto the axis line itself.
+//
+// Both expected positions are derived from the elevation the fixture holds at
+// the sampled place, through the plot's own geometry -- not from a run. The
+// tolerances are the ink's own width (the polyline's stroke, the marker's
+// radius), not tuned numbers, and the defect being detected moves the ink by
+// half the height of the box.
+func TestRender_AFlatCoursesTraceAndMarkerRunThroughTheMiddleOfThePlot(t *testing.T) {
+	const w, h = 1200, 800
+	const loE, hiE = -1.3, -1.1
+
+	m := elevProfileClimbing(loE, hiE)
+	r, f, g := elevPlotOf(t, m, loE, hiE, w, h)
+	// The fixture holds its high plateau over the last third of the course, so
+	// a sample at 1 000 m of its 1 190 m -- and the slice of the plot around
+	// that distance -- is at hiE, a tenth of the box above the midline. This is
+	// the one profile test that renders a per-frame layer, so the frame
+	// elevPlotOf resolved the geometry from gains a sample; the geometry does
+	// not depend on it.
+	const at = 1000.0
+	f.Time = time.Date(2026, 7, 4, 21, 0, 0, 0, time.UTC)
+	f.HasSample, f.Sample = true, telemetry.Sample{HasDistance: true, Distance: at}
+	if e, _, _ := m.AtDistance(at); math.Abs(e-hiE) > 1e-9 {
+		t.Fatalf("the fixture is at %v m at %v m along, want its high plateau at %v m", e, at, hiE)
+	}
+	wantY := g.yAt(hiE)
+	if got := fracUpThePlot(g, wantY); math.Abs(got-(0.5+0.2/2)) > 1e-9 {
+		t.Fatalf("the fixture's high plateau maps %.4f of the way up the plot, want %.4f -- "+
+			"re-fixture this test rather than reading it as a regression", got, 0.5+0.2/2)
+	}
+
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	r.Render(img, f)
+
+	// The white polyline, in a slice of the plot around the sampled distance.
+	// Nothing else in this slice is white: the plot's band is black, the y label
+	// hugs the left edge, and the x labels are below the axis line.
+	x0, x1 := int(g.xAt(at)-20), int(g.xAt(at)+20)
+	lineMin, lineMax := h, -1
+	for y := int(g.top); y < int(g.axisY); y++ {
+		for x := x0; x < x1; x++ {
+			i := y*img.Stride + x*4
+			red, green := int(img.Pix[i]), int(img.Pix[i+1])
+			if red >= 128 && green >= 128 { // white, not the marker's red
+				lineMin, lineMax = min(lineMin, y), max(lineMax, y)
+			}
+		}
+	}
+	if lineMax < 0 {
+		t.Fatal("the profile stroked no line at all")
+	}
+	stroke := math.Max(1.5, g.px*0.045)
+	if got := float64(lineMin+lineMax) / 2; math.Abs(got-wantY) > stroke+2 {
+		t.Errorf("a flat course's trace runs at y=%.1f where its elevation puts it at y=%.1f "+
+			"(the plot spans %.0f..%.0f) -- a range too small to plot is being pinned to the floor "+
+			"of the box rather than centred in it", got, wantY, g.top, g.axisY)
+	}
+
+	// The playhead's dot, which is the half of the marker that carries an
+	// elevation -- its line spans the plot's full height and says nothing about
+	// one. The two are told apart by opacity rather than by shape: the line is
+	// stroked at alpha 0.75 and premultiplies to about 180 in the red channel,
+	// the dot's core is opaque and reaches 240, and the white ring between them
+	// is excluded by the same red-minus-green test the x-position test uses.
+	dotMin, dotMax := h, -1
+	for y := int(g.top); y < int(g.axisY); y++ {
+		for x := 0; x < w; x++ {
+			i := y*img.Stride + x*4
+			red, green, blue := int(img.Pix[i]), int(img.Pix[i+1]), int(img.Pix[i+2])
+			if red >= 210 && red-green >= 60 && red-blue >= 60 {
+				dotMin, dotMax = min(dotMin, y), max(dotMax, y)
+			}
+		}
+	}
+	if dotMax < 0 {
+		t.Fatal("the profile drew no position marker at all")
+	}
+	rad := math.Max(4, g.px*0.14)
+	if got := float64(dotMin+dotMax) / 2; math.Abs(got-wantY) > rad+2 {
+		t.Errorf("the playhead dot is centred at y=%.1f, want y=%.1f (the axis position of %v m) -- "+
+			"the marker and the trace are placed by different mappings", got, wantY, hiE)
+	}
+}
+
+// elevPlotOf builds the elevation plot geometry for a model under
+// profileOnlyLayout at w x h, after checking that the model's SMOOTHED range is
+// the loE..hiE the caller named. That check is not ceremony: every expectation
+// in the tests below is derived from those two numbers, so a fixture whose
+// smoothing pulled its extremes in would leave the assertions around it
+// arithmetically true and meaningless. It fails loudly rather than adapting,
+// because a range that moved is a fixture to rewrite, not a regression.
+func elevPlotOf(t *testing.T, m *telemetry.ElevationModel, loE, hiE float64, w, h int) (*Renderer, Frame, elevPlot) {
+	t.Helper()
+	if lo, hi := m.Range(); math.Abs(lo-loE) > 1e-9 || math.Abs(hi-hiE) > 1e-9 {
+		t.Fatalf("the fixture model's smoothed range is %v..%v, want %v..%v -- "+
+			"re-fixture this test rather than reading it as a regression", lo, hi, loE, hiE)
+	}
+	r := NewRenderer(profileOnlyLayout())
+	f := Frame{Width: w, Height: h, Course: &Course{Elevation: m}}
+	g, ok := elevGeometry(r, r.resolveBox(r.layout.Placements[0], f), f)
+	if !ok {
+		t.Fatalf("elevGeometry declined a %v..%v m profile", loE, hiE)
+	}
+	return r, f, g
+}
+
+// TestElevFixtures_APlateauAtEachEndIsWhatMakesTheSmoothedRangeTheNamedOne
+// checks the premise every elevation expectation in this file rests on.
+//
+// The fixtures name their range -- 12.4..15.6, -1.3..-1.1 -- and derive label
+// strings and trace positions from it. Each of them re-reads Range() and fails
+// loudly if it does not match, so a fixture that drifted cannot quietly make
+// its own assertions true; what that guard cannot say is WHY it holds, or how
+// close it is to not holding. This test says both, so that the next person to
+// write a fixture copies the shape rather than the numbers.
+//
+// The reason is edge clamping. gaussianSmooth pads by repeating the end sample
+// over a radius of ceil(3*sigma) -- three samples at the sigma these fixtures
+// build at -- so a series that is still ramping at its extreme has that extreme
+// averaged with its own neighbours and pulled inwards. A plateau of radius+1
+// samples fills the whole kernel and comes through untouched.
+//
+// The bare-ramp row is the one that matters: it is not a failure mode anyone
+// would notice by eye. Three centimetres off each end of a 3.2 m rise is
+// nothing, but the same three centimetres off the flat fixture's 0.2 m range is
+// a seventh of it, which moves every derived trace position and can change a
+// label. The margin is asserted only as "not exact", not as a number, because
+// the number is the Gaussian's business.
+func TestElevFixtures_APlateauAtEachEndIsWhatMakesTheSmoothedRangeTheNamedOne(t *testing.T) {
+	const loE, hiE = 12.0, 15.2
+
+	// radius+1 samples held at each end: the kernel sees nothing but the
+	// plateau, so the extreme survives smoothing exactly.
+	const radius = 3 // ceil(3*sigma), at the sigma elevModelOfSeries builds at
+	s := hold(nil, loE, radius+1)
+	s = ramp(s, loE, hiE, 40)
+	if lo, hi := elevModelOfSeries(hold(s, hiE, radius+1)).Range(); math.Abs(lo-loE) > 1e-9 || math.Abs(hi-hiE) > 1e-9 {
+		t.Errorf("a series holding %d samples at each extreme smooths to %v..%v, want %v..%v -- the "+
+			"fixtures below cannot name their own range and every position derived from one is wrong",
+			radius+1, lo, hi, loE, hiE)
+	}
+
+	// The same ramp with no plateau: the extremes are averaged with their
+	// neighbours and land inside the named range at both ends.
+	lo, hi := elevModelOfSeries(ramp(hold(nil, loE, 1), loE, hiE, 40)).Range()
+	if lo <= loE || hi >= hiE {
+		t.Errorf("a bare ramp smooths to %v..%v, which still reaches %v..%v -- this test's account of "+
+			"why the fixtures hold a plateau at each end is wrong, so re-derive it before trusting them",
+			lo, hi, loE, hiE)
+	}
+}
+
+// highestTraceY is the smallest (topmost) y the profile's polyline reaches
+// between the plot's left edge and x, sampled at the same ~2 px spacing
+// DrawStatic strokes it at. The pixel tests use it to establish that the strip
+// they scan for label ink contains no trace ink above the band they are
+// looking in -- an assumption about the fixture that is cheaper to check than
+// to reason about, and wrong the moment a fixture's shape changes.
+func highestTraceY(g elevPlot, m *telemetry.ElevationModel, x float64) float64 {
+	top := math.Inf(1)
+	for px := g.left; px <= x; px++ {
+		d := g.startD + (px-g.left)/(g.right-g.left)*(g.endD-g.startD)
+		e, _, _ := m.AtDistance(d)
+		top = math.Min(top, g.yAt(e))
+	}
+	return top
+}
+
+// TestElevProfile_TheLabelRuleAndThePlotGeometryCrossTheFlatThresholdTogether
+// sweeps the elevation range across elevProfileFlatRange and requires the two
+// halves of the flat decision -- how many labels are printed, and whether the
+// trace is stretched over the box or centred in a fixed window -- to change at
+// the SAME range.
+//
+// The geometry table above shares elevRangeFlat's answer between the two, but
+// only at the six ranges it happens to name, and none of them lies between one
+// and two metres. A geometry that centred everything under 2 m while the labels
+// still collapsed only under 1 m passed the whole package: a 1.5 m rise would
+// then print "13.5 m" hard against the top of a box whose trace stops seven
+// eighths of the way up, which is an axis that lies about its own scale. This
+// test is the one that fails for that, and it is a sweep rather than another
+// row because the failure is a boundary that MOVED, and a boundary is only
+// pinned by cases either side of it.
+//
+// Both halves are checked against the RULE -- a range of at least
+// elevProfileFlatRange is a profile -- rather than against each other, so a
+// failure names which half moved. Reading the constant here rather than writing
+// 1.0 out is deliberate: moving the constant is a decision, and the tables
+// above are what hold it to a number. Nothing else is read from the code; the
+// expected positions are the range's share of the window, from arithmetic.
+//
+// The span each row is judged by is the model's OWN maxE-minE and not the
+// nominal one, because they differ by an ulp: a fixture built to span exactly
+// 1 m smooths to 0.9999999999999998 and is flat by a hair. That is not a
+// boundary worth naming -- at exactly the threshold the two branches produce
+// the same geometry to within 1e-16, which is the continuity the window's
+// height was chosen for -- and the tables above pin the threshold itself with
+// exact literals, where no smoother has been near them.
+func TestElevProfile_TheLabelRuleAndThePlotGeometryCrossTheFlatThresholdTogether(t *testing.T) {
+	// Spans either side of the flat threshold, and either side of the decimal
+	// one so that a rule wired to the wrong constant shows up as well.
+	for _, nominal := range []float64{0, 0.125, 0.5, 0.875, 1, 1.5, 2, 3.25, 9.5, 10, 40} {
+		t.Run(strings.ReplaceAll(fmt.Sprintf("a %v m range", nominal), ".", "_"), func(t *testing.T) {
+			const loE = 12.0
+			hiE := loE + nominal
+			_, _, g := elevPlotOf(t, elevProfileClimbing(loE, hiE), loE, hiE, 1200, 800)
+
+			// The geometry's own answer, read back through yAt. g.minE/g.maxE
+			// rather than the nominal ends so that this is an identity of the
+			// plot's mapping and carries no smoothing residue.
+			span := g.maxE - g.minE
+			loFrac, hiFrac := fracUpThePlot(g, g.yAt(g.minE)), fracUpThePlot(g, g.yAt(g.maxE))
+
+			// A profile fills the box floor to ceiling. A flat range is centred
+			// in a window elevProfileFlatRange tall, so its ends sit half its
+			// share of that window either side of the midline -- which is the
+			// second role that constant plays, pinned here as well as in the
+			// table above so that the two roles cannot part company. A window
+			// of a different height crosses at the same range, so an agreement
+			// check alone would not notice one.
+			wantLo, wantHi := 0.0, 1.0
+			if span < elevProfileFlatRange {
+				share := span / elevProfileFlatRange
+				wantLo, wantHi = 0.5-share/2, 0.5+share/2
+			}
+			if math.Abs(loFrac-wantLo) > 1e-9 || math.Abs(hiFrac-wantHi) > 1e-9 {
+				t.Errorf("a %v m range maps to %.6f..%.6f of the plot, want %.6f..%.6f -- %s",
+					span, loFrac, hiFrac, wantLo, wantHi,
+					map[bool]string{
+						true:  "a range this size is a profile and fills the box",
+						false: "a range this size is centred in a window one elevProfileFlatRange tall",
+					}[span >= elevProfileFlatRange])
+			}
+			want := 1
+			if span >= elevProfileFlatRange {
+				want = 2
+			}
+			if got := len(elevRangeLabels(g.minE, g.maxE)); got != want {
+				t.Errorf("a %v m range gets %d label(s), want %d -- the labels and the plot geometry "+
+					"disagree about whether a range this size is a profile", span, got, want)
+			}
+		})
+	}
+}
+
+// TestRenderStatic_AWholeActivitysProfileStillLabelsWholeMetresAtBothEnds is
+// the render that must NOT have changed, and the only test that looks at one.
+//
+// Everything else about this stage is exercised on ranges under ten metres,
+// which is where the defect was; the whole-activity path -- tens of metres of
+// terrain, two whole-metre labels, the trace filling the box -- is asserted
+// only as strings from elevRangeLabels. That leaves DrawStatic free to format
+// its own labels for it: replacing the pair with "%.1f m" passed the entire
+// package, because on a 3.2 m fixture the decimal is what the rule asks for
+// anyway. A decimal appearing on every whole activity ever rendered is the
+// exact default change the x-axis rule was careful not to make.
+//
+// The fixture's two labels are therefore chosen to differ in LENGTH: "128 m" is
+// five cells and "8 m" is three, so the widths measured here also catch the two
+// being drawn at each other's ends. A swap is otherwise invisible -- the range
+// used by the precision test spells both ends with six characters -- and an
+// upside-down axis is a wrong number on every reading of the gauge.
+func TestRenderStatic_AWholeActivitysProfileStillLabelsWholeMetresAtBothEnds(t *testing.T) {
+	const w, h = 1200, 800
+	// 120 m of climb: well above elevProfileDecimalRange, so the rule says
+	// whole metres, as this gauge has drawn them since before any of this.
+	const loE, hiE = 8.0, 128.0
+	const wantTop, wantBottom = "128 m", "8 m"
+
+	m := elevProfileOpeningMidRange(loE, hiE)
+	r, f, g := elevPlotOf(t, m, loE, hiE, w, h)
+	if got := elevRangeLabels(m.Range()); len(got) != 2 || got[0] != wantTop || got[1] != wantBottom {
+		t.Fatalf("elevRangeLabels over the fixture's range = %q, want %q..%q -- re-fixture this test "+
+			"rather than reading it as a wiring regression", got, wantTop, wantBottom)
+	}
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	r.RenderStatic(img, f)
+
+	dc := gg.NewContext(1, 1)
+	dc.SetFontFace(r.face(g.lblPx))
+	cell, _ := dc.MeasureString("0")
+
+	// This fixture runs along the middle of its own range for the whole left
+	// half of the plot, so neither edge band carries trace ink left of the
+	// midpoint. Checked from the geometry rather than assumed, since it is what
+	// makes the measurements below measurements of glyphs.
+	band := g.lblPx * 1.15
+	mid := int((g.left + g.right) / 2)
+	if y := g.yAt((loE + hiE) / 2); y < g.top+band || y > g.axisY-band {
+		t.Fatalf("the fixture's opening trace is at y=%.1f, inside an edge label band "+
+			"(top %.1f..%.1f, bottom %.1f..%.1f)", y, g.top, g.top+band, g.axisY-band, g.axisY)
+	}
+	for _, c := range []struct {
+		which  string
+		label  string
+		y0, y1 int
+	}{
+		{"top", wantTop, int(g.top), int(g.top + band)},
+		{"bottom", wantBottom, int(g.axisY - band), int(g.axisY)},
+	} {
+		minX, maxX := yLabelInk(img, int(g.left)-2, mid, c.y0, c.y1)
+		if maxX < 0 {
+			t.Errorf("a whole activity's profile drew no %s elevation label at all", c.which)
+			continue
+		}
+		inkWidth := float64(maxX - minX)
+		if want := float64(len(c.label)) * cell; math.Abs(inkWidth-want) > cell {
+			t.Errorf("a whole activity's %s elevation label inks %.0f px = %.2f cells, want %q's %d cells "+
+				"(%.0f px) within one cell -- either this render has gained a precision it never had, "+
+				"or the two ends are drawn at each other's positions",
+				c.which, inkWidth, inkWidth/cell, c.label, len(c.label), want)
+		}
+	}
+}
+
+// TestRenderStatic_TheFlatProfilesOneLabelIsHungOnTheMidlineItself pins WHERE
+// the single label goes, against the plot's own edges rather than against
+// midY.
+//
+// The flat render test above scans the band [midY-band, midY) for the label it
+// expects to find there, which cannot fail for a label drawn from that same
+// midY: moving the midline to two fifths of the way up the plot moves the label
+// and the search for it together, and passes. The trace does not move with it
+// -- it is placed by yAt -- so the render that passes has a label naming a line
+// ten pixels above the one it names. That is precisely the silent inconsistency
+// this stage exists to remove, reintroduced one method along.
+//
+// The measurement is a DIFFERENCE between two renders and so needs no font
+// metric written down. The centred label and a two-label render's top label are
+// drawn by the same call at the same size, one anchored at midY-band and the
+// other at the plot's top, so whatever inset the glyphs have inside their box
+// is identical and cancels: the gap between the two inked tops must be exactly
+// the gap between the two anchors, which the test computes from g.top and
+// g.axisY. The tolerance is one pixel, for the two anchors' different
+// subpixel phases -- the defect being detected is a tenth of the plot's height,
+// about ten pixels here.
+func TestRenderStatic_TheFlatProfilesOneLabelIsHungOnTheMidlineItself(t *testing.T) {
+	const w, h = 1200, 800
+
+	// Two fixtures, one either side of the flat threshold, at the same frame
+	// size so that their plots are the same box: the geometry depends on the
+	// frame and the layout, not on the elevations.
+	const flatLo, flatHi = -1.3, -1.1
+	const riseLo, riseHi = 12.4, 15.6
+	rFlat, fFlat, gFlat := elevPlotOf(t, elevProfileClimbing(flatLo, flatHi), flatLo, flatHi, w, h)
+	rRise, fRise, gRise := elevPlotOf(t, elevProfileClimbing(riseLo, riseHi), riseLo, riseHi, w, h)
+	if gFlat.top != gRise.top || gFlat.axisY != gRise.axisY || gFlat.lblPx != gRise.lblPx {
+		t.Fatalf("the two fixtures' plots are not the same box (%v..%v at %v px against %v..%v at %v px)",
+			gFlat.top, gFlat.axisY, gFlat.lblPx, gRise.top, gRise.axisY, gRise.lblPx)
+	}
+	if n := len(elevRangeLabels(gFlat.minE, gFlat.maxE)); n != 1 {
+		t.Fatalf("the flat fixture gets %d labels, want the single centred one", n)
+	}
+	if n := len(elevRangeLabels(gRise.minE, gRise.maxE)); n != 2 {
+		t.Fatalf("the rising fixture gets %d labels, want two", n)
+	}
+
+	imgFlat := image.NewRGBA(image.Rect(0, 0, w, h))
+	rFlat.RenderStatic(imgFlat, fFlat)
+	imgRise := image.NewRGBA(image.Rect(0, 0, w, h))
+	rRise.RenderStatic(imgRise, fRise)
+
+	// The topmost inked row in a strip along the plot's left edge. Both
+	// fixtures open on their low ground, so over the left quarter the trace
+	// runs below every label in that strip and cannot be the topmost ink;
+	// checked below rather than assumed.
+	dc := gg.NewContext(1, 1)
+	dc.SetFontFace(rFlat.face(gFlat.lblPx))
+	cell, _ := dc.MeasureString("0")
+	strip := int(gFlat.left + 8*cell)
+	band := gFlat.lblPx * 1.15
+	inkTop := func(img *image.RGBA, name string) int {
+		for y := int(gFlat.top); y < int(gFlat.axisY); y++ {
+			if _, maxX := yLabelInk(img, int(gFlat.left)-2, strip, y, y+1); maxX >= 0 {
+				return y
+			}
+		}
+		t.Fatalf("the %s profile inked nothing down the left edge of its plot", name)
+		return 0
+	}
+	for _, c := range []struct {
+		name  string
+		g     elevPlot
+		m     *telemetry.ElevationModel
+		floor float64 // the trace must stay BELOW this y across the strip
+	}{
+		{"flat", gFlat, fFlat.Course.Elevation, (gFlat.top + gFlat.axisY) / 2},
+		{"rising", gRise, fRise.Course.Elevation, gRise.top + band},
+	} {
+		if y := highestTraceY(c.g, c.m, float64(strip)); y < c.floor {
+			t.Fatalf("the %s fixture's trace reaches y=%.1f over the strip being scanned, above %.1f -- "+
+				"it, and not a label, would be the topmost ink there", c.name, y, c.floor)
+		}
+	}
+
+	// The two anchors: the plot's top, and one label band above the midline --
+	// the midline taken from the plot's own edges, which is what makes this a
+	// check on midY rather than a restatement of it.
+	wantMid := (gFlat.top + gFlat.axisY) / 2
+	wantDrop := (wantMid - band) - gFlat.top
+	if gotDrop := float64(inkTop(imgFlat, "flat") - inkTop(imgRise, "rising")); math.Abs(gotDrop-wantDrop) > 1 {
+		t.Errorf("the single label of a profile too flat to have two sits %.0f px below where a top "+
+			"label sits, want %.1f px -- it is not hung one label band above the midline the flat "+
+			"trace runs along, so it names a line it is not beside", gotDrop, wantDrop)
+	}
+}
+
 // TestAxisLabels_TheUnitFollowsTheSpanAndTheWholeActivityIsUnchanged pins both
 // axes' end labels as strings, which is the only way any claim about them can
 // be checked -- once drawn they are glyphs.
@@ -1157,35 +2057,19 @@ func TestRenderStatic_TheProfileLabelsItsOwnOriginNotZero(t *testing.T) {
 	if !ok {
 		t.Fatal("elevGeometry declined the fixture profile")
 	}
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	r.RenderStatic(img, f)
-
-	// One character cell of the label face, measured rather than assumed: the
-	// expected widths below are then derived from the label STRINGS, and stay
-	// correct if the layout's font scale ever changes.
-	dc := gg.NewContext(1, 1)
-	dc.SetFontFace(r.face(g.lblPx))
-	cell, _ := dc.MeasureString("0")
+	// The expected widths below are derived from the label STRINGS in character
+	// cells, and the cell comes measured from the face that drew them.
+	img, cell := profileStatic(t, r, f, g)
 
 	// The two labels sit in the strip under the axis line: the start label
 	// left-aligned on the plot's left edge, the end label right-aligned on its
-	// right. Only the white glyph core counts as ink -- the plot's translucent
-	// black band is premultiplied to zero in the red channel, and its bottom
-	// row is inside this strip.
-	leftMin, leftMax, rightMin, rightMax := w, -1, w, -1
+	// right, so the strip is scanned in two halves split at the plot's midpoint.
+	// Nothing else inks it: the plot's translucent black band, whose bottom row
+	// is inside this strip, is premultiplied to zero in the red channel.
+	y0, y1 := int(g.axisY), int(g.axisY+g.lblPx*1.8)
 	mid := int((g.left + g.right) / 2)
-	for y := int(g.axisY); y < int(g.axisY+g.lblPx*1.8) && y < h; y++ {
-		for x := 0; x < w; x++ {
-			if img.Pix[y*img.Stride+x*4] < 200 {
-				continue
-			}
-			if x < mid {
-				leftMin, leftMax = min(leftMin, x), max(leftMax, x)
-			} else {
-				rightMin, rightMax = min(rightMin, x), max(rightMax, x)
-			}
-		}
-	}
+	leftMin, leftMax := yLabelInk(img, 0, mid, y0, y1)
+	rightMin, rightMax := yLabelInk(img, mid, w, y0, y1)
 	if leftMax < 0 || rightMax < 0 {
 		t.Fatalf("the profile drew no axis labels at all (left ink %d..%d, right ink %d..%d)",
 			leftMin, leftMax, rightMin, rightMax)

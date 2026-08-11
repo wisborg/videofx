@@ -21,6 +21,23 @@ import (
 // side by side so that the difference between them is visible as a decision
 // rather than discoverable as an inconsistency: they share the unit and differ
 // only in kilometre precision, for the reason recorded on the constants below.
+//
+// The elevation profile's VERTICAL axis is labelled from this file too, at the
+// bottom. It shares no geometry with the distance axis and only one gauge draws
+// it; what it shares is the RULE the thresholds above were derived from, and it
+// is here so that the rule is stated once and every threshold taken from it is
+// visible at the same time.
+//
+// # SPAN and RANGE
+//
+// The two axes' identifiers differ by one word, deliberately and consistently:
+// SPAN is always metres TRAVELLED along the horizontal axis, RANGE always
+// metres of ALTITUDE up the vertical one. Hence elevProfileDecimalSpan (10 000)
+// beside elevProfileDecimalRange (10), and elevAxisLabels beside
+// elevRangeLabels. Three orders of magnitude apart and one word apart, so
+// swapping two of them compiles and quietly relabels an axis; the convention is
+// what makes the mistake nameable, and it is worth more than renaming either
+// pair to something longer.
 
 // metreAxisSpan and elevProfileDecimalSpan are the two spans at which a label
 // format stops carrying information, and both follow from one rule:
@@ -103,33 +120,48 @@ func axisInMetres(span float64) bool { return span < metreAxisSpan }
 //
 // The unit comes from the SPAN and not from d, so both ends of an axis are
 // always spelled the same way, and so this package needs no idea whether it is
-// drawing a clip. See metreAxisSpan.
-//
-// # The negative zero
-//
-// fmt keeps the sign of a value that rounded away: "%.0f" of -0.03 is "-0",
-// so a rebased clip opening on a backwards distance blip -- which
-// telemetry.firstDistance deliberately does not skip -- could label its axis
-// "-0 km". That reads as a typo rather than as a number, and it is stripped
-// here, at the one place labels are produced, rather than at the callers.
-//
-// Stripping it is a presentation fix and not a data one, and it is safe
-// because it can only fire where the magnitude has ALREADY been rounded away:
-// at any precision that still shows a digit, the digits are non-zero and this
-// does nothing. On the metre-scale axis such a clip actually gets, a -30 m
-// origin still prints "-30 m". Escalating the precision instead was the
-// alternative and does not work -- "%.1f km" of -0.03 is "-0.0", the same
-// defect with a decimal point.
+// drawing a clip. See metreAxisSpan. The sign of a value that rounded away is
+// dropped by fixedNoNegZero -- see there, not here, since the elevation labels
+// need the same treatment for their own reasons.
 func axisLabel(d, span float64, kmDecimals int) string {
 	value, unit, decimals := d, " m", 0
 	if !axisInMetres(span) {
 		value, unit, decimals = d/1000, " km", kmDecimals
 	}
-	s := fmt.Sprintf("%.*f", decimals, value)
+	return fixedNoNegZero(value, decimals) + unit
+}
+
+// fixedNoNegZero formats v to decimals places, rendering a value that rounded
+// down to zero from below as a plain zero rather than as "-0".
+//
+// # The negative zero
+//
+// fmt keeps the sign of a value that rounded away: "%.0f" of -0.03 is "-0". It
+// arrives from both directions. A rebased clip opening on a backwards distance
+// blip -- which telemetry.firstDistance deliberately does not skip -- would
+// label its axis "-0 km"; a course along a sea-level path has an elevation
+// range whose low end is a few centimetres under water and labels it "-0 m".
+// Either reads as a typo rather than as a number.
+//
+// It is stripped here because here is where both families of label are
+// produced. axisLabel and elevLabel share nothing else -- different units,
+// different rules, different axes -- so the alternative was two copies of a
+// three-line string comparison, and one of them would eventually be the one
+// that was not fixed.
+//
+// Stripping it is a presentation fix and not a data one, and it is safe
+// because it can only fire where the magnitude has ALREADY been rounded away:
+// at any precision that still shows a digit, the digits are non-zero and this
+// does nothing. On the metre-scale axis a short clip actually gets, a -30 m
+// origin still prints "-30 m", and a -1.2 m elevation still prints "-1.2 m".
+// Escalating the precision instead was the alternative and does not work --
+// "%.1f km" of -0.03 is "-0.0", the same defect with a decimal point.
+func fixedNoNegZero(v float64, decimals int) string {
+	s := fmt.Sprintf("%.*f", decimals, v)
 	if zero := fmt.Sprintf("%.*f", decimals, 0.0); s == "-"+zero {
 		s = zero
 	}
-	return s + unit
+	return s
 }
 
 // readsAsZero reports whether d's label at this precision is the one an origin
@@ -228,4 +260,91 @@ func elevAxisLabels(startD, endD float64) (start, end string) {
 		decimals = 1
 	}
 	return axisLabel(startD, span, decimals), axisLabel(endD, span, decimals)
+}
+
+// elevProfileDecimalRange and elevProfileFlatRange are the elevation profile's
+// VERTICAL thresholds. They are not new numbers: they are the rule the distance
+// spans above were derived from -- a label's rounding step must not exceed a
+// tenth of the axis it labels -- applied to metres of ALTITUDE rather than
+// metres travelled.
+//
+// "%.0f m" steps by 1 m, a tenth of a 10 m range. Above that, whole metres, as
+// this gauge has always drawn them; a whole activity's profile spans tens of
+// metres and is untouched. Below it, one decimal, and that threshold is the
+// whole of what was wrong on a clip: sixteen seconds of ordinary flat ground is
+// a 0.2 m range, on which both ends printed the same "-1 m". This is the
+// failure the span-driven x-axis units already removed, on the other axis, and
+// it could not occur before clip scoping made short ranges routine.
+//
+// "%.1f m" steps by 0.1 m, so it runs out at a 1 m range, and there is nothing
+// underneath it to escalate to. Barometric elevation is not good to the
+// centimetre and a "12.34 m" label would invent precision the FIT does not
+// carry. So below a metre the profile stops claiming to be a profile: one
+// label, the midpoint, and the trace centred (elevGeometry). A single honest
+// number is the floor here, where the distance axis had metres to fall back to.
+//
+// The two thresholds meet without a step. elevProfileFlatRange is also the
+// HEIGHT of the window a flat range is centred in, so a 0.99 m range fills 99%
+// of the box centred and a 1.00 m range fills 100% of it stretched: a clip
+// crossing the boundary does not see its trace jump. That is why the window is
+// this number and not some other round one.
+const (
+	elevProfileDecimalRange = 10.0
+	elevProfileFlatRange    = 1.0
+)
+
+// elevRangeFlat reports whether an elevation range of span metres is too small
+// to be drawn and labelled as a profile -- see elevProfileFlatRange. It is one
+// predicate rather than a comparison at each site because the label rule and
+// the plot geometry must agree: a centred trace under two end labels, or two
+// labels beside a floor-pinned trace, are each half a fix.
+func elevRangeFlat(span float64) bool { return span < elevProfileFlatRange }
+
+// elevLabel renders one elevation at the precision a range of span metres
+// justifies. The precision comes from the RANGE and not from e, so both ends of
+// a profile are always spelled the same way -- the same reason axisLabel takes
+// the span rather than reading the value it is given. A reading a few
+// centimetres under water is spelled "0 m" rather than "-0 m"; see
+// fixedNoNegZero.
+func elevLabel(e, span float64) string {
+	decimals := 0
+	if span < elevProfileDecimalRange {
+		decimals = 1
+	}
+	return fixedNoNegZero(e, decimals) + " m"
+}
+
+// elevRangeLabels returns the elevation profile's y-axis labels for a smoothed
+// range of minE..maxE metres: the top label then the bottom one, or a SINGLE
+// label -- the midpoint -- when the range is too small for two of them to
+// differ. The caller draws one label centred in the plot and two at its edges;
+// len tells it which, so the two decisions cannot drift apart.
+//
+// Returning a slice rather than two strings is deliberate: an empty second
+// string would have to be checked for, and one caller forgetting to would draw
+// a blank label at the plot's floor, which is invisible in a render.
+//
+// # What this does and does not change on a whole activity
+//
+// A 40 m range keeps "53 m" .. "13 m", byte for byte. Three whole-activity
+// renders do move, and this is the list:
+//
+//   - An activity whose whole elevation range is under 10 m -- a flat coastal
+//     loop -- gains a decimal, exactly as a clip of the same range does. That
+//     is the same span-driven bargain the x-axis rule struck: nothing in this
+//     package can see a scope, and a 3 m range is a 3 m range whether it took
+//     sixteen seconds or four hours.
+//   - An activity flatter than a metre end to end collapses to the single
+//     label too. A treadmill or a velodrome, in practice.
+//   - An activity whose low point is a few centimetres under water had its
+//     bottom label rounded to "-0 m" and now reads "0 m". That one is not this
+//     rule's doing at all -- it comes of routing both label families through
+//     fixedNoNegZero -- but it is a whole-activity render that moves, so it
+//     belongs in a list that promises to be the list.
+func elevRangeLabels(minE, maxE float64) []string {
+	span := maxE - minE
+	if elevRangeFlat(span) {
+		return []string{elevLabel((minE+maxE)/2, span)}
+	}
+	return []string{elevLabel(maxE, span), elevLabel(minE, span)}
 }
