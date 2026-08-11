@@ -3,7 +3,9 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"slices"
 	"strconv"
@@ -96,7 +98,7 @@ func NewRootCmd() *cobra.Command {
 	root.Flags().Float64Var(&strength, "strength", 0.5,
 		"effect strength, from 0.0 (subtle) to 1.0 (strong)")
 	root.Flags().StringVar(&outputDir, "output-dir", "",
-		"directory to write results to (default: alongside each input file)")
+		"directory to write results to (default: alongside each input file). Created if it does not exist, and checked up front that it can actually be written to -- so a missing or read-only directory fails before any processing rather than at write time, which for a long render is after all the work")
 	root.Flags().StringVar(&suffix, "suffix", "",
 		"override the filename suffix added before the extension (default: the effect's own, e.g. gocv-stabilizer uses \"gocv-stabilized\" to produce \"clip - gocv-stabilized.mp4\"). Joined to the name with \" - \"; must not contain a path separator")
 	root.Flags().IntVar(&concurrency, "concurrency", 1,
@@ -853,6 +855,85 @@ func validateSuffix(suffix string) error {
 	return nil
 }
 
+// prepareOutputDir makes --output-dir usable, or fails the run before any file
+// is read: it creates the directory (with its parents) if it is missing, and
+// then proves it can be written to. An empty dir is --output-dir unset -- the
+// default, "alongside each input file" -- and touches the filesystem not at all.
+//
+// This exists because naming.Resolve substitutes outputDir into a path without
+// ever asking whether that path can be written: its exists() check answers
+// "false" for a candidate in a directory that isn't there, so a perfectly
+// good-looking name comes back and the first complaint arrives from ffmpeg at
+// WRITE time. For telemetry-hud that is after the entire render -- minutes of
+// 4K work thrown away for a typo'd or not-yet-created directory.
+//
+// The writability probe is the half that earns its place. MkdirAll SUCCEEDS on
+// a directory that already exists but cannot be written to, which has exactly
+// the same late-failure shape as the missing directory this function was added
+// to prevent, so creating without probing would fix only the easier half. The
+// probe creates and removes a real temp file rather than reading the mode bits
+// or calling access(2): it is the operation the run is about to perform, so it
+// also covers a read-only mount, an ACL, an immutable flag or a full inode
+// table -- none of which show up in a permission bit.
+//
+// It runs ONCE per invocation, from runRoot, not once per output path: a batch
+// of fifty clips must probe (and log) one directory one time.
+func prepareOutputDir(log *logging.Logger, dir string) error {
+	if dir == "" {
+		return nil
+	}
+
+	// Stat first, following symlinks the way MkdirAll does, for two reasons:
+	// an existing FILE at this path otherwise reaches the user as MkdirAll's
+	// raw "not a directory" errno, and knowing whether it was already there is
+	// what makes the "created" line below say something true.
+	//
+	// Only a NOT-EXIST error means "create it". Every other Stat failure --
+	// EACCES on a parent, ELOOP on a symlink cycle, a dangling symlink at this
+	// path -- is a different problem, and treating them all as "missing" hands
+	// the user MkdirAll's raw errno for a case this function claims to explain:
+	// a dangling symlink produces "mkdir ...: file exists", which is exactly the
+	// message shape rejected for the existing-file case above.
+	info, err := os.Stat(dir)
+	switch {
+	case err == nil && !info.IsDir():
+		return fmt.Errorf("--output-dir %q already exists and is not a directory; give a directory path (or a name that does not exist yet, which is created)", dir)
+	case err == nil:
+		// Already a directory: leave it exactly as it is, and say nothing.
+	case !errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("--output-dir %q cannot be used: %w", dir, err)
+	default:
+		// Stat said "nothing here", but Stat FOLLOWS symlinks, so a dangling
+		// symlink says that too while still occupying the name -- and MkdirAll
+		// then fails with the bare "mkdir ...: file exists", the raw-errno shape
+		// the existing-file case above exists to avoid. Lstat is the question
+		// actually being asked (is this name free?), the same distinction
+		// internal/naming's exists() draws, for the same reason.
+		if _, lerr := os.Lstat(dir); lerr == nil {
+			return fmt.Errorf("--output-dir %q is a symlink whose target does not exist; point it at a directory that is there, or remove the link", dir)
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("creating --output-dir %q: %w", dir, err)
+		}
+		// Worth a line: creating rather than rejecting a missing directory
+		// means a MISTYPED --output-dir now quietly produces a new empty
+		// directory instead of an error, and this is the only trace of it.
+		log.Infof("created output directory %s", dir)
+	}
+
+	probe, err := os.CreateTemp(dir, ".videofx-write-check-*")
+	if err != nil {
+		return fmt.Errorf("--output-dir %q is not writable: %w", dir, err)
+	}
+	// Close before Remove, and ignore both errors: the probe is the CreateTemp
+	// above, which has already answered the question. A failed cleanup would
+	// leave a stray zero-byte dot-file, which is not worth failing a run over.
+	probeName := probe.Name()
+	_ = probe.Close()
+	_ = os.Remove(probeName)
+	return nil
+}
+
 // checkAvailable verifies effect's external-tool dependency. It is
 // effect-specific: warp-stabilizer needs a vidstab-CAPABLE ffmpeg (a
 // stronger, differently-resolved requirement than "ffmpeg is on PATH"),
@@ -1130,6 +1211,20 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	}
 	warnTelemetryNotLast(log, effs)
 	warnCRFIgnoredByGoCV(log, cmd.Flags().Changed("crf"), effs)
+
+	// Genuinely last of the up-front checks, and the only one that touches the
+	// disk: every objection that costs nothing -- the flag validators, each
+	// effect's external-tool dependency, the per-effect configuration, the
+	// chain's own coherence -- has already been raised, so a run that fails for
+	// one of those reasons does not leave a directory behind that it created.
+	// (It ran before the dependency checks once, and `--effect warp-stabilizer
+	// --output-dir new/dir` on a machine with no vidstab ffmpeg then created the
+	// directory and immediately failed.) Still ahead of ValidateInputFiles and
+	// of any processing, because an --output-dir that cannot be written to must
+	// not be discovered after a render.
+	if err := prepareOutputDir(log, outputDir); err != nil {
+		return err
+	}
 
 	if err := cliutil.ValidateInputFiles(args); err != nil {
 		return err
