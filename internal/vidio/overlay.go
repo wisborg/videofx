@@ -68,14 +68,15 @@ func overlayArgs(cfg OverlayConfig) []string {
 		"-map", "[v]",
 		"-map", "0:a?",
 		"-c:a", "copy",
-		// Carry the source's container metadata (creation_time above all --
-		// the field downstream tools sync on) onto the output. The composited
-		// video is a new [v] stream so only global metadata is mapped, which
-		// is where creation_time lives; see internal/effects/telemetry.go for
-		// the same reasoning.
-		"-map_metadata", "0",
-		"-c:v", "hevc_videotoolbox",
 	}
+	// Carry the source's container metadata (creation_time above all -- the
+	// field downstream tools sync on, and the location keys a viewer's library
+	// places the clip by) onto the output. The composited video is a new [v]
+	// stream so only global metadata is mapped, which is where both live; see
+	// MetadataCarryArgs for why the muxer flag is part of that carry-over and
+	// not an extra.
+	args = append(args, MetadataCarryArgs(0)...)
+	args = append(args, "-c:v", "hevc_videotoolbox")
 	if cfg.Quality > 0 {
 		args = append(args, "-q:v", strconv.Itoa(cfg.Quality))
 	}

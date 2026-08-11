@@ -85,18 +85,27 @@ func composedDisplayRotation(existing, degrees int) int {
 // container metadata (creation_time et al.) through untouched. Unless debug,
 // the command runs at ffmpeg's "error" log level so a successful run is silent
 // (the same quiet-by-default behavior as Telemetry.Apply).
+//
+// "Untouched" is what vidio.MetadataCarryArgs makes true, and did not use to
+// be: with a bare -map_metadata 0 this effect stream-copied every track and
+// every timestamp faithfully and still dropped the Apple location key, so
+// `--effect telemetry,rotate` produced a clip that QuickTime and Photos no
+// longer placed on a map. Nothing about the operation is lossy; the muxer
+// simply declines to write global keys it does not recognize unless told to.
 func rotateArgs(displayRotation int, src, dst string, debug bool) []string {
 	var args []string
 	if !debug {
 		args = append(args, "-hide_banner", "-loglevel", "error")
 	}
-	return append(args,
+	args = append(args,
 		"-y",
 		"-display_rotation", strconv.Itoa(displayRotation),
 		"-i", src,
 		"-map", "0",
 		"-c", "copy",
-		"-map_metadata", "0",
+	)
+	args = append(args, vidio.MetadataCarryArgs(0)...)
+	return append(args,
 		// Bare positional: a dst whose name starts with a dash is otherwise
 		// parsed as an option. Reachable here without any odd input -- the
 		// output name is derived from the source's, so a clip named "-y.mp4"

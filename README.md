@@ -161,9 +161,9 @@ Flags:
 - `--power-source` — telemetry-hud only: which power reading the lower-left metrics gauge shows when the FIT carries **both** a footpod (Stryd) developer-field power **and** the standard FIT `power` field — the two are different sensors and can disagree substantially. `auto` (default) prefers the Stryd developer field and falls back to the native field; `stryd` forces the footpod field (shows `-- W` if absent); `native` forces the standard FIT field. Only affects the on-screen HUD number — what the `telemetry` effect writes to its SRT/GPX is unchanged by this flag.
 - `--hud-layout` — telemetry-hud only: which gauge arrangement to use — `auto` (default), `default`, or `vertical`. `auto` picks the **vertical** layout for portrait (taller-than-wide) clips and the full **default** layout otherwise, keyed on the clip's *display* dimensions (a phone/action-cam clip stored landscape with a 90°/270° rotation flag is treated as the portrait it plays back as). The vertical layout keeps only the three gauges that read well on a narrow frame — the distance progress bar (top), the course map (middle-right, as in the landscape layout), and the elevation-vs-distance profile (bottom) — each widened to use more of the narrow width; the default layout's seven gauges crowd a portrait frame. Force one with `default`/`vertical`.
 - `--srt-format` — telemetry only: embed a `mov_text` telemetry subtitle track in this format — `none` (default), `readable` (a human-readable per-second readout), or `dji` (the DJI-drone SRT layout that [Telemetry Overlay](#embedding-telemetry-for-telemetry-overlay) reads directly from the video). The location tag is written independently of this (see `--location`). A muxed track is **hidden by default** (see `--show-subtitle`).
-- `--srt-sidecar` — telemetry only: write the `--srt-format` SRT as a **separate `.srt` file** next to the output (like `--gpx`) **instead of embedding it** — e.g. `clip - telemetry.srt` beside `clip - telemetry.mp4`. Nothing is muxed into the video, so nothing can display during playback, while Telemetry Overlay reads the separate file (matching DJI's own `NAME.MP4` + `NAME.SRT` pairing). **The reliable way to keep telemetry off screen** (see below). Off by default (the SRT is embedded); requires `--srt-format readable` or `dji`.
-- `--show-subtitle` — telemetry only: keep the **embedded** subtitle track visible/auto-displayed. **Off by default** — an embedded subtitle is flagged hidden (its track-`enabled` flag cleared), but **macOS players (QuickTime, Quick Look) auto-display subtitles regardless of that flag**, so this doesn't reliably hide it; use `--srt-sidecar` instead. Ignored with `--srt-sidecar`.
-- `--gpx` — telemetry only: **also** write a GPX sidecar next to the output (`clip - telemetry.gpx`). **Off by default** — most runs just want the muxed clip; the sidecar is a separate deliverable for map tools and re-syncing, so it's opt-in.
+- `--srt-sidecar` — telemetry only: write the `--srt-format` SRT as a **separate `.srt` file** next to the output (like `--gpx`) **instead of embedding it** — e.g. `clip - telemetry.srt` beside `clip - telemetry.mp4`. Nothing is muxed into the video, so nothing can display during playback, while Telemetry Overlay reads the separate file (matching DJI's own `NAME.MP4` + `NAME.SRT` pairing). **The reliable way to keep telemetry off screen** (see below). Off by default (the SRT is embedded); requires `--srt-format readable` or `dji`, and requires `telemetry` to be the last effect in a chain (see [Chaining effects](#chaining-effects)).
+- `--show-subtitle` — telemetry only: keep the **embedded** subtitle track visible/auto-displayed. **Off by default** — an embedded subtitle is flagged hidden (its track-`enabled` flag cleared), but **macOS players (QuickTime, Quick Look) auto-display subtitles regardless of that flag**, so this doesn't reliably hide it; use `--srt-sidecar` instead. The cleared flag also does not survive a later remux — any effect chained after `telemetry` re-muxes the file and the mp4 muxer marks every track enabled again (videofx warns about this; see [Chaining effects](#chaining-effects)). Ignored with `--srt-sidecar`.
+- `--gpx` — telemetry only: **also** write a GPX sidecar next to the output (`clip - telemetry.gpx`). **Off by default** — most runs just want the muxed clip; the sidecar is a separate deliverable for map tools and re-syncing, so it's opt-in. Like `--srt-sidecar`, it requires `telemetry` to be the last effect in a chain (see [Chaining effects](#chaining-effects)).
 - `--location` — telemetry only: write the clip's GPS position into the output's container metadata — the `location` tag and Apple's `com.apple.quicktime.location.ISO6709`. **On by default**, and the only telemetry output that is. Pass `--location=false` to leave it out: that tag is read by YouTube, Photos, Immich and QuickTime, so a run starting at your front door otherwise ships your home address inside the file. This governs only the tag **videofx writes**: a position the camera already recorded is carried over regardless, and it has no bearing on `telemetry-hud`'s burned-in course map — see [What comes across from the source](#what-comes-across-from-the-source) and [What the HUD puts in the pixels](#what-the-hud-puts-in-the-pixels). Note `--effect telemetry-hud` implies `--effect telemetry`, so this applies to a HUD burn too.
 - `--telemetry-stryd` — telemetry only: include Stryd running-dynamics developer fields (Form Power, Leg Spring Stiffness, ...) in the GPX sidecar and in a `--srt-format readable` SRT. Off by default. **Not** in `--srt-format dji` — that layout is the fixed set of tags Telemetry Overlay parses out of a DJI drone's SRT (frame counter, timestamp, latitude/longitude/altitude) and has nowhere to put an arbitrary developer field, so this flag has no effect on it. The GPX sidecar carries them either way.
 - `--strength` is accepted but **ignored** by `telemetry` — there is no "how strong" dial for attaching telemetry to a clip, so `ValidateStrength` accepts any value.
@@ -188,14 +188,20 @@ Both stabilizers preserve the source's audio and metadata. In particular the
 container- and stream-level **`creation_time`** is copied onto the output
 (downstream tools rely on it to sync a clip with external data such as
 Garmin FIT GPS/exercise tracks), along with other original tags like
-`language` and `handler_name`. This is a merge: the structural tags that
-describe the newly encoded file (codec brands, encoder string) stay
-correct — the source's tags do not overwrite them.
+`language` and `handler_name`. This is a merge: the container the muxer
+writes still describes the *new* file (an AVC source re-encoded to HEVC gets
+an `isom`/`isomiso2mp41` `ftyp` box, not the source's `avc1`), while the
+source's own brand strings ride along as ordinary metadata tags — so
+`ffprobe` may report `major_brand=avc1` on an `hvc1` file. That is cosmetic:
+nothing reads those tags to decide anything.
 
 The carry-over is **wholesale**, and every effect does it — not just the stabilizers.
 Whatever else the camera wrote comes along, including a position it recorded: iPhone and
 GoPro footage often carries `com.apple.quicktime.location.ISO6709`, and that tag survives
-a `videofx` run with no telemetry in it at all. `--location=false` governs only the tag
+a `videofx` run with no telemetry in it at all. (That key needs the mp4 muxer to be told
+to write metadata it does not recognize; every argument list here that maps metadata pairs
+the two — see `vidio.MetadataCarryArgs`. Without it the tag is dropped silently, exit code
+0, which is exactly how it once escaped notice.) `--location=false` governs only the tag
 videofx would *add*; it does not remove one that was already there. To drop the source's
 tags, run the output through `ffmpeg -map_metadata -1` or `exiftool` — which also drops
 `creation_time`, the tag telemetry syncing depends on.
@@ -227,9 +233,20 @@ Notes:
   is the sensible order — the stabilizer preserves `creation_time` onto its
   output, which telemetry then reads to sync (see [Sync model](#sync-model)).
   The reverse, `telemetry,gocv-stabilizer`, would have the stabilizer
-  re-encode away the telemetry the first step just muxed in, so videofx
-  prints a warning if `telemetry` is not last (a `--gpx` sidecar, if
-  requested, survives either way).
+  re-encode away the *subtitle track* the first step just muxed in — a
+  re-encoding effect emits its own video stream plus the source's audio, and a
+  subtitle is neither. The **location tags and `creation_time` survive** a
+  re-encode either way. A stream-copying effect such as `rotate` keeps the
+  track, but **re-enables** it: ffmpeg's mp4 muxer marks every track it writes
+  as enabled, undoing the hidden flag videofx sets, so the telemetry pops up on
+  screen. videofx warns in both cases (saying which of the two applies), and
+  says nothing when `--show-subtitle` asked for a visible track in the first
+  place. `--gpx` and `--srt-sidecar`
+  are a different matter and are **rejected** outright when `telemetry` is not
+  last: a sidecar is written next to the effect's *own* output, which mid-chain
+  is a temp file the run deletes, so the request could only be answered with an
+  exit-0 run and no file. (`--effect telemetry-hud --gpx` is fine — the implied
+  `telemetry` pass is appended last.)
 - Each effect's own flags apply to whichever effect in the chain they belong
   to (`--sigma` to `gocv-stabilizer`, `--offset` to `telemetry`, …). A single
   `--strength` is shared by all (each maps it its own way; `telemetry`

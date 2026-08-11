@@ -268,7 +268,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 	}
 
 	srtFormat, wantSRT := resolveSRTFormat(t.SRTFormat)
-	embedSubtitle := wantSRT && !t.SRTSidecar
+	embedSubtitle := t.EmbedsSubtitle()
 
 	// Sidecar SRT: written next to the output and NOT embedded, so it never
 	// displays during playback (an embedded subtitle track can't be reliably
@@ -392,6 +392,22 @@ func logClipScope(log *logging.Logger, scoped *telemetry.ScopedActivity) {
 	}
 	log.Infof("clip scope %s: %d samples, %.2f-%.2f km%s",
 		scoped.Scope, scoped.Track.Len(), first/1000, last/1000, rebased)
+}
+
+// EmbedsSubtitle reports whether this configuration will mux a subtitle track
+// into the output: an SRT format was asked for AND it is not being written as a
+// separate .srt file instead.
+//
+// Exported because the CLI has to ask the same question before it can warn
+// truthfully about a chain that would strip that track (see cmd's
+// warnTelemetryNotLast), and Apply uses it too, so the rule is stated once. A
+// second copy of "format is not none, and not --srt-sidecar" in the CLI would
+// be free to drift from this one -- and it would drift into a warning claiming
+// the loss of a track that was never muxed, which is the failure mode that
+// warning was rewritten to remove.
+func (t *Telemetry) EmbedsSubtitle() bool {
+	_, wantSRT := resolveSRTFormat(t.SRTFormat)
+	return wantSRT && !t.SRTSidecar
 }
 
 // resolveSRTFormat maps the effect's SRTFormat string onto a
@@ -563,11 +579,21 @@ type muxConfig struct {
 // source's container metadata (creation_time, above all) onto the
 // output.
 //
-// -map_metadata 0 is not optional: ffmpeg's implicit default has been
-// observed to drop creation_time across some operations (the same
-// finding recorded against vidio.encoderArgs and WarpStabilizer's
-// transform pass), so it is set explicitly here too even though this
-// mux, unlike those two, touches no pixel/sample data at all.
+// The metadata carry-over goes through vidio.MetadataCarryArgs, like every
+// other argument list in this tree that copies a source's metadata. It is not
+// optional: ffmpeg's implicit default has been observed to drop creation_time
+// across some operations (the same finding recorded against vidio.encoderArgs
+// and WarpStabilizer's transform pass), so it is set explicitly here too even
+// though this mux, unlike those two, touches no pixel/sample data at all.
+//
+// The muxer flag it carries used to be attached to the location branch below
+// instead -- added only when this run was WRITING location tags. That was the
+// wrong thing to condition on, and it lost data: with --location=false, or on a
+// clip whose window has no GPS fix, a source that already carried
+// "com.apple.quicktime.location.ISO6709" (iPhone and GoPro footage does) had it
+// dropped by the very pass that promises to carry the camera's own position
+// over. The flag belongs with the MAP, which is what MetadataCarryArgs makes
+// structural.
 //
 // The location tags are written under both the plain "location" key and
 // Apple's own "com.apple.quicktime.location.ISO6709" key -- QuickTime,
@@ -580,15 +606,14 @@ type muxConfig struct {
 // iPhones write) or "-27.9642+153.4270/" when the point has no elevation
 // reading -- see iso6709.
 //
-// -movflags use_metadata_tags is required to actually get the Apple key
-// into the file, not cosmetic: ffmpeg's mov/mp4 muxer only writes global
-// metadata keys it recognizes from its own internal table (like
-// "location", which maps to the standard "©xyz" QuickTime atom) unless
-// this flag is set, and silently DROPS any other key -- verified against
-// ffmpeg 8.1.2: without the flag, "com.apple.quicktime.location.ISO6709"
-// never made it into the output at all (byte-search-confirmed absent),
-// even though the command exited 0 with no warning. It is only added
-// when HasLocation is true, matching the location tags themselves.
+// The Apple key only reaches the file because of the -movflags
+// use_metadata_tags that MetadataCarryArgs contributes; that is not cosmetic.
+// ffmpeg's mov/mp4 muxer only writes global metadata keys it recognizes from
+// its own internal table (like "location", which maps to the standard "©xyz"
+// QuickTime atom) and silently DROPS any other key -- verified against ffmpeg
+// 8.1.2: without the flag, "com.apple.quicktime.location.ISO6709" never made
+// it into the output at all (byte-search-confirmed absent), even though the
+// command exited 0 with no warning.
 func muxArgs(cfg muxConfig) []string {
 	args := []string{"-y", "-i", cfg.SourcePath}
 	if cfg.Subtitle {
@@ -605,7 +630,7 @@ func muxArgs(cfg muxConfig) []string {
 		args = append(args, "-c:s", "mov_text", "-metadata:s:s:0", "language=eng")
 	}
 
-	args = append(args, "-map_metadata", "0")
+	args = append(args, vidio.MetadataCarryArgs(0)...)
 
 	// An offset-corrected creation_time overrides whatever -map_metadata 0
 	// just carried over from the source. It must come AFTER -map_metadata 0
@@ -615,14 +640,15 @@ func muxArgs(cfg muxConfig) []string {
 		args = append(args, "-metadata", "creation_time="+cfg.CreationTime)
 	}
 
+	// Same ordering rule as creation_time: these override a location the
+	// source carried. The muxer flag that makes the Apple key writable at all
+	// is no longer added here -- it came with the map above, for every run,
+	// which is what keeps a SOURCE's key when this run writes none of its own.
 	if cfg.HasLocation {
 		loc := iso6709(cfg.Lat, cfg.Lon, cfg.Alt, cfg.HasAltitude)
 		args = append(args,
 			"-metadata", "location="+loc,
 			"-metadata", "com.apple.quicktime.location.ISO6709="+loc,
-			// See this function's doc comment: without this, the Apple
-			// key above is silently dropped by the mov/mp4 muxer.
-			"-movflags", "use_metadata_tags",
 		)
 	}
 

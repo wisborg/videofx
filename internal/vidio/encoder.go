@@ -34,13 +34,13 @@ type EncoderConfig struct {
 	//      `-map_metadata:s:v:0 1:s:v:0`): container- and video-stream-
 	//      level tags from the original — most importantly creation_time,
 	//      which downstream tools rely on to sync the clip with external
-	//      data (e.g. Garmin FIT GPS/exercise tracks) — are copied onto the
-	//      output. This is a merge, not a wholesale replace: the mp4 muxer
-	//      still writes correct structural tags (major_brand, the hevc
-	//      brands, the real encoder string) for the newly encoded file, so
-	//      the source's original codec brands do NOT clobber them; only
-	//      tags the conversion does not itself produce (creation_time,
-	//      language, handler_name, ...) are carried across.
+	//      data (e.g. Garmin FIT GPS/exercise tracks), and the location keys
+	//      a photo library places the clip by — are copied onto the output.
+	//      The CONTAINER is still the muxer's own: verified that an avc1
+	//      source re-encoded to HEVC writes an "isom/isomiso2mp41" ftyp box,
+	//      not the source's "avc1", even though ffprobe reports the source's
+	//      brand strings as tags — see MetadataCarryArgs for that and for
+	//      why it is cosmetic.
 	//
 	// Leave empty to produce a video-only file with default metadata (e.g.
 	// in tests with a synthetic source).
@@ -89,22 +89,20 @@ func encoderArgs(cfg EncoderConfig) []string {
 	if cfg.SourcePath != "" {
 		args = append(args, "-map", "1:a?", "-c:a", "copy")
 		// Carry the original's metadata onto the output: global/container
-		// tags via -map_metadata 1, and the video stream's own tags via
-		// -map_metadata:s:v:0 1:s:v:0. creation_time lives at both levels
-		// in the source MP4s this targets, and is the field downstream
+		// tags via MetadataCarryArgs (see it for why -map_metadata alone
+		// silently drops the Apple location key), and the video stream's own
+		// tags via -map_metadata:s:v:0 1:s:v:0. creation_time lives at both
+		// levels in the source MP4s this targets, and is the field downstream
 		// tools use to align the clip with external GPS/exercise data, so
 		// both levels are copied. Input index 1 is the original (input 0
 		// is the rawvideo pipe, which carries no metadata). This is a
-		// merge in practice: the mp4 muxer overrides the structural brand
-		// tags with values correct for the newly encoded hevc file, so the
-		// source's original avc1 brands do not survive — only tags the
-		// conversion does not itself set (creation_time, language,
-		// handler_name, ...) are carried across. Verified against ffmpeg
-		// 8.1 / hevc_videotoolbox.
-		args = append(args,
-			"-map_metadata", "1",
-			"-map_metadata:s:v:0", "1:s:v:0",
-		)
+		// merge in practice: the mp4 muxer writes the new file's own ftyp
+		// brands whatever the source's were (see EncoderConfig.SourcePath),
+		// and everything the conversion does not itself set (creation_time,
+		// the location keys, language, handler_name, ...) is carried across.
+		// Verified against ffmpeg 8.1 / hevc_videotoolbox.
+		args = append(args, MetadataCarryArgs(1)...)
+		args = append(args, "-map_metadata:s:v:0", "1:s:v:0")
 	}
 	args = append(args, VideoEncodeArgs(cfg.Quality)...)
 	args = append(args, PositionalPath(cfg.OutputPath))

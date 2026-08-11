@@ -192,8 +192,11 @@ func trimArgs(src, dst string, startSeconds, endSeconds float64, info Info) []st
 		"-t", secs(endSeconds - startSeconds),
 		"-map", "0:v:0", "-map", "0:a?",
 		"-c", "copy",
-		"-map_metadata", "0",
 	}
+	// The trim runs BEFORE every effect, so a key it drops here is gone from
+	// the whole pipeline -- including a location the camera itself recorded,
+	// which no later step can put back. See MetadataCarryArgs.
+	args = append(args, MetadataCarryArgs(0)...)
 	if info.HasCreationTime {
 		shifted := info.CreationTime.Add(time.Duration(startSeconds * float64(time.Second)))
 		args = append(args, "-metadata", "creation_time="+shifted.UTC().Format("2006-01-02T15:04:05.000000Z07:00"))

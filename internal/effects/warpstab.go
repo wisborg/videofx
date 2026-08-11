@@ -205,20 +205,22 @@ func (w *WarpStabilizer) Apply(ctx context.Context, in Input) error {
 		"-preset", w.perf.Preset,
 		"-crf", strconv.Itoa(w.perf.CRF),
 		"-c:a", "copy",
-		// Carry the source's metadata onto the output. The source is
-		// input 0 here (unlike the gocv-stabilizer pipeline, where a
-		// rawvideo pipe is input 0 and the source is input 1), so both
-		// maps reference index 0. -map_metadata 0 copies container-level
-		// tags and -map_metadata:s:v:0 0:s:v:0 the video stream's own.
-		// creation_time is the field that matters: downstream tools use it
-		// to sync the clip with external GPS/exercise data. ffmpeg's
-		// implicit default did NOT preserve it here (verified: the output
-		// had no creation_time at either level until these were added) —
-		// filtering the video through vidstabtransform drops the default
-		// carry-over — so the maps are explicit. The mov/mp4 muxer still
-		// writes correct structural brand tags for the re-encoded file, so
-		// this is a merge, not a clobber.
-		"-map_metadata", "0",
+	)
+	// Carry the source's metadata onto the output. The source is input 0
+	// here (unlike the gocv-stabilizer pipeline, where a rawvideo pipe is
+	// input 0 and the source is input 1), so both maps reference index 0.
+	// vidio.MetadataCarryArgs copies container-level tags (and carries the
+	// muxer flag that keeps the Apple location key from being dropped -- see
+	// it), while -map_metadata:s:v:0 0:s:v:0 copies the video stream's own.
+	// creation_time is the field that matters most: downstream tools use it
+	// to sync the clip with external GPS/exercise data. ffmpeg's implicit
+	// default did NOT preserve it here (verified: the output had no
+	// creation_time at either level until these were added) — filtering the
+	// video through vidstabtransform drops the default carry-over — so the
+	// maps are explicit. The mov/mp4 muxer still writes correct structural
+	// brand tags for the re-encoded file, so this is a merge, not a clobber.
+	transformArgs = append(transformArgs, vidio.MetadataCarryArgs(0)...)
+	transformArgs = append(transformArgs,
 		"-map_metadata:s:v:0", "0:s:v:0",
 		vidio.PositionalPath(in.OutputPath),
 	)

@@ -27,34 +27,202 @@ import (
 	"videofx/internal/vidio"
 )
 
-func TestWarnTelemetryNotLast(t *testing.T) {
-	tel, err := effects.Get("telemetry")
+// getEffect resolves one effect by name through the registry, so these tests
+// exercise the same instances the CLI builds rather than hand-made structs.
+func getEffect(t *testing.T, name string) effects.Effect {
+	t.Helper()
+	eff, err := effects.Get(name)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("effects.Get(%q): %v", name, err)
 	}
-	gocv, err := effects.Get("gocv-stabilizer")
+	return eff
+}
+
+// telemetryEffect resolves a telemetry effect and configures it the way
+// configureEffect would for the given --srt-format/--srt-sidecar/--show-subtitle.
+// None of it is decoration: both warning arms are about a muxed subtitle track,
+// a pass that muxes none has nothing to lose or reveal, and a pass told to show
+// the track has nothing to reveal either.
+func telemetryEffect(t *testing.T, srtFormat string, sidecar, showSubtitle bool) effects.Effect {
+	t.Helper()
+	tel, ok := getEffect(t, "telemetry").(*effects.Telemetry)
+	if !ok {
+		t.Fatal("the registry's telemetry effect is no longer a *effects.Telemetry")
+	}
+	tel.SRTFormat = srtFormat
+	tel.SRTSidecar = sidecar
+	tel.ShowSubtitle = showSubtitle
+	return tel
+}
+
+// TestWarnTelemetryNotLast_ReportsTheRightLossForWhatFollows covers the
+// flag/effect matrix of a chain whose telemetry pass is not last. There are two
+// distinct losses, both measured, and the message has to name the one that will
+// actually happen:
+//
+//   - a later RE-ENCODER drops the subtitle track outright;
+//   - a later STREAM COPY keeps it but re-enables it, because ffmpeg's mp4
+//     muxer marks every track it writes as enabled -- measured on ffmpeg 8.1.2
+//     with rotate's own argv, the sbtl trak goes from tkhd flags 000002 back to
+//     000003 -- so the hidden DJI telemetry pops up on screen in QuickTime.
+//
+// The rotate row is the one to watch. An earlier revision of this warning was
+// silent there, on the correct-but-incomplete reasoning that a stream copy
+// keeps the track; it does, visibly. Making that row silent again is the
+// regression these cases exist to catch.
+func TestWarnTelemetryNotLast_ReportsTheRightLossForWhatFollows(t *testing.T) {
+	const (
+		dropped   = "re-encodes the video and so strips"
+		reenabled = "re-enables the telemetry subtitle track"
+	)
+	cases := []struct {
+		name     string
+		effs     []effects.Effect
+		wantMsg  string // "" = must not warn at all
+		wantAlso []string
+		why      string
+	}{
+		{
+			name: "telemetry last",
+			effs: []effects.Effect{getEffect(t, "gocv-stabilizer"), telemetryEffect(t, "dji", false, false)},
+			why:  "nothing runs after the mux, so the hiding is the last word",
+		},
+		{
+			name:     "telemetry then rotate",
+			effs:     []effects.Effect{telemetryEffect(t, "dji", false, false), getEffect(t, "rotate")},
+			wantMsg:  reenabled,
+			wantAlso: []string{"rotate", "--srt-sidecar"},
+			why:      "the copy keeps the track and turns it back on; the user gets telemetry on screen",
+		},
+		{
+			name: "telemetry then rotate, --show-subtitle",
+			effs: []effects.Effect{telemetryEffect(t, "dji", false, true), getEffect(t, "rotate")},
+			why:  "the track was meant to be visible, so a copy re-enabling it is what was asked for",
+		},
+		{
+			name:     "telemetry then gocv-stabilizer",
+			effs:     []effects.Effect{telemetryEffect(t, "dji", false, false), getEffect(t, "gocv-stabilizer")},
+			wantMsg:  dropped,
+			wantAlso: []string{"gocv-stabilizer", "location tags and creation_time survive"},
+			why:      "the stabilizer maps its own encoded video plus the source's audio; the subtitle is neither",
+		},
+		{
+			name:    "telemetry then warp-stabilizer",
+			effs:    []effects.Effect{telemetryEffect(t, "readable", false, false), getEffect(t, "warp-stabilizer")},
+			wantMsg: dropped,
+			why:     "the other stabilizer re-encodes too",
+		},
+		{
+			name:    "telemetry then telemetry-hud",
+			effs:    []effects.Effect{telemetryEffect(t, "dji", false, false), getEffect(t, "telemetry-hud")},
+			wantMsg: dropped,
+			why:     "the HUD burn is a re-encode like any other",
+		},
+		{
+			name:     "telemetry then rotate then gocv-stabilizer",
+			effs:     []effects.Effect{telemetryEffect(t, "dji", false, false), getEffect(t, "rotate"), getEffect(t, "gocv-stabilizer")},
+			wantMsg:  dropped,
+			wantAlso: []string{"gocv-stabilizer"},
+			why:      "every LATER effect is examined, not just the next one, and a dropped track cannot also be displayed",
+		},
+		{
+			name:    "telemetry then gocv-stabilizer, --show-subtitle",
+			effs:    []effects.Effect{telemetryEffect(t, "dji", false, true), getEffect(t, "gocv-stabilizer")},
+			wantMsg: dropped,
+			why:     "--show-subtitle governs visibility, not existence; a re-encode still removes the track",
+		},
+		{
+			name: "no subtitle muxed, then gocv-stabilizer",
+			effs: []effects.Effect{telemetryEffect(t, "none", false, false), getEffect(t, "gocv-stabilizer")},
+			why:  "--srt-format none muxes no track, so nothing is dropped or revealed (this is the DEFAULT)",
+		},
+		{
+			name: "--srt-sidecar, then rotate",
+			effs: []effects.Effect{telemetryEffect(t, "dji", true, false), getEffect(t, "rotate")},
+			why:  "a sidecar SRT is a separate file; there is no track in the container to re-enable",
+		},
+		{
+			name: "no telemetry at all",
+			effs: []effects.Effect{getEffect(t, "gocv-stabilizer"), getEffect(t, "rotate")},
+			why:  "there is no telemetry pass to warn about",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			log := logging.New(&buf, logging.LevelInfo).Named("videofx")
+			warnTelemetryNotLast(log, c.effs)
+
+			logged := buf.String()
+			if c.wantMsg == "" {
+				if logged != "" {
+					t.Fatalf("warned when it should not have -- %s\nlogged: %q", c.why, logged)
+				}
+				return
+			}
+			if logged == "" {
+				t.Fatalf("did not warn -- %s", c.why)
+			}
+			if !strings.Contains(logged, c.wantMsg) {
+				t.Errorf("warning does not say %q -- %s\nlogged: %q", c.wantMsg, c.why, logged)
+			}
+			// The two arms describe different fates; naming both would mean the
+			// message was assembled without deciding which one applies.
+			other := dropped
+			if c.wantMsg == dropped {
+				other = reenabled
+			}
+			if strings.Contains(logged, other) {
+				t.Errorf("warning claims BOTH losses at once: %q", logged)
+			}
+			for _, want := range c.wantAlso {
+				if !strings.Contains(logged, want) {
+					t.Errorf("warning does not mention %q: %q", want, logged)
+				}
+			}
+		})
+	}
+}
+
+// TestWarnTelemetryNotLast_TheImpliedTelemetryPassNeverWarns pins an ordering
+// that is easy to "tidy up" into a bug. `--effect telemetry-hud` runs two
+// effects: impliedEffects appends a telemetry pass AFTER the HUD, precisely
+// because a telemetry pass before that re-encode would have its subtitle
+// dropped. Prepend it instead and this test fails -- which is the point, since
+// the run would otherwise still exit 0 with a silently subtitle-less clip.
+func TestWarnTelemetryNotLast_TheImpliedTelemetryPassNeverWarns(t *testing.T) {
+	origEffects, origSRT := effectNames, srtFormat
+	t.Cleanup(func() { effectNames, srtFormat = origEffects, origSRT })
+
+	root := NewRootCmd()
+	if err := root.Flags().Parse([]string{"--effect", "telemetry-hud", "--srt-format", "dji"}); err != nil {
+		t.Fatalf("parsing flags: %v", err)
+	}
+	effs, err := resolveEffects(effectNames)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("resolveEffects: %v", err)
+	}
+	effs = impliedEffects(effs)
+	for _, e := range effs {
+		if err := configureEffect(e, root.Flags()); err != nil {
+			t.Fatalf("configureEffect(%s): %v", e.Name(), err)
+		}
+	}
+
+	// The control: the implied pass really is there and really would mux a
+	// subtitle, so the silence below is about its POSITION and not about a
+	// chain that had nothing to warn about.
+	last, ok := effs[len(effs)-1].(*effects.Telemetry)
+	if !ok || !last.EmbedsSubtitle() {
+		t.Fatalf("chain is %v with last=%T; want the implied telemetry pass last, muxing a subtitle", names(effs), effs[len(effs)-1])
 	}
 
 	var buf bytes.Buffer
 	log := logging.New(&buf, logging.LevelInfo).Named("videofx")
-
-	warnTelemetryNotLast(log, []effects.Effect{gocv, tel})
+	warnTelemetryNotLast(log, effs)
 	if buf.Len() != 0 {
-		t.Errorf("telemetry-last must not warn, got: %q", buf.String())
-	}
-
-	buf.Reset()
-	warnTelemetryNotLast(log, []effects.Effect{tel, gocv})
-	if !strings.Contains(buf.String(), "telemetry is not the last") {
-		t.Errorf("telemetry-not-last must warn, got: %q", buf.String())
-	}
-
-	buf.Reset()
-	warnTelemetryNotLast(log, []effects.Effect{gocv})
-	if buf.Len() != 0 {
-		t.Errorf("no telemetry must not warn, got: %q", buf.String())
+		t.Errorf("--effect telemetry-hud warned about its own implied telemetry pass: %q", buf.String())
 	}
 }
 
@@ -2533,5 +2701,303 @@ func TestRunRoot_TelemetryScopeReachesTheImpliedTelemetryPass(t *testing.T) {
 				i, float64(full[i])/100, float64(rebased[i])/100,
 				float64(diff)/100, float64(scopeE2EClipStartCentiKm)/100)
 		}
+	}
+}
+
+// The --output-dir preparation tests. Each names the property it pins, because
+// the failure this whole function exists to remove is a LATE one: naming.Resolve
+// happily hands out a path inside a directory that is missing or unwritable
+// (its exists() check answers "false" either way), so the complaint arrives from
+// ffmpeg at write time -- after a telemetry-hud render has already spent minutes
+// on the frames.
+
+// TestPrepareOutputDir_CreatesAMissingDirectoryIncludingParents pins the
+// creation half. The path is two levels deep so a plain os.Mkdir would fail
+// here: --output-dir is typed by hand, and "renders/2026-08" is exactly the
+// shape a user types before either component exists.
+// telemetrySidecarEffect resolves a telemetry effect configured with the
+// sidecar flags under test, the way configureEffect would.
+func telemetrySidecarEffect(t *testing.T, gpx, srtSidecar bool) effects.Effect {
+	t.Helper()
+	tel, ok := getEffect(t, "telemetry").(*effects.Telemetry)
+	if !ok {
+		t.Fatal("the registry's telemetry effect is no longer a *effects.Telemetry")
+	}
+	tel.GPX = gpx
+	tel.SRTSidecar = srtSidecar
+	tel.SRTFormat = "dji" // --srt-sidecar requires a format; harmless for --gpx
+	return tel
+}
+
+// TestValidateTelemetrySidecarPlacement covers the flag/position matrix of a
+// request that used to be answered with silence: a mid-chain telemetry pass
+// writes its GPX/SRT sidecar beside its own output, which mid-chain is a temp
+// intermediate the run deletes -- so `--effect telemetry,rotate --gpx` produced
+// no .gpx anywhere and still exited 0.
+//
+// The rows that matter most are the two that must NOT error: a trailing
+// telemetry (the ordinary way to ask for a sidecar) and a chain with no sidecar
+// requested at all. An over-eager check here would reject working invocations.
+
+func TestValidateTelemetrySidecarPlacement(t *testing.T) {
+	cases := []struct {
+		name     string
+		effs     []effects.Effect
+		wantErr  bool
+		wantMsg  []string
+		wantAway []string // must NOT appear in the message
+		why      string
+	}{
+		{
+			name: "telemetry last with --gpx",
+			effs: []effects.Effect{getEffect(t, "gocv-stabilizer"), telemetrySidecarEffect(t, true, false)},
+			why:  "the sidecar lands beside the final output; this is the normal way to ask for one",
+		},
+		{
+			name: "rotate then telemetry with --gpx",
+			effs: []effects.Effect{getEffect(t, "rotate"), telemetrySidecarEffect(t, true, false)},
+			why:  "the check is about telemetry being LAST, not about anything preceding it",
+		},
+		{
+			name:     "telemetry then rotate with --gpx",
+			effs:     []effects.Effect{telemetrySidecarEffect(t, true, false), getEffect(t, "rotate")},
+			wantErr:  true,
+			wantMsg:  []string{"--gpx", "rotate", "telemetry last"},
+			wantAway: []string{"--srt-sidecar"},
+			why:      "the .gpx would be written next to the deleted intermediate; a stream copy following is no better than a re-encode here",
+		},
+		{
+			name:     "telemetry then gocv-stabilizer with --srt-sidecar",
+			effs:     []effects.Effect{telemetrySidecarEffect(t, false, true), getEffect(t, "gocv-stabilizer")},
+			wantErr:  true,
+			wantMsg:  []string{"--srt-sidecar", "gocv-stabilizer"},
+			wantAway: []string{"--gpx"},
+			why:      "only the flag the user passed may be named",
+		},
+		{
+			name:    "both sidecar flags, telemetry not last",
+			effs:    []effects.Effect{telemetrySidecarEffect(t, true, true), getEffect(t, "rotate")},
+			wantErr: true,
+			wantMsg: []string{"--gpx", "--srt-sidecar"},
+			why:     "both were asked for and both would be lost",
+		},
+		{
+			name: "telemetry not last, no sidecar requested",
+			effs: []effects.Effect{telemetrySidecarEffect(t, false, false), getEffect(t, "gocv-stabilizer")},
+			why:  "nothing was asked for, so nothing can go missing (the muxed telemetry is a separate question, and a warning)",
+		},
+		{
+			name: "no telemetry at all",
+			effs: []effects.Effect{getEffect(t, "gocv-stabilizer"), getEffect(t, "rotate")},
+			why:  "there is no sidecar-writing pass in the chain",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateTelemetrySidecarPlacement(c.effs)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("error = %v, want error = %v -- %s", err, c.wantErr, c.why)
+			}
+			if err == nil {
+				return
+			}
+			for _, want := range c.wantMsg {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+			for _, away := range c.wantAway {
+				if strings.Contains(err.Error(), away) {
+					t.Errorf("error %q names %q, which the user did not pass", err, away)
+				}
+			}
+		})
+	}
+}
+
+// TestValidateTelemetrySidecarPlacement_TelemetryHUDWithASidecarIsLegitimate is
+// the row this check is most likely to get wrong, and the one that would break
+// a common invocation: `--effect telemetry-hud --gpx`.
+//
+// telemetry-hud runs TWO effects -- impliedEffects appends a telemetry pass
+// after the HUD -- so the chain does contain a non-final effect whose name
+// begins with "telemetry". A check that identified the telemetry pass by name
+// (or by prefix) would find the HUD at index 0, see something after it, and
+// reject a perfectly good run. Identification is therefore by TYPE.
+//
+// It builds the chain the way runRoot does, so it also pins that the validation
+// runs AFTER impliedEffects: against the raw --effect list there is no
+// telemetry effect to find at all.
+func TestValidateTelemetrySidecarPlacement_TelemetryHUDWithASidecarIsLegitimate(t *testing.T) {
+	origEffects, origGPX, origSRT, origSidecar := effectNames, gpx, srtFormat, srtSidecar
+	t.Cleanup(func() { effectNames, gpx, srtFormat, srtSidecar = origEffects, origGPX, origSRT, origSidecar })
+
+	root := NewRootCmd()
+	if err := root.Flags().Parse([]string{
+		"--effect", "telemetry-hud", "--gpx", "--srt-format", "dji", "--srt-sidecar",
+	}); err != nil {
+		t.Fatalf("parsing flags: %v", err)
+	}
+	effs, err := resolveEffects(effectNames)
+	if err != nil {
+		t.Fatalf("resolveEffects: %v", err)
+	}
+	effs = impliedEffects(effs)
+	for _, e := range effs {
+		if err := configureEffect(e, root.Flags()); err != nil {
+			t.Fatalf("configureEffect(%s): %v", e.Name(), err)
+		}
+	}
+
+	// The control: the chain really is two effects with the HUD ahead of the
+	// telemetry pass, and the sidecar flags really did reach that pass. Without
+	// this, a validator that found nothing to check would also "pass".
+	tel, i, ok := telemetryPass(effs)
+	if !ok || i != len(effs)-1 || len(effs) != 2 || !tel.GPX || !tel.SRTSidecar {
+		t.Fatalf("chain is %v (telemetry at %d of %d, gpx=%v sidecar=%v); want [telemetry-hud telemetry] with both sidecars requested",
+			names(effs), i, len(effs), ok && tel.GPX, ok && tel.SRTSidecar)
+	}
+
+	if err := validateTelemetrySidecarPlacement(effs); err != nil {
+		t.Errorf("--effect telemetry-hud --gpx --srt-sidecar was rejected: %v", err)
+	}
+}
+
+// TestRunRoot_MidChainSidecarIsRejectedBeforeAnyWork pins the wiring and the
+// ordering: the invocation below is wrong twice (a mid-chain --gpx and a
+// nonexistent input), and the error must be the --gpx one, because a run that
+// cannot deliver the file that was asked for should not start.
+func TestRunRoot_MidChainSidecarIsRejectedBeforeAnyWork(t *testing.T) {
+	origEffects, origFit, origGPX, origRotate := effectNames, fitPath, gpx, rotateDeg
+	t.Cleanup(func() { effectNames, fitPath, gpx, rotateDeg = origEffects, origFit, origGPX, origRotate })
+
+	err, logged := runRootCmd(t, "--effect", "telemetry,rotate", "--rotate", "90",
+		"--gpx", "--fit", "activity.fit", filepath.Join(t.TempDir(), "no-such-clip.mp4"))
+	if err == nil {
+		t.Fatalf("exited 0 with a mid-chain --gpx\n%s", logged)
+	}
+	if !strings.Contains(err.Error(), "--gpx") {
+		t.Errorf("error = %v, want the --gpx placement failure; anything else means the check runs too late or not at all", err)
+	}
+}
+
+// TestPrepareOutputDir_UnsetDoesNotProbeTheWorkingDirectory is the half of "an
+// unset --output-dir touches nothing" that a directory listing cannot see.
+//
+// TestPrepareOutputDir_UnsetTouchesNothing asserts an empty working directory
+// stays empty, which catches os.MkdirAll("") but NOT the other plausible slip,
+// `if dir == "" { dir = "." }`: the probe would then create a temp file in
+// whatever directory the user is standing in and remove it again, leaving the
+// listing empty and that test green. Measured -- the mutation passes it.
+//
+// What the "." substitution cannot hide is a working directory that cannot be
+// written to. Running videofx from a read-only checkout, a mounted image, or
+// /usr/local/bin is ordinary; with the substitution, every such run fails
+// up front with "--output-dir \".\" is not writable" for a flag the user never
+// passed. So: cwd read-only, --output-dir unset, and the answer must still be
+// nil, because none of this is any of prepareOutputDir's business.
+func TestRunRoot_TelemetryHUDSidecarsSurviveValidation(t *testing.T) {
+	origEffects, origFit, origGPX, origSRT, origSidecar := effectNames, fitPath, gpx, srtFormat, srtSidecar
+	t.Cleanup(func() {
+		effectNames, fitPath, gpx, srtFormat, srtSidecar = origEffects, origFit, origGPX, origSRT, origSidecar
+	})
+
+	err, logged := runRootCmd(t, "--effect", "telemetry-hud", "--gpx",
+		"--srt-format", "dji", "--srt-sidecar", "--fit", "activity.fit",
+		filepath.Join(t.TempDir(), "no-such-clip.mp4"))
+	if err == nil {
+		t.Fatalf("expected the nonexistent input to fail the run\n%s", logged)
+	}
+	if strings.Contains(err.Error(), "not last in --effect") {
+		t.Errorf("--effect telemetry-hud --gpx --srt-sidecar was rejected as a mid-chain sidecar: %v\nthe implied telemetry pass IS last; only a name-based lookup sees the HUD instead", err)
+	}
+}
+
+// TestRunRoot_WarnTelemetryNotLastReachesTheLog is the wiring test the unit
+// table above cannot be: warnTelemetryNotLast is called with the CONFIGURED
+// chain, and only the real command decides when that is.
+//
+// The whole warning is gated on Telemetry.EmbedsSubtitle, which is a property
+// of the effect and reads SRTFormat/SRTSidecar off it -- fields that arrive
+// from --srt-format and --srt-sidecar through configureEffect. Call the warning
+// one step earlier, before that loop, and every telemetry pass looks like a
+// default one with nothing muxed, so the function returns immediately and the
+// CLI is silent forever. Measured: moving the call above the configure loop
+// left the entire cmd suite green, because the unit table hand-configures its
+// effects and the only other end-to-end case asserts SILENCE.
+//
+// The row that must never go silent is `telemetry,rotate --srt-format dji`
+// without --show-subtitle: nothing is lost there, no error is raised, and the
+// only sign anything is wrong is a clip whose telemetry pops up on screen the
+// first time it is opened in QuickTime.
+//
+// Each run fails on its nonexistent input, which is deliberate: input
+// validation is downstream of the warning, so the log is already written by the
+// time the error comes back, and no frame is spent getting there.
+func TestRunRoot_WarnTelemetryNotLastReachesTheLog(t *testing.T) {
+	origEffects, origSRT, origShow, origRotate, origFit := effectNames, srtFormat, showSubtitle, rotateDeg, fitPath
+	t.Cleanup(func() {
+		effectNames, srtFormat, showSubtitle, rotateDeg, fitPath = origEffects, origSRT, origShow, origRotate, origFit
+	})
+
+	const (
+		dropped   = "re-encodes the video and so strips"
+		reenabled = "re-enables the telemetry subtitle track"
+	)
+	for _, c := range []struct {
+		name    string
+		args    []string
+		wantMsg string // "" = no warning at all
+		why     string
+	}{
+		{
+			name:    "telemetry,rotate with a muxed DJI subtitle",
+			args:    []string{"--effect", "telemetry,rotate", "--rotate", "90", "--srt-format", "dji"},
+			wantMsg: reenabled,
+			why:     "the copy re-enables the hidden track and the telemetry displays; nothing else in the run says so",
+		},
+		{
+			name:    "telemetry,rotate but the subtitle was asked to be visible",
+			args:    []string{"--effect", "telemetry,rotate", "--rotate", "90", "--srt-format", "dji", "--show-subtitle"},
+			wantMsg: "",
+			why:     "a visible subtitle staying visible is not news",
+		},
+		{
+			name:    "telemetry,rotate with the default --srt-format",
+			args:    []string{"--effect", "telemetry,rotate", "--rotate", "90"},
+			wantMsg: "",
+			why:     "the default muxes no subtitle, so there is nothing to reveal -- warning here would fire on nearly every chain",
+		},
+		{
+			name:    "telemetry,gocv-stabilizer with a muxed DJI subtitle",
+			args:    []string{"--effect", "telemetry,gocv-stabilizer", "--srt-format", "dji"},
+			wantMsg: dropped,
+			why:     "the re-encode removes the track outright, which is the other fate entirely",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			args := append(append([]string{}, c.args...),
+				"--fit", "activity.fit", filepath.Join(t.TempDir(), "no-such-clip.mp4"))
+			_, logged := runRootCmd(t, args...)
+
+			warned := strings.Contains(logged, dropped) || strings.Contains(logged, reenabled)
+			if c.wantMsg == "" {
+				if warned {
+					t.Errorf("warned when it should not have -- %s\n%s", c.why, logged)
+				}
+				return
+			}
+			if !strings.Contains(logged, c.wantMsg) {
+				t.Errorf("the warning never reached the log -- %s\nwant a line containing %q, got:\n%s", c.why, c.wantMsg, logged)
+			}
+			other := dropped
+			if c.wantMsg == dropped {
+				other = reenabled
+			}
+			if strings.Contains(logged, other) {
+				t.Errorf("the log claims BOTH fates at once:\n%s", logged)
+			}
+		})
 	}
 }

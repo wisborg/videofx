@@ -447,8 +447,15 @@ func TestMuxArgs_NoGPS_OmitsLocationTags(t *testing.T) {
 			t.Errorf("no-GPS window must not write any location tag, found %q in: %v", a, args)
 		}
 	}
-	if contains(args, "use_metadata_tags") {
-		t.Errorf("no-GPS window has no Apple location tag to protect, so -movflags use_metadata_tags is pointless here: %v", args)
+	// The muxer flag stays, and this assertion is the reverse of what it used
+	// to be. It was attached to the location branch, on the reasoning that a
+	// run writing no Apple key had none to protect -- which ignored the key the
+	// SOURCE may already carry. iPhone and GoPro footage carries one, and this
+	// pass promises to bring the camera's own position across, so without the
+	// flag a no-GPS window (or --location=false) silently dropped it. It now
+	// comes with the metadata map, for every run. See vidio.MetadataCarryArgs.
+	if !contains(args, "use_metadata_tags") {
+		t.Errorf("the mux must keep -movflags use_metadata_tags even when it writes no location of its own, or a location the SOURCE carried is dropped: %v", args)
 	}
 }
 
@@ -1500,11 +1507,14 @@ func TestTelemetry_Apply_OmitLocation(t *testing.T) {
 	if got := locationArgs(omitted); len(got) != 0 {
 		t.Errorf("OmitLocation still put the position in the argv: %v", got)
 	}
-	// -movflags use_metadata_tags exists only to make the Apple key stick, so
-	// it must go with them; leaving it behind would be harmless but would mean
-	// the two were not actually tied together.
-	if containsAdjacent(omitted, "-movflags", "use_metadata_tags") {
-		t.Error("OmitLocation left -movflags use_metadata_tags behind, which is only there to carry the Apple location key")
+	// -movflags use_metadata_tags STAYS, and this assertion is the reverse of
+	// what it used to be. Tying it to the tags this run writes was measured to
+	// lose data: it is also what carries a key the SOURCE already had (iPhone
+	// and GoPro footage has one), and --location=false is documented to
+	// suppress only the tag videofx adds, not one the camera recorded. See
+	// vidio.MetadataCarryArgs, and the end-to-end case below.
+	if !containsAdjacent(omitted, "-movflags", "use_metadata_tags") {
+		t.Error("OmitLocation also removed -movflags use_metadata_tags, which is what carries a location the SOURCE recorded")
 	}
 	// Everything else about the mux is unaffected: this is a metadata opt-out,
 	// not a different command.

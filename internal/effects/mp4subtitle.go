@@ -21,6 +21,19 @@ import (
 // against ffmpeg 8.1 -- the sbtl track comes out with tkhd flags 0x03,
 // enabled+in_movie, regardless), so the telemetry effect patches the
 // container itself. See the effect's ShowSubtitle field.
+//
+// # It is a patch on ONE file, so a later remux undoes it
+//
+// This runs after the mux, against in.OutputPath -- whatever file that effect
+// happened to write. Anything that later re-muxes that file gets the muxer's
+// behaviour above all over again, and the hiding is gone: measured on ffmpeg
+// 8.1.2, a plain `-map 0 -c copy` (the rotate effect's own argv) takes the sbtl
+// trak from tkhd flags 000002 back to 000003. So the effect of this function is
+// position-dependent in a way nothing in its signature suggests -- it holds
+// only while the file it patched is the final one. cmd's warnTelemetryNotLast
+// is what tells the user when it will not be; --srt-sidecar is the way out that
+// does not depend on chain order at all, since a sidecar has no track to
+// enable.
 // The patch reads only the moov box and writes only the flag bytes it
 // clears. The obvious implementation -- ReadFile, flip a bit, WriteFile --
 // is what the "no box size changes, so nothing else moves" property above

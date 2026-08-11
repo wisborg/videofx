@@ -176,9 +176,9 @@ func NewRootCmd() *cobra.Command {
 	root.Flags().BoolVar(&showSubtitle, "show-subtitle", false,
 		"telemetry only: keep the embedded subtitle track visible/auto-displayed. Off by default: a muxed subtitle is embedded but hidden (its track-enabled flag cleared) so players don't show it while tools like Telemetry Overlay still read it -- though macOS players (QuickTime, Quick Look) auto-display subtitles regardless, so use --srt-sidecar to keep telemetry off screen reliably. Ignored with --srt-sidecar")
 	root.Flags().BoolVar(&srtSidecar, "srt-sidecar", false,
-		"telemetry only: write the --srt-format SRT as a separate \".srt\" file next to the output (like --gpx) INSTEAD of embedding it, so nothing displays during playback while Telemetry Overlay reads the separate file (its DJI MP4+SRT file pairing). Off by default (the SRT is embedded); requires --srt-format readable or dji")
+		"telemetry only: write the --srt-format SRT as a separate \".srt\" file next to the output (like --gpx) INSTEAD of embedding it, so nothing displays during playback while Telemetry Overlay reads the separate file (its DJI MP4+SRT file pairing). Off by default (the SRT is embedded); requires --srt-format readable or dji, and requires telemetry to be the LAST effect in --effect (a sidecar is written next to the effect's own output, which mid-chain is a temp file the run deletes)")
 	root.Flags().BoolVar(&gpx, "gpx", false,
-		"telemetry only: also write a GPX sidecar next to the output (off by default)")
+		"telemetry only: also write a GPX sidecar next to the output (off by default). Like --srt-sidecar it requires telemetry to be the LAST effect in --effect, since the sidecar is written next to the effect's own output")
 	root.Flags().StringVar(&hudTimeZone, "hud-timezone", "",
 		"telemetry-hud only: timezone the on-screen clock displays in -- an IANA name (e.g. \"Australia/Brisbane\") or a fixed offset (e.g. \"+10:00\"). Default: UTC. Only affects the clock gauge; telemetry sync is always UTC")
 	root.Flags().StringVar(&hudLayout, "hud-layout", "auto",
@@ -294,19 +294,146 @@ func requireRotateDegrees(effectNames []string, degrees int) error {
 	return nil
 }
 
-// warnTelemetryNotLast prints a warning if telemetry appears anywhere but
-// last in the chain: a later effect that re-encodes (either stabilizer)
-// drops the muxed telemetry subtitle track and the location tag telemetry
-// just added, so "telemetry then stabilize" almost certainly isn't what the
-// user meant. It's a warning, not an error -- the ordering is the user's to
-// choose, and the GPX sidecar survives regardless.
+// warnTelemetryNotLast warns when a telemetry pass that MUXES A SUBTITLE TRACK
+// is not the last effect in the chain. What happens to that track depends on
+// what follows, so there are two arms and two sentences:
+//
+//   - A later RE-ENCODER drops it. Such an effect maps a freshly encoded video
+//     stream plus the source's audio, and a subtitle is neither.
+//   - A later STREAM COPY keeps it but RE-ENABLES it. Telemetry clears the tkhd
+//     track_enabled bit after its mux (see effects.hideSubtitleTrack) so the
+//     machine-readable telemetry does not pop up on screen; ffmpeg's mp4 muxer
+//     sets that bit on every track it writes, so any later remux undoes the
+//     hiding. Measured on ffmpeg 8.1.2 with rotate's own argv: the sbtl trak
+//     goes from tkhd flags 000002 to 000003 (ffprobe DISPOSITION:default 0 to
+//     1), and the DJI telemetry then displays in QuickTime.
+//
+// Either way it stays a warning, not an error -- the ordering is the user's to
+// choose.
+//
+// # Why this is not the position check it replaced, despite the shape
+//
+// The second arm fires for ANY later effect, which is what the original
+// position-based check did. The difference is that it is now measured and its
+// sentence is what was measured. The original asserted RE-ENCODING while
+// testing POSITION, and claimed a loss -- the location tags -- that does not
+// happen at all: the plain "location" tag survives even a full re-encode
+// because -map_metadata carries it, and the Apple ISO6709 key is carried too
+// now that vidio.MetadataCarryArgs pairs the muxer flag with that map.
+// Restoring "warn whenever telemetry is not last" as a rule of thumb would be
+// a revert; warning because a copy re-enables the track is a different claim
+// that happens to have a similar condition.
+//
+// Both arms need a muxed track to talk about, so both are gated on
+// Telemetry.EmbedsSubtitle -- with the default --srt-format none there is
+// nothing to lose or reveal. The re-enable arm is additionally gated on
+// ShowSubtitle: a user who asked for a visible subtitle gets one, which is not
+// news. Both facts are read off the configured effect rather than re-derived
+// from flags here, so the warning cannot disagree with what the effect does.
+//
+// It deliberately says nothing about the GPX/SRT SIDECARS. Those are not
+// warned about at all -- validateTelemetrySidecarPlacement rejects them
+// outright, because a mid-chain sidecar is written beside a temp intermediate
+// the run deletes.
 func warnTelemetryNotLast(log *logging.Logger, effs []effects.Effect) {
-	for i, e := range effs {
-		if e.Name() == "telemetry" && i != len(effs)-1 {
-			log.Warnf("telemetry is not the last effect in the chain; a later re-encoding effect will strip the muxed telemetry subtitle track and location tag from the video (the GPX sidecar is unaffected)")
+	tel, i, ok := telemetryPass(effs)
+	if !ok || !tel.EmbedsSubtitle() {
+		return
+	}
+	later := effs[i+1:]
+	if len(later) == 0 {
+		return
+	}
+
+	// A re-encoder anywhere later wins over the re-enable arm: a track that is
+	// gone cannot be displayed, whatever the effects around it do.
+	for _, e := range later {
+		if _, reencodes := e.(effects.Reencoder); reencodes {
+			log.Warnf("telemetry is followed by %s, which re-encodes the video and so strips the telemetry subtitle track just muxed into it; put telemetry last in --effect to keep it (the location tags and creation_time survive either way)", e.Name())
 			return
 		}
 	}
+
+	if tel.ShowSubtitle {
+		return
+	}
+	names := make([]string, 0, len(later))
+	for _, e := range later {
+		names = append(names, e.Name())
+	}
+	log.Warnf("telemetry is followed by %s, which remuxes the clip and re-enables the telemetry subtitle track videofx hid (ffmpeg's mp4 muxer marks every track it writes as enabled), so the telemetry will display during playback; put telemetry last in --effect, or use --srt-sidecar to keep it out of the container entirely",
+		strings.Join(names, ", "))
+}
+
+// telemetryPass finds the chain's telemetry effect and where it sits, for the
+// two checks that both need to know: warnTelemetryNotLast (is something after
+// it that re-encodes?) and validateTelemetrySidecarPlacement (is it last?).
+// They ask different questions for different reasons and keep their own
+// messages; only the lookup is shared, because that is the part where a
+// disagreement would be silent -- one of them matching an effect the other did
+// not.
+//
+// A TYPE assertion, not a name comparison, and that is the load-bearing detail:
+// "telemetry-hud" also begins with "telemetry" and is a different effect
+// entirely, whose own output is not where the sidecars go. Matching by name
+// prefix would reject `--effect telemetry-hud --gpx`, which is both legitimate
+// and common.
+//
+// There is at most one to find: resolveEffects rejects a repeated effect, and
+// impliedEffects appends a telemetry pass only when the chain has none.
+func telemetryPass(effs []effects.Effect) (*effects.Telemetry, int, bool) {
+	for i, e := range effs {
+		if tel, ok := e.(*effects.Telemetry); ok {
+			return tel, i, true
+		}
+	}
+	return nil, 0, false
+}
+
+// validateTelemetrySidecarPlacement rejects --gpx/--srt-sidecar asked of a
+// telemetry pass that is not the last effect in the chain.
+//
+// A sidecar is written next to the effect's OWN output path, which is what
+// makes it pair with the video (Telemetry Overlay finds "NAME.SRT" beside
+// "NAME.MP4"). Mid-chain that output is a temp intermediate the processor
+// deletes as soon as the next effect has consumed it -- so the sidecar was
+// written, then deleted, and the run exited 0 having produced no file at all.
+// Asking for a file and silently getting none is an error, not a warning.
+//
+// The alternative was to keep writing them and give the effect a second,
+// final-output path to place sidecars beside. That is a real design change to
+// the Effect interface and it is not this fix.
+//
+// This cannot sit with the flag-only validators in runRoot: it needs the
+// RESOLVED chain, after impliedEffects has appended the telemetry pass that
+// --effect telemetry-hud implies. Run against the raw --effect list it would
+// see no telemetry effect at all for a HUD run and pass everything, including
+// the cases it exists to catch.
+func validateTelemetrySidecarPlacement(effs []effects.Effect) error {
+	tel, i, ok := telemetryPass(effs)
+	if !ok || i == len(effs)-1 {
+		return nil
+	}
+
+	// Name the flag the user actually passed. Listing both when only one was
+	// given sends them looking for a flag they never typed.
+	var flags []string
+	if tel.GPX {
+		flags = append(flags, "--gpx")
+	}
+	if tel.SRTSidecar {
+		flags = append(flags, "--srt-sidecar")
+	}
+	if len(flags) == 0 {
+		return nil
+	}
+
+	following := make([]string, 0, len(effs)-i-1)
+	for _, later := range effs[i+1:] {
+		following = append(following, later.Name())
+	}
+	return fmt.Errorf("%s writes a sidecar file next to the telemetry effect's own output, but telemetry is not last in --effect (%s follows it), so that output is a temporary file this run deletes -- the sidecar would go with it and you would get no file at all. Put telemetry last in --effect, or drop %s",
+		strings.Join(flags, " and "), strings.Join(following, ", "), strings.Join(flags, "/"))
 }
 
 // validateQuality rejects a --quality outside the encoder's accepted range.
@@ -993,6 +1120,14 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Both of these read the CONFIGURED chain, so they run after the loop
+	// above rather than with the flag-only validators: what a telemetry pass
+	// will emit is a property of the effect, not of a flag string. Still ahead
+	// of ValidateInputFiles, so a chain that cannot deliver what was asked for
+	// fails before any file is opened.
+	if err := validateTelemetrySidecarPlacement(effs); err != nil {
+		return err
+	}
 	warnTelemetryNotLast(log, effs)
 	warnCRFIgnoredByGoCV(log, cmd.Flags().Changed("crf"), effs)
 

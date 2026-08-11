@@ -169,14 +169,25 @@ type AvailabilityChecker interface {
 // video stream, as opposed to copying the source's stream through untouched
 // (rotate, telemetry). It carries no data: implementing it IS the statement.
 //
-// It exists for one caller, internal/video's trim step, and for one property
-// that is invisible in the Effect interface: whether the output inherits its
-// input's container-level structure. A --start trim hides the pre-roll before
-// the requested instant behind an MP4 edit list, which a stream copy into a
-// container that cannot express one (Matroska, WebM) silently un-hides -- while
-// creation_time keeps naming the requested instant, so the pictures and the
-// clock disagree. An effect that re-encodes cannot have that problem: it emits
-// the frames it decoded, which are the presented ones.
+// It exists for one property that is invisible in the Effect interface --
+// whether the output inherits its input's container-level structure -- and now
+// has two callers.
+//
+// internal/video's trim step is the original. A --start trim hides the
+// pre-roll before the requested instant behind an MP4 edit list, which a
+// stream copy into a container that cannot express one (Matroska, WebM)
+// silently un-hides -- while creation_time keeps naming the requested instant,
+// so the pictures and the clock disagree. An effect that re-encodes cannot
+// have that problem: it emits the frames it decoded, which are the presented
+// ones.
+//
+// cmd's warnTelemetryNotLast is the second, and reads the same property from
+// the other end: an effect that emits its own video stream maps that stream and
+// the source's audio, so a subtitle track muxed by an earlier telemetry pass is
+// not carried over. A stream copy keeps it. The marker is what lets that
+// warning test the property it actually asserts instead of an effect's position
+// in the chain, which is what it used to test and which warned falsely about
+// rotate.
 //
 // # The polarity is the safe way round, deliberately
 //
