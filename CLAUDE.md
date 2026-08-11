@@ -73,12 +73,19 @@ Never ship prebuilt binaries: OpenCV here links against Homebrew's GPL ffmpeg.
 
 ## Git
 
-Commit onto a short-lived topic branch, fast-forward `main` onto it, delete the branch —
-all in one sequence:
+Follow the global branch-first rule: create the topic branch *before* the first edit, and
+do not move `main` until the user gives the go-ahead.
 
 ```
-git checkout -b <topic> && git commit ... && git checkout main \
-  && git merge --ff-only <topic> && git branch -d <topic>
+git checkout -b <topic>     # before editing anything
+git commit ...              # as the work lands
+```
+
+Then stop and report which branch the work is on. Once the user says to go ahead, `main`
+here wants a linear history with no merge commits:
+
+```
+git checkout main && git merge --ff-only <topic> && git branch -d <topic>
 ```
 
 Do not push; that is the user's step. Commits are SSH-signed (`git log --format="%h %G? %s"`
