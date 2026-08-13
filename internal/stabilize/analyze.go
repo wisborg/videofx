@@ -22,6 +22,26 @@ const lensCalibrationPairs = 200
 // in FitRotation has something to work with.
 const minRotationPoints = 20
 
+// ProgressFunc reports decode progress: done is the number of frames decoded
+// so far, total is the number expected. It is called once per decoded frame,
+// so it must be cheap and must not block — Analyze runs close to the decode
+// ceiling and has no slack for a slow callback.
+//
+// total == 0 means unknown, matching the repo-wide convention for a frame
+// count (see vidio.Info.PresentedFrames). Even when total is nonzero it is
+// container metadata this codebase does not fully trust, not a measurement
+// of the decode itself: PresentedFrames is documented to overshoot by up to
+// a GOP on a b-frame trim (see vidio/probe.go), NBFrames is absent or wrong
+// for some containers, and neither is verified against the decode that
+// actually happens. A caller must tolerate done exceeding total rather than
+// assume a clean 0..total ramp.
+//
+// nil means no reporting. Unlike WarpModelSimilarity, whose empty string
+// silently selects a real behaviour, ProgressFunc has no such trap: a nil
+// callback's only effect is the absence of progress log lines, nothing about
+// the analysis itself changes.
+type ProgressFunc func(done, total int)
+
 // Analyze runs the full Phase 2 pipeline over path: decode at analysis
 // resolution (vidio.ProfileAnalysis), track features frame to frame, and
 // fit a similarity transform per transition. It returns the resulting
@@ -30,7 +50,27 @@ const minRotationPoints = 20
 //
 // Analyze does not smooth, warp, crop, fill edges, or otherwise touch
 // pixels; it only measures motion. See package doc.
-func Analyze(ctx context.Context, path string, opts Options) (*MotionSeries, error) {
+//
+// progress, if non-nil, is called once per decoded frame; see ProgressFunc.
+// It is an explicit parameter rather than a field on Options because Options
+// is serialized into the sidecar JSON and compared field-by-field to decide
+// whether a cached sidecar matches the requested analysis — a reporting sink
+// measures nothing about the analysis and does not belong in that record
+// (and a func field would make json.Marshal fail outright).
+func Analyze(ctx context.Context, path string, opts Options, progress ProgressFunc) (*MotionSeries, error) {
+	if progress == nil {
+		// This repo's idiom for an optional sink is to make the SINK absorb
+		// the nil, not to make every call site check -- see
+		// internal/logging.Logger's nil-receiver resolution and
+		// internal/progress.Reporter.Report's doc comment, which argues the
+		// same thing. A func type cannot have a nil-safe method, so
+		// normalizing once here is the equivalent, and it removes the
+		// hazard of a future call site forgetting the "if progress != nil"
+		// guard this replaces: every production caller passes nil today, so
+		// an unguarded call would otherwise panic on the default path.
+		progress = func(int, int) {}
+	}
+
 	info, err := vidio.Probe(ctx, path)
 	if err != nil {
 		return nil, fmt.Errorf("stabilize: analyzing %s: %w", path, err)
@@ -107,6 +147,7 @@ func Analyze(ctx context.Context, path string, opts Options) (*MotionSeries, err
 		return series, nil
 	}
 	series.FrameCount = 1
+	progress(series.FrameCount, series.SourceFrames)
 
 	prevPts, err := DetectFeatures(prev, opts)
 	if err != nil {
@@ -150,6 +191,7 @@ func Analyze(ctx context.Context, path string, opts Options) (*MotionSeries, err
 			break
 		}
 		series.FrameCount++
+		progress(series.FrameCount, series.SourceFrames)
 
 		trans, pts, currPts := estimateTransitionPoints(prev, curr, prevPts, opts)
 		if rotationModel && trans.OK && len(pts.from) >= minRotationPoints {

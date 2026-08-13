@@ -2,6 +2,7 @@ package stabilize
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,30 @@ import (
 
 	"videofx/internal/vidio"
 )
+
+// generateAnalysisSource builds a synthetic ffmpeg lavfi test-pattern source
+// at 160x120/10fps, for the given duration in seconds, encoded with
+// encodeArgs -- the codec, GOP structure, pixel format and any container
+// flags a specific fixture needs (see each call site for what varies and
+// why). It exists to absorb the boilerplate every Analyze fixture in this
+// package and analyzeprogress_test.go shares -- the lavfi prefix and the
+// exec/CombinedOutput/Fatalf error handling -- while leaving each call's
+// GOP/duration/container choice, which is what the test in question is
+// actually about, visible at the call site rather than folded into one
+// fixture that quietly stops distinguishing them.
+func generateAnalysisSource(t *testing.T, dir string, duration int, encodeArgs ...string) string {
+	t.Helper()
+	src := filepath.Join(dir, "source.mp4")
+	args := append([]string{
+		"-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", fmt.Sprintf("testsrc=size=160x120:rate=10:duration=%d", duration),
+	}, encodeArgs...)
+	args = append(args, "-y", src)
+	if out, err := exec.Command("ffmpeg", args...).CombinedOutput(); err != nil {
+		t.Fatalf("generating the source: %v\n%s", err, out)
+	}
+	return src
+}
 
 // TestAnalyze_SourceFramesCountsWhatDecodesNotWhatAnEditListHides pins the
 // number Analyze records as "how many frames should have decoded".
@@ -40,14 +65,7 @@ func TestAnalyze_SourceFramesCountsWhatDecodesNotWhatAnEditListHides(t *testing.
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	src := filepath.Join(dir, "longgop.mp4")
-	if out, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
-		"-f", "lavfi", "-i", "testsrc=size=160x120:rate=10:duration=6",
-		"-c:v", "libx264", "-g", "20", "-keyint_min", "20", "-sc_threshold", "0", "-bf", "0",
-		"-pix_fmt", "yuv420p", "-y", src,
-	).CombinedOutput(); err != nil {
-		t.Fatalf("generating the long-GOP source: %v\n%s", err, out)
-	}
+	src := generateAnalysisSource(t, dir, 6, "-c:v", "libx264", "-g", "20", "-keyint_min", "20", "-sc_threshold", "0", "-bf", "0", "-pix_fmt", "yuv420p")
 
 	// Mid-GOP: the copy falls back to the keyframe at 2.0 s, so 5 frames of
 	// pre-roll ride along hidden.
@@ -58,7 +76,7 @@ func TestAnalyze_SourceFramesCountsWhatDecodesNotWhatAnEditListHides(t *testing.
 
 	opts := DefaultOptions()
 	opts.AnalysisWidth = 160
-	series, err := Analyze(ctx, trimmed, opts)
+	series, err := Analyze(ctx, trimmed, opts, nil)
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
@@ -112,14 +130,7 @@ func TestAnalyze_SourceFramesStillOutrunsTheDecodeOnATruncatedSource(t *testing.
 
 	// 9 s at 10 fps = 90 frames, by construction.
 	const wholeFrames = 90
-	full := filepath.Join(dir, "full.mp4")
-	if out, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
-		"-f", "lavfi", "-i", "testsrc=size=160x120:rate=10:duration=9",
-		"-c:v", "libx264", "-g", "10", "-bf", "0", "-pix_fmt", "yuv420p",
-		"-movflags", "+faststart", "-y", full,
-	).CombinedOutput(); err != nil {
-		t.Fatalf("generating the source: %v\n%s", err, out)
-	}
+	full := generateAnalysisSource(t, dir, 9, "-c:v", "libx264", "-g", "10", "-bf", "0", "-pix_fmt", "yuv420p", "-movflags", "+faststart")
 
 	data, err := os.ReadFile(full)
 	if err != nil {
@@ -146,7 +157,7 @@ func TestAnalyze_SourceFramesStillOutrunsTheDecodeOnATruncatedSource(t *testing.
 
 	opts := DefaultOptions()
 	opts.AnalysisWidth = 160
-	series, err := Analyze(ctx, truncated, opts)
+	series, err := Analyze(ctx, truncated, opts, nil)
 	if err != nil {
 		t.Fatalf("Analyze of a truncated clip: %v", err)
 	}

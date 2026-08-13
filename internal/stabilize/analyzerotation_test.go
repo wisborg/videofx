@@ -90,6 +90,102 @@ func encodeGrayFrames(t *testing.T, path string, frames []gocv.Mat, w, h int, fp
 	}
 }
 
+// rotationFixture builds a synthetic clip shaken by a genuine camera
+// ROTATION -- not a 2D transform of the picture, which is the entire point
+// of the model under test -- analyzes it with WarpModelRotation, and smooths
+// the result. TestRotationPipelineActuallyReducesShake and
+// TestRender_ProgressFiresUnderRotation both need exactly this setup before
+// they diverge into what each actually measures (residual shake vs.
+// progress-callback ordering); they used to carry independent copies of it.
+//
+// That duplication was a trap of its own: the constants here (frames past
+// lensCalibrationPairs, the lens, orientationAt's coefficients) are tuned to
+// reliably clear the calibration window and land the fit within tolerance,
+// and a copy does not get retuned when the original does -- it silently
+// stops proving what its comment claims.
+//
+// The two setup guards (a Reliable lens, hasRotations) are asserted here
+// with t.Fatalf rather than left to each caller: both tests need the
+// rotation path to have actually engaged, or what follows measures the 2D
+// similarity fallback while believing it exercised the rotation model.
+func rotationFixture(t *testing.T) (src string, opts Options, renderOpts RenderOptions, inSeries *MotionSeries, result *SmoothResult) {
+	t.Helper()
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+
+	const (
+		w, h   = 320, 240
+		frames = lensCalibrationPairs + 25 // past the calibration window
+	)
+	truth := Lens{Kind: LensEquisolid, Focal: 0.52 * w, CX: w / 2, CY: h / 2}
+
+	// A wobble riding on a steady turn, stated as camera ORIENTATION rather
+	// than as a 2D transform of the picture -- which is the entire point of
+	// this model. The turn is what a stabilizer must preserve, so freezing
+	// the frame is not a winning strategy; the wobble is what it must
+	// remove. Amplitudes are chosen to put the input well clear of this
+	// setup's residual floor: at focal 166 px, 0.05 rad is ~8 px of frame
+	// motion.
+	orientationAt := func(i int) Quat {
+		fi := float64(i)
+		return quatExp(Vec3{
+			X: 0.00040*fi + 0.050*math.Sin(fi*2.1),
+			Y: 0.00025*fi + 0.045*math.Cos(fi*1.9),
+			Z: 0.012 * math.Sin(fi*2.3),
+		})
+	}
+
+	base := newSyntheticFrameSized(23, w, h)
+	defer base.Close()
+
+	mats := make([]gocv.Mat, frames)
+	for i := range mats {
+		mats[i] = warpFrameByRotation(base, truth, orientationAt(i))
+	}
+	defer func() {
+		for i := range mats {
+			_ = mats[i].Close()
+		}
+	}()
+
+	dir := t.TempDir()
+	src = filepath.Join(dir, "rotational.mp4")
+	encodeGrayFrames(t, src, mats, w, h, 30)
+
+	ctx := context.Background()
+	opts = DefaultOptions()
+	opts.WarpModel = WarpModelRotation
+	opts.AnalysisWidth = w // native size, so no rescale sits between truth and fit
+
+	var err error
+	inSeries, err = Analyze(ctx, src, opts, nil)
+	if err != nil {
+		t.Fatalf("analyzing source: %v", err)
+	}
+	// Setup guards. If either of these fails the clip never reached the
+	// rotation path at all, and a residual/progress comparison built on
+	// inSeries would be measuring the 2D fallback while reporting it as the
+	// rotation model.
+	if inSeries.Lens == nil || !inSeries.Lens.Reliable() {
+		t.Fatalf("test setup: no reliable lens calibrated (%v), so the render would silently fall back to the similarity", inSeries.Lens)
+	}
+	if !inSeries.hasRotations() {
+		t.Fatal("test setup: analysis recorded no per-pair rotations, so there is nothing for the rotation render to apply")
+	}
+
+	smoothOpts := DefaultSmoothOptions()
+	smoothOpts.Sigma = 15
+	result = Smooth(inSeries, smoothOpts)
+
+	renderOpts = DefaultRenderOptions()
+	renderOpts.EdgeMode = EdgeModeAdaptive
+	renderOpts.ZoomTransitionSeconds = 0 // one clip-wide crop, per CLAUDE.md's comparison rule
+	renderOpts.Rotation = true           // the branch nothing else in the suite executes
+
+	return src, opts, renderOpts, inSeries, result
+}
+
 // rotationTruth is the camera orientation at frame i: a bounded oscillation
 // rather than an accumulating walk, so the scene never rotates out of frame
 // over a long clip while still giving every consecutive pair a different,
@@ -152,7 +248,7 @@ func TestAnalyze_RotationModelFitsEveryPair(t *testing.T) {
 	opts.WarpModel = WarpModelRotation
 	opts.AnalysisWidth = w // analyze at native size, so no rescale sits between truth and fit
 
-	series, err := Analyze(context.Background(), clip, opts)
+	series, err := Analyze(context.Background(), clip, opts, nil)
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
@@ -291,7 +387,7 @@ func TestStabilizePipelineActuallyReducesShake(t *testing.T) {
 	opts := DefaultOptions()
 	opts.AnalysisWidth = w
 
-	inSeries, err := Analyze(ctx, src, opts)
+	inSeries, err := Analyze(ctx, src, opts, nil)
 	if err != nil {
 		t.Fatalf("analyzing source: %v", err)
 	}
@@ -308,11 +404,11 @@ func TestStabilizePipelineActuallyReducesShake(t *testing.T) {
 	renderOpts := DefaultRenderOptions()
 	renderOpts.EdgeMode = EdgeModeAdaptive
 	renderOpts.ZoomTransitionSeconds = 0 // one clip-wide crop, per CLAUDE.md's comparison rule
-	if _, err := Render(ctx, src, inSeries, result, renderOpts, out); err != nil {
+	if _, err := Render(ctx, src, inSeries, result, renderOpts, out, nil); err != nil {
 		t.Fatalf("rendering: %v", err)
 	}
 
-	outSeries, err := Analyze(ctx, out, opts)
+	outSeries, err := Analyze(ctx, out, opts, nil)
 	if err != nil {
 		t.Fatalf("analyzing output: %v", err)
 	}
@@ -370,84 +466,16 @@ func TestStabilizePipelineActuallyReducesShake(t *testing.T) {
 // Running the real pipeline and re-measuring the output catches both, because
 // both turn a reduction into an increase.
 func TestRotationPipelineActuallyReducesShake(t *testing.T) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("ffmpeg not on PATH")
-	}
-	const (
-		w, h   = 320, 240
-		frames = lensCalibrationPairs + 25 // past the calibration window
-	)
-	truth := Lens{Kind: LensEquisolid, Focal: 0.52 * w, CX: w / 2, CY: h / 2}
-
-	// A wobble riding on a steady turn, stated as camera ORIENTATION rather than
-	// as a 2D transform of the picture -- which is the entire point of this
-	// model. The turn is what a stabilizer must preserve, so freezing the frame
-	// is not a winning strategy here any more than it is in the similarity
-	// version of this test; the wobble is what it must remove. Amplitudes are
-	// chosen to put the input well clear of this setup's residual floor: at
-	// focal 166 px, 0.05 rad is ~8 px of frame motion.
-	orientationAt := func(i int) Quat {
-		fi := float64(i)
-		return quatExp(Vec3{
-			X: 0.00040*fi + 0.050*math.Sin(fi*2.1),
-			Y: 0.00025*fi + 0.045*math.Cos(fi*1.9),
-			Z: 0.012 * math.Sin(fi*2.3),
-		})
-	}
-
-	base := newSyntheticFrameSized(23, w, h)
-	defer base.Close()
-
-	mats := make([]gocv.Mat, frames)
-	for i := range mats {
-		mats[i] = warpFrameByRotation(base, truth, orientationAt(i))
-	}
-	defer func() {
-		for i := range mats {
-			_ = mats[i].Close()
-		}
-	}()
-
-	dir := t.TempDir()
-	src := filepath.Join(dir, "rotational-shake.mp4")
-	encodeGrayFrames(t, src, mats, w, h, 30)
-
+	src, opts, renderOpts, inSeries, result := rotationFixture(t)
 	ctx := context.Background()
-	opts := DefaultOptions()
-	opts.WarpModel = WarpModelRotation
-	opts.AnalysisWidth = w // native size, so no rescale sits between truth and fit
-
-	inSeries, err := Analyze(ctx, src, opts)
-	if err != nil {
-		t.Fatalf("analyzing source: %v", err)
-	}
-
-	// Setup guards. If either of these fails the clip never reached the rotation
-	// path at all, and the residual comparison below would be measuring the 2D
-	// fallback while reporting it as the rotation model -- exactly the confusion
-	// this test exists to end.
-	if inSeries.Lens == nil || !inSeries.Lens.Reliable() {
-		t.Fatalf("test setup: no reliable lens calibrated (%v), so the render would silently fall back to the similarity", inSeries.Lens)
-	}
-	if !inSeries.hasRotations() {
-		t.Fatal("test setup: analysis recorded no per-pair rotations, so there is nothing for the rotation render to apply")
-	}
 
 	before := inSeries.ResidualShake().MedianTranslation
 	if before <= 0.5 {
 		t.Fatalf("test setup: source residual %.3f px is too small to measure a reduction against", before)
 	}
 
-	smoothOpts := DefaultSmoothOptions()
-	smoothOpts.Sigma = 15
-	result := Smooth(inSeries, smoothOpts)
-
-	out := filepath.Join(dir, "stabilized.mp4")
-	renderOpts := DefaultRenderOptions()
-	renderOpts.EdgeMode = EdgeModeAdaptive
-	renderOpts.ZoomTransitionSeconds = 0 // one clip-wide crop, per CLAUDE.md's comparison rule
-	renderOpts.Rotation = true           // the branch nothing else in the suite executes
-	stats, err := Render(ctx, src, inSeries, result, renderOpts, out)
+	out := filepath.Join(t.TempDir(), "stabilized.mp4")
+	stats, err := Render(ctx, src, inSeries, result, renderOpts, out, nil)
 	if err != nil {
 		t.Fatalf("rendering: %v", err)
 	}
@@ -458,7 +486,7 @@ func TestRotationPipelineActuallyReducesShake(t *testing.T) {
 		t.Fatal("RenderStats.Lens = nil: the render took the 2D similarity path, so the rest of this test proves nothing about the rotation model")
 	}
 
-	outSeries, err := Analyze(ctx, out, opts)
+	outSeries, err := Analyze(ctx, out, opts, nil)
 	if err != nil {
 		t.Fatalf("analyzing output: %v", err)
 	}

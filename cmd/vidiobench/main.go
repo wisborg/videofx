@@ -289,7 +289,7 @@ func runStabilize(ctx context.Context, file string) error {
 	opts := stabilize.DefaultOptions()
 
 	start := time.Now()
-	series, err := stabilize.Analyze(ctx, file, opts)
+	series, err := stabilize.Analyze(ctx, file, opts, nil)
 	if err != nil {
 		return fmt.Errorf("analyzing %s: %w", file, err)
 	}
@@ -646,7 +646,7 @@ func loadMotionSeries(ctx context.Context, p smoothParams, analysisOpts stabiliz
 	fmt.Printf("source: %s (%dx%d, %.3f fps, %d frames reported)\n", p.file, info.Width, info.Height, info.FPS, info.NBFrames)
 
 	start := time.Now()
-	series, err := stabilize.Analyze(ctx, p.file, analysisOpts)
+	series, err := stabilize.Analyze(ctx, p.file, analysisOpts, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf("analyzing %s: %w", p.file, err)
 	}
@@ -807,7 +807,7 @@ func runRender(ctx context.Context, p renderParams) error {
 	}
 
 	start := time.Now()
-	stats, err := stabilize.Render(ctx, p.file, series, result, renderOpts, p.out)
+	stats, err := stabilize.Render(ctx, p.file, series, result, renderOpts, p.out, nil)
 	elapsed := time.Since(start)
 	if err != nil {
 		return fmt.Errorf("rendering %s: %w", p.file, err)

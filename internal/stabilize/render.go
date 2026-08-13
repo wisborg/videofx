@@ -351,7 +351,33 @@ var identityCorrection = Correction{Scale: 1}
 // file against someone else's motion data) -- the caller states
 // explicitly what to decode rather than this function silently trusting
 // a field that was never meant to be authoritative.
-func Render(ctx context.Context, sourcePath string, series *MotionSeries, result *SmoothResult, opts RenderOptions, outputPath string) (RenderStats, error) {
+//
+// progress, if non-nil, is called once per decoded frame; see ProgressFunc
+// (declared in analyze.go and shared by both passes). It is an explicit
+// parameter rather than a field on RenderOptions for the same reason Analyze
+// takes it separately from Options: RenderOptions is passed BY VALUE into
+// buildRenderPlan (see that function's doc comment), which exists so that
+// every geometric decision -- which correction path owns the frame, the
+// per-frame corrections, the crop each one costs -- is pure data, testable
+// in milliseconds without decoding a single frame. A side-effecting closure
+// riding along in that struct would make it half data, half effect, and
+// buildRenderPlan would have no use for it anyway; it belongs to the frame
+// loop, not the plan.
+func Render(ctx context.Context, sourcePath string, series *MotionSeries, result *SmoothResult, opts RenderOptions, outputPath string, progress ProgressFunc) (RenderStats, error) {
+	if progress == nil {
+		// This repo's idiom for an optional sink is to make the SINK absorb
+		// the nil, not to make every call site check -- see
+		// internal/logging.Logger's nil-receiver resolution and
+		// internal/progress.Reporter.Report's doc comment, and Analyze's
+		// identical normalization above. A func type cannot have a nil-safe
+		// method, so normalizing once here is the equivalent, and it
+		// removes the hazard of a future call site forgetting the
+		// "if progress != nil" guard this replaces: every production caller
+		// passes nil today, so an unguarded call would otherwise panic on
+		// the default path.
+		progress = func(int, int) {}
+	}
+
 	if _, err := ParseEdgeMode(string(opts.EdgeMode)); err != nil {
 		return RenderStats{}, fmt.Errorf("stabilize: rendering %s: %w", sourcePath, err)
 	}
@@ -464,6 +490,19 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 	dst := gocv.NewMatWithSize(h, w, size.MatType())
 	defer dst.Close()
 
+	// presentedFrames is the progress denominator -- info.PresentedFrames(),
+	// NOT series.FrameCount. The tempting reading is that they're the same
+	// clip and should agree, but they legitimately differ whenever a sidecar
+	// is reused: series.FrameCount describes the ANALYSIS this series came
+	// from, while this Render call is decoding sourcePath fresh right now.
+	// That mismatch is exactly what RenderStats.UncorrectedFrames already
+	// reports on (see its doc comment and the warning at
+	// internal/effects/stabilize.go around the sidecar-reuse path) -- the
+	// progress total should describe the decode this call is actually
+	// performing, the same thing FramesRendered counts, not the decode that
+	// produced the cached motion data.
+	presentedFrames := info.PresentedFrames()
+
 	frames := 0
 	for {
 		ok, err := dec.NextFrame(&src)
@@ -473,6 +512,21 @@ func Render(ctx context.Context, sourcePath string, series *MotionSeries, result
 		if !ok {
 			break
 		}
+		// Exactly one call site, at the top of the loop, right after a
+		// successful decode and before any of the four warp paths below
+		// has branched -- in particular before the rotation path's own
+		// frames++/continue a few lines down. A call placed at the
+		// bottom of the loop (where the non-rotation paths increment
+		// frames) fires on every path except rotation, which is this
+		// project's best model; a call placed after only one of the two
+		// increments is the same bug in mirror image. Guarded by the set of
+		// tests over this property rather than any single one of them --
+		// TestRender_ProgressFiresUnderRotation and
+		// TestRender_RotationPathReportsWithoutNeedingALensCalibration cover
+		// the rotation branch specifically, and
+		// TestRender_ProgressFiresOnEveryWarpPath generalizes the same check
+		// across all five paths the loop can take.
+		progress(frames+1, presentedFrames)
 
 		if sphere != nil {
 			// Counted against rotCorr, not corrections: on this path the 2D

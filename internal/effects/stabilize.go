@@ -356,7 +356,7 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 
 	renderOpts := g.renderOptions(log, series, edgeMode, warpModel, rsRect, rho)
 
-	stats, err := stabilize.Render(ctx, in.SourcePath, series, result, renderOpts, in.OutputPath)
+	stats, err := stabilize.Render(ctx, in.SourcePath, series, result, renderOpts, in.OutputPath, nil)
 	if err != nil {
 		return fmt.Errorf("rendering %s: %w", in.SourcePath, err)
 	}
@@ -479,7 +479,7 @@ func (g *GoCVStabilizer) loadOrAnalyze(ctx context.Context, log *logging.Logger,
 		}
 	}
 
-	series, err := stabilize.Analyze(ctx, sourcePath, opts)
+	series, err := stabilize.Analyze(ctx, sourcePath, opts, nil)
 	if err != nil {
 		return nil, err
 	}
