@@ -11,6 +11,7 @@ import (
 	"sort"
 
 	"videofx/internal/logging"
+	"videofx/internal/progress"
 )
 
 // Input carries everything an Effect needs to process a single video.
@@ -36,6 +37,28 @@ type Input struct {
 	// zero Input still logs somewhere sane, so tests that don't care can leave
 	// it unset and tests that do can set logging.New(&buf, ...).
 	Log *logging.Logger
+	// Progress is POLICY ONLY -- the interval and the clock a progress line
+	// should follow -- not a sink. nil means no progress reporting. An effect
+	// that wants to report progress builds its own *progress.Reporter from it
+	// inside Apply, e.g.:
+	//
+	//	r := progress.New(in.Progress, "rendering", progressEmitter(log))
+	//	stabilize.Render(ctx, ..., r.Report)
+	//
+	// progressEmitter is this package's one place that decides what severity
+	// a progress line logs at -- see its own doc comment.
+	//
+	// This is deliberately NOT an OnStart/OnResult-style callback hook on
+	// Input itself. video.ProcessorConfig's OnStart/OnResult are serialized
+	// across workers under a single mutex (see processor.go) because they fire
+	// once per JOB; a progress callback fires once per FRAME, so a hook shaped
+	// the same way would invite taking that lock on a path that runs at up to
+	// the decode ceiling, which would serialize every concurrent worker's
+	// inner loop down to one frame at a time. Passing policy down and letting
+	// each effect build its own per-job Reporter (which is not safe for
+	// concurrent use either, but is never shared across jobs) keeps that
+	// mistake unavailable.
+	Progress *progress.Config
 }
 
 // Effect is implemented by every video effect the CLI supports.
@@ -209,4 +232,23 @@ func ValidateUnitRange(strength float64) error {
 		return fmt.Errorf("strength must be between 0.0 and 1.0, got %v", strength)
 	}
 	return nil
+}
+
+// progressEmitter turns a *logging.Logger into the emit func a
+// progress.Reporter needs, logging every progress line at info level.
+//
+// This is the ONE place that decision gets made. cmd.buildProgressConfig
+// (cmd/root.go) has to agree with whatever severity a progress line actually
+// logs at: it builds a live *progress.Config only when
+// log.Enabled(logging.LevelInfo), on the assumption that a progress line is
+// an info-level log. If an effect instead built its own
+// func(m string) { log.Warnf("%s", m) } (or Debugf), that assumption would
+// be wrong for that effect specifically, and the disagreement is invisible
+// -- no error, the flag still "works" under --log-level info, and the
+// feature only goes dark under --log-level warn, which is exactly the case
+// buildProgressConfig exists to short-circuit. Sharing one helper across
+// every effect that reports progress keeps the two in agreement by
+// construction instead of by every call site remembering to match.
+func progressEmitter(log *logging.Logger) func(string) {
+	return func(m string) { log.Infof("%s", m) }
 }

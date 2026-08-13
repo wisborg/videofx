@@ -5,15 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"videofx/internal/logging"
+	"videofx/internal/progress"
 	"videofx/internal/stabilize"
 	"videofx/internal/vidio"
 )
@@ -425,6 +428,282 @@ func TestGoCVStabilizer_Apply_RespectsCanceledContext(t *testing.T) {
 	}
 }
 
+// TestGoCVStabilizer_Apply_EmitsRenderingProgress is the one test in this
+// whole feature that would fail against a feature that is wired up but never
+// fires: every structural test elsewhere (Input.Progress exists,
+// ProcessorConfig.Progress is copied, loadOrAnalyze builds a Reporter at the
+// right call site) would pass unchanged if renderProgress in Apply were
+// quietly built and never threaded into stabilize.Render. Only running the
+// real pipeline end to end and reading the logger's buffer back can catch
+// that.
+//
+// It also pins that the emitted line reaches the logger carrying the "file"
+// field Input.Log is documented to already carry (see Input.Log's doc
+// comment) -- Apply narrows the logger with Named but must not lose fields
+// the caller already attached.
+func TestGoCVStabilizer_Apply_EmitsRenderingProgress(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+
+	dir := t.TempDir()
+	src := generateTinyTestSource(t, dir, 10)
+
+	var buf bytes.Buffer
+	log := logging.New(&buf, logging.LevelInfo).WithField("file", src)
+
+	g := &GoCVStabilizer{TrackOptions: stabilize.DefaultOptions(), EdgeMode: stabilize.EdgeModeAdaptive}
+	out := filepath.Join(dir, "out.mp4")
+	err := g.Apply(context.Background(), Input{
+		SourcePath: src,
+		OutputPath: out,
+		Strength:   0.5,
+		Log:        log,
+		// WarmUp 0 and a 1ns Interval: the throttle itself is not what this
+		// test is about, only that a line reaches the logger at all. Both
+		// combine to make New set nextDue = start (see progress.New), so the
+		// very first Report call -- on the real clock, no injected Now needed
+		// -- already lands at or after nextDue and emits.
+		Progress: &progress.Config{Interval: time.Nanosecond, WarmUp: 0},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	out2 := buf.String()
+	// progressLine, not strings.Contains("rendering"): this package logs the
+	// word in prose too (readoutRatio's "rendering without rolling-shutter
+	// correction", warnIfOptionsDiffer's "rendering with the sidecar's
+	// analysis"), neither of which is reached by THIS configuration today --
+	// but a substring match would start passing for the wrong reason the
+	// moment one of them was, which is the sort of accident that quietly
+	// retires a wiring test.
+	if !progressLine("rendering").MatchString(out2) {
+		t.Fatalf("no \"rendering\" progress line reached the logger:\n%s", out2)
+	}
+	if !strings.Contains(out2, `file=`+src) {
+		t.Errorf("the rendering line lost the \"file\" field Input.Log already carried:\n%s", out2)
+	}
+}
+
+// TestGoCVStabilizer_Apply_SidecarHitEmitsNoAnalyzingLine pins that a cached
+// run (loadOrAnalyze's early return on a sidecar hit, which never calls
+// stabilize.Analyze) emits no "analyzing" line. That catches a stray Report
+// call reaching the logger on the sidecar-hit path, or an "analyzing" line
+// emitted unconditionally regardless of whether Analyze actually ran.
+//
+// What it does NOT catch: it cannot tell loadOrAnalyze's current shape
+// (building the Reporter inside the branch that calls Analyze -- see
+// loadOrAnalyze's own doc comment for why that placement matters) apart from
+// building one eagerly in Apply and simply never handing it to Analyze on
+// this path. Both are silent on a cache hit -- progress.New does no I/O, and
+// a Reporter nothing ever calls Report on emits nothing regardless of when
+// it was minted. The render phase still runs unconditionally, so a
+// "rendering" line must still appear; that positive control is what stops
+// this test from passing against a build that emits nothing at all.
+func TestGoCVStabilizer_Apply_SidecarHitEmitsNoAnalyzingLine(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+
+	const wantFrames = 10
+	dir := t.TempDir()
+	src := generateTinyTestSource(t, dir, wantFrames)
+	sidecarPath := filepath.Join(dir, "motion.json")
+
+	// WarmUp 0 and a 1ns Interval make New set nextDue = start (see
+	// progress.New), so the real clock is enough: the first Report call on
+	// each phase already lands at or after nextDue and emits, with no
+	// injected clock needed to force it.
+	progressCfg := &progress.Config{Interval: time.Nanosecond, WarmUp: 0}
+
+	// First run: no sidecar yet, so this one DOES analyze (and writes it).
+	g := &GoCVStabilizer{TrackOptions: stabilize.DefaultOptions(), EdgeMode: stabilize.EdgeModeAdaptive, SidecarPath: sidecarPath}
+	if err := g.Apply(context.Background(), Input{
+		SourcePath: src,
+		OutputPath: filepath.Join(dir, "out1.mp4"),
+		Strength:   0.5,
+		Log:        logging.New(io.Discard, logging.LevelInfo).WithField("file", src),
+		Progress:   progressCfg,
+	}); err != nil {
+		t.Fatalf("first Apply (should analyze + write sidecar): %v", err)
+	}
+
+	// Second run against the same sidecar: this is the one under test.
+	var buf bytes.Buffer
+	log := logging.New(&buf, logging.LevelInfo).WithField("file", src)
+	g2 := &GoCVStabilizer{TrackOptions: stabilize.DefaultOptions(), EdgeMode: stabilize.EdgeModeAdaptive, SidecarPath: sidecarPath}
+	if err := g2.Apply(context.Background(), Input{
+		SourcePath: src,
+		OutputPath: filepath.Join(dir, "out2.mp4"),
+		Strength:   0.5,
+		Log:        log,
+		Progress:   progressCfg,
+	}); err != nil {
+		t.Fatalf("second Apply (should read the sidecar back): %v", err)
+	}
+
+	got := buf.String()
+	if strings.Contains(got, "analyzing") {
+		t.Errorf("a sidecar-hit run must not emit an \"analyzing\" line (Analyze never ran):\n%s", got)
+	}
+	// The positive control for the absence check above: without it, a run
+	// that emitted nothing at all -- a broken Reporter, a config that never
+	// reached Apply -- would satisfy "no analyzing line" perfectly.
+	if !progressLine("rendering").MatchString(got) {
+		t.Errorf("a sidecar-hit run must still emit a \"rendering\" line (the render phase always runs):\n%s", got)
+	}
+}
+
+// TestGoCVStabilizer_Apply_LogLevelWarnEmitsNoProgressLines pins that
+// --log-level warn (a LevelWarn logger here) silences progress reporting
+// entirely, even with progress reporting otherwise configured and firing:
+// progress lines are logged via log.Infof (see progressEmitter, and its call
+// sites in Apply/loadOrAnalyze), which a warn-level logger drops.
+//
+// It asserts the absence of "analyzing"/"rendering" progress lines
+// specifically (via progressLine), not that the logger emitted nothing at
+// all. This fixture is quiet on its own -- a bare Apply against a tiny
+// synthetic clip raises no warning -- but asserting a wider "no output
+// whatsoever" would make this test a tripwire for any UNRELATED message this
+// fixture later starts emitting (a lens-calibration warning, a short-
+// analysis notice, ...), which would then fail with a message that reads
+// "progress reporting is broken" and send a future reader chasing the wrong
+// thing.
+//
+// Note what this can and cannot see: it proves the lines are DISCARDED, not
+// that they are never formatted. The CLI's own half of that promise -- that
+// under --log-level warn no Config is built at all, so the per-frame Report
+// call is not paid to format a line nobody can see -- lives one layer up in
+// cmd.buildProgressConfig and is pinned by cmd's TestBuildProgressConfig.
+// Neither test is redundant with the other: this one survives a caller that
+// hands a warn-level logger a live Config anyway, and that one survives a
+// logging change here.
+func TestGoCVStabilizer_Apply_LogLevelWarnEmitsNoProgressLines(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+
+	dir := t.TempDir()
+	src := generateTinyTestSource(t, dir, 10)
+
+	var buf bytes.Buffer
+	log := logging.New(&buf, logging.LevelWarn).WithField("file", src)
+
+	g := &GoCVStabilizer{TrackOptions: stabilize.DefaultOptions(), EdgeMode: stabilize.EdgeModeAdaptive}
+	out := filepath.Join(dir, "out.mp4")
+	err := g.Apply(context.Background(), Input{
+		SourcePath: src,
+		OutputPath: out,
+		Strength:   0.5,
+		Log:        log,
+		Progress:   &progress.Config{Interval: time.Nanosecond, WarmUp: 0},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	got := buf.String()
+	for _, phase := range []string{"analyzing", "rendering"} {
+		if progressLine(phase).MatchString(got) {
+			t.Errorf("a LevelWarn logger must emit no %q progress line, got:\n%s", phase, got)
+		}
+	}
+}
+
+// progressLine matches ONE formatted progress line for a named phase, in
+// either of the two shapes progress.formatLine renders (a known total gives
+// the percentage form, an unknown one the bare frame count):
+//
+//	analyzing 10% (1/10 frames), 119 fps, ~8m00s remaining
+//	rendering 3 frames, 38 fps
+//
+// It is a regexp and not strings.Contains(phase) because this package logs
+// the words "analyzing" and "rendering" in prose too -- warnIfOptionsDiffer's
+// warning contains both -- so a substring match can pass on a run that emitted
+// no progress whatsoever. Matching the whole shape also means the phase label
+// is pinned as a LABEL: dropping it from the line, or renaming it, fails here
+// rather than passing on a coincidence elsewhere in the message.
+func progressLine(phase string) *regexp.Regexp {
+	return regexp.MustCompile(phase + ` (?:\d+% \(\d+/\d+ frames\)|\d+ frames), [0-9.]+ fps`)
+}
+
+// TestGoCVStabilizer_Apply_EmitsProgressForBothPhases is the ANALYSIS-side
+// half of TestGoCVStabilizer_Apply_EmitsRenderingProgress, plus the control
+// that says the feature stays off when nobody asked for it.
+//
+// Nothing else in this package can see whether loadOrAnalyze's Reporter
+// reaches stabilize.Analyze at all. The only other assertion about the analyze
+// phase is TestGoCVStabilizer_Apply_SidecarHitEmitsNoAnalyzingLine's absence
+// check, and an absence check passes just as happily against a build that can
+// never emit an analyzing line: mutation-tested, both handing Analyze a
+// do-nothing callback instead of analyzeProgress.Report and renaming the phase
+// to "analyze" survive every other test in this package. Either one ships a
+// CLI that goes silent for the LONGEST pass in the pipeline (minutes on a 4K
+// clip, and the one --progress-interval mainly exists for) with no error
+// anywhere -- this project's signature failure mode.
+//
+// The nil case is the inverse, and is what a well-meaning "default the policy
+// to something sensible" would break: Apply must not invent a Config when the
+// caller passed none, or --progress-interval 0 (and every programmatic caller
+// that leaves Input.Progress unset) silently starts reporting.
+func TestGoCVStabilizer_Apply_EmitsProgressForBothPhases(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+
+	cases := []struct {
+		name      string
+		config    func() *progress.Config
+		wantLines bool
+	}{
+		{
+			name: "configured: every phase that runs reports",
+			// WarmUp 0 and a 1ns Interval make New set nextDue = start (see
+			// progress.New), so the real clock is enough to make the first
+			// Report call on each phase emit -- no injected clock needed.
+			config: func() *progress.Config {
+				return &progress.Config{Interval: time.Nanosecond, WarmUp: 0}
+			},
+			wantLines: true,
+		},
+		{
+			name:      "nil policy: no phase reports anything",
+			config:    func() *progress.Config { return nil },
+			wantLines: false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := generateTinyTestSource(t, dir, 10)
+
+			var buf bytes.Buffer
+			log := logging.New(&buf, logging.LevelInfo).WithField("file", src)
+
+			g := &GoCVStabilizer{TrackOptions: stabilize.DefaultOptions(), EdgeMode: stabilize.EdgeModeAdaptive}
+			if err := g.Apply(t.Context(), Input{
+				SourcePath: src,
+				OutputPath: filepath.Join(dir, "out.mp4"),
+				Strength:   0.5,
+				Log:        log,
+				Progress:   c.config(),
+			}); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+
+			got := buf.String()
+			for _, phase := range []string{"analyzing", "rendering"} {
+				if progressLine(phase).MatchString(got) != c.wantLines {
+					t.Errorf("a %q progress line present = %v, want %v; log was:\n%s",
+						phase, !c.wantLines, c.wantLines, got)
+				}
+			}
+		})
+	}
+}
+
 // TestWarpModelDefault pins that an unset WarpModel means the product default
 // (the rotation model), not the similarity.
 //
@@ -819,7 +1098,7 @@ func TestLoadOrAnalyze_WarnsOnBakedInOptionChange(t *testing.T) {
 
 		var buf bytes.Buffer
 		series, err := g.loadOrAnalyze(t.Context(), captureLog(&buf, false), source,
-			stabilize.Options{WarpModel: stabilize.WarpModelMesh, MeshGrid: 8})
+			stabilize.Options{WarpModel: stabilize.WarpModelMesh, MeshGrid: 8}, nil)
 		if err != nil {
 			t.Fatalf("loadOrAnalyze: %v", err)
 		}
@@ -844,7 +1123,7 @@ func TestLoadOrAnalyze_WarnsOnBakedInOptionChange(t *testing.T) {
 		g := &GoCVStabilizer{SidecarPath: newSidecar(t, opts)}
 
 		var buf bytes.Buffer
-		if _, err := g.loadOrAnalyze(t.Context(), captureLog(&buf, false), source, opts); err != nil {
+		if _, err := g.loadOrAnalyze(t.Context(), captureLog(&buf, false), source, opts, nil); err != nil {
 			t.Fatalf("loadOrAnalyze: %v", err)
 		}
 		if out := buf.String(); out != "" {

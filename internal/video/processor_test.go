@@ -13,9 +13,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"videofx/internal/effects"
 	"videofx/internal/logging"
+	"videofx/internal/progress"
 	"videofx/internal/vidio"
 )
 
@@ -141,10 +143,11 @@ func TestSpanFraction(t *testing.T) {
 // tests can ignore it; chain tests set distinct slugs to verify the
 // combined output name.
 type recordingEffect struct {
-	mu       sync.Mutex
-	slug     string   // Name()/FilenameSlug(); "" -> "fake"
-	applied  []string // SourcePaths, in the order Apply was called
-	failPath string   // if non-empty, Apply returns an error for this source
+	mu          sync.Mutex
+	slug        string             // Name()/FilenameSlug(); "" -> "fake"
+	applied     []string           // SourcePaths, in the order Apply was called
+	failPath    string             // if non-empty, Apply returns an error for this source
+	gotProgress []*progress.Config // in.Progress, one entry per Apply call, in call order
 }
 
 func (e *recordingEffect) id() string {
@@ -159,6 +162,7 @@ func (e *recordingEffect) ValidateStrength(_ float64) error { return nil }
 func (e *recordingEffect) Apply(_ context.Context, in effects.Input) error {
 	e.mu.Lock()
 	e.applied = append(e.applied, in.SourcePath)
+	e.gotProgress = append(e.gotProgress, in.Progress)
 	e.mu.Unlock()
 	if in.SourcePath == e.failPath {
 		return fmt.Errorf("forced failure for %s", in.SourcePath)
@@ -265,6 +269,69 @@ func TestRun_ProgressCallbacks(t *testing.T) {
 	// failure lines up).
 	if len(results) != len(jobs) {
 		t.Fatalf("Run returned %d results, want %d", len(results), len(jobs))
+	}
+}
+
+// TestRun_ProgressConfigReachesEffectInput pins the seam where a shipped
+// --progress-interval could silently disconnect: ProcessorConfig.Progress
+// must reach every effect's effects.Input.Progress exactly like Strength
+// does (see processOne), not get dropped between the CLI's cfg and the
+// per-job effects.Input built for each step of the chain.
+//
+// The chain is two effects rather than one because "each step" is the part
+// processOne could get wrong on its own: the Input literal lives inside the
+// per-effect loop, so a Progress hoisted out of it -- or attached only to the
+// first step -- would leave a stabilize pass chained after a trim or a rotate
+// reporting nothing, on exactly the long jobs the flag is for.
+func TestRun_ProgressConfigReachesEffectInput(t *testing.T) {
+	dir := t.TempDir()
+	jobs := makeSources(t, dir, 3)
+
+	first := &recordingEffect{slug: "one"}
+	second := &recordingEffect{slug: "two"}
+	cfg := ProcessorConfig{
+		Effects:  []effects.Effect{first, second},
+		Progress: &progress.Config{Interval: 5 * time.Minute},
+	}
+	for i, res := range Run(context.Background(), jobs, cfg) {
+		if res.Err != nil {
+			t.Fatalf("job %d: %v", i, res.Err)
+		}
+	}
+
+	for _, eff := range []*recordingEffect{first, second} {
+		if len(eff.gotProgress) != len(jobs) {
+			t.Fatalf("effect %q: Apply saw %d Progress values, want one per job (%d)", eff.id(), len(eff.gotProgress), len(jobs))
+		}
+		for i, got := range eff.gotProgress {
+			if got != cfg.Progress {
+				t.Errorf("effect %q, job %d: in.Progress = %p, want the same *progress.Config as cfg.Progress (%p)", eff.id(), i, got, cfg.Progress)
+			}
+		}
+	}
+}
+
+// TestRun_NilProgressConfigReachesEffectInput guards the default: leaving
+// ProcessorConfig.Progress unset (the pre-existing, every-caller-passes-nil
+// state before --progress-interval was wired up) must reach every effect's
+// Input.Progress as nil too, not as some non-nil zero value that would
+// silently turn progress reporting on.
+func TestRun_NilProgressConfigReachesEffectInput(t *testing.T) {
+	dir := t.TempDir()
+	jobs := makeSources(t, dir, 2)
+
+	eff := &recordingEffect{}
+	Run(context.Background(), jobs, ProcessorConfig{Effects: []effects.Effect{eff}})
+
+	// Without this, the loop below asserts nothing on a Run that applied the
+	// effect zero times -- the standing trap in every "must be absent" test.
+	if len(eff.gotProgress) != len(jobs) {
+		t.Fatalf("Apply saw %d Progress values, want one per job (%d)", len(eff.gotProgress), len(jobs))
+	}
+	for i, got := range eff.gotProgress {
+		if got != nil {
+			t.Errorf("job %d: in.Progress = %v, want nil", i, got)
+		}
 	}
 }
 

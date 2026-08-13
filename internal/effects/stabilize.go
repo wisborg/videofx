@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"videofx/internal/logging"
+	"videofx/internal/progress"
 	"videofx/internal/stabilize"
 	"videofx/internal/vidio"
 )
@@ -312,7 +313,7 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 		trackOpts.Lens = g.Lens // nil -> calibrate from the clip
 	}
 
-	series, err := g.loadOrAnalyze(ctx, log, in.SourcePath, trackOpts)
+	series, err := g.loadOrAnalyze(ctx, log, in.SourcePath, trackOpts, in.Progress)
 	if err != nil {
 		return fmt.Errorf("analyzing %s: %w", in.SourcePath, err)
 	}
@@ -356,7 +357,8 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 
 	renderOpts := g.renderOptions(log, series, edgeMode, warpModel, rsRect, rho)
 
-	stats, err := stabilize.Render(ctx, in.SourcePath, series, result, renderOpts, in.OutputPath, nil)
+	renderProgress := progress.New(in.Progress, "rendering", progressEmitter(log))
+	stats, err := stabilize.Render(ctx, in.SourcePath, series, result, renderOpts, in.OutputPath, renderProgress.Report)
 	if err != nil {
 		return fmt.Errorf("rendering %s: %w", in.SourcePath, err)
 	}
@@ -457,7 +459,30 @@ func modelName(m stabilize.WarpModel) string {
 // fresh stabilize.Analyze pass over sourcePath, persisted to
 // g.SidecarPath afterward if one was configured. See SidecarPath's doc
 // comment for the full reuse story and its concurrency caveat.
-func (g *GoCVStabilizer) loadOrAnalyze(ctx context.Context, log *logging.Logger, sourcePath string, opts stabilize.Options) (*stabilize.MotionSeries, error) {
+//
+// progressCfg builds the "analyzing" Reporter, and it is built HERE rather
+// than passed in as a ready *progress.Reporter, for two reasons that both
+// point at this scope rather than Apply's:
+//
+//   - progress.New timestamps its Reporter's rate baseline at the moment of
+//     construction (see progress.go's start), and the FIRST "analyzing"
+//     line's rate is measured from that instant. Building it here, past the
+//     sidecar Stat/ReadSidecar above, keeps that lookup out of the window.
+//     One minted eagerly in Apply would take its baseline before the sidecar
+//     was even looked for, so the first line would divide the frames decoded
+//     so far by a span that also covers file I/O during which nothing
+//     decoded -- a rate lower than the decode ever ran at, on the one line
+//     with the least data behind it already.
+//   - Scoping the Reporter to the branch that uses it makes a future Report
+//     call on the cached path UNAVAILABLE, rather than merely absent: the
+//     variable is declared after the sidecar-hit early return, so nothing in
+//     that branch can reach it, not even by accident. Minting one eagerly in
+//     Apply instead and simply never handing it to Analyze would look
+//     identical on today's cache hit -- progress.New does no I/O, and a
+//     Reporter nobody calls Report on emits nothing either way -- so that
+//     shape would pass every test in this package right up until some later
+//     change found the leftover Reporter sitting there and wired it in.
+func (g *GoCVStabilizer) loadOrAnalyze(ctx context.Context, log *logging.Logger, sourcePath string, opts stabilize.Options, progressCfg *progress.Config) (*stabilize.MotionSeries, error) {
 	if g.SidecarPath != "" {
 		if _, err := os.Stat(g.SidecarPath); err == nil {
 			series, err := stabilize.ReadSidecar(g.SidecarPath)
@@ -479,7 +504,8 @@ func (g *GoCVStabilizer) loadOrAnalyze(ctx context.Context, log *logging.Logger,
 		}
 	}
 
-	series, err := stabilize.Analyze(ctx, sourcePath, opts, nil)
+	analyzeProgress := progress.New(progressCfg, "analyzing", progressEmitter(log))
+	series, err := stabilize.Analyze(ctx, sourcePath, opts, analyzeProgress.Report)
 	if err != nil {
 		return nil, err
 	}
