@@ -16,6 +16,7 @@ import (
 	"videofx/internal/fittest"
 	"videofx/internal/hud"
 	"videofx/internal/logging"
+	"videofx/internal/progress"
 	"videofx/internal/telemetry"
 	"videofx/internal/vidio"
 )
@@ -834,5 +835,152 @@ func TestTelemetryHUD_Apply_TheProgressFillTracksTheClipsOwnDistance(t *testing.
 					advance, edges[0], len(edges)-1, last, c.minAdvance, c.maxAdvance, c.explanation, edges)
 			}
 		})
+	}
+}
+
+// TestTelemetryHUD_Apply_EmitsProgressForOverlayPhase is this effect's half of
+// the progress-reporting feature, matching the shape of
+// TestGoCVStabilizer_Apply_EmitsProgressForBothPhases in stabilize_test.go:
+// this loop knows its own total (frameCount, computed once before the loop
+// from PresentedFrames/duration) WITHOUT a probe -- WarpStabilizer.Apply also
+// builds its own known-total Reporter directly rather than threading one
+// through another package, but has to pay for a vidio.Probe call first to
+// get that total; here frameCount falls out of the vidio.Probe this Apply
+// already needed for FPS/dimensions.
+//
+// Nothing else in this package can see whether the loop's Reporter reaches
+// the logger at all -- an "Apply succeeds" test passes just as happily
+// against a build that never calls Report, or that calls it only inside the
+// i%256 ctx.Err() gate (which would fire on frame 0 by coincidence and then
+// go silent for the rest of a real clip). Matching on progressLine("overlaying")
+// -- not strings.Contains -- rules out a stray prose mention of the word
+// satisfying this by accident.
+//
+// The nil case is the inverse and just as load-bearing: Apply must not invent
+// a default *progress.Config when the caller passes none, or every
+// programmatic caller (and --progress-interval 0) would silently start
+// reporting.
+func TestTelemetryHUD_Apply_EmitsProgressForOverlayPhase(t *testing.T) {
+	requireFFmpeg(t)
+
+	cases := []struct {
+		name     string
+		config   func() *progress.Config
+		wantLine bool
+	}{
+		{
+			name: "configured: the overlay phase reports",
+			// WarmUp 0 and a 1ns Interval make New set nextDue = start (see
+			// progress.New), so the real clock is enough to make the first
+			// Report call emit -- no injected clock needed.
+			config:   func() *progress.Config { return &progress.Config{Interval: time.Nanosecond, WarmUp: 0} },
+			wantLine: true,
+		},
+		{
+			name:     "nil policy: nothing is reported",
+			config:   func() *progress.Config { return nil },
+			wantLine: false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := generateHUDSource(t, dir)
+			out := filepath.Join(dir, "out.mp4")
+
+			var buf bytes.Buffer
+			log := logging.New(&buf, logging.LevelInfo).WithField("file", src)
+
+			e := &TelemetryHUD{FitPath: testFITPath(t)}
+			if err := e.Apply(context.Background(), Input{
+				SourcePath: src,
+				OutputPath: out,
+				Log:        log,
+				Progress:   c.config(),
+			}); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+
+			got := buf.String()
+			if progressLine("overlaying").MatchString(got) != c.wantLine {
+				t.Errorf("an \"overlaying\" progress line present = %v, want %v; log was:\n%s",
+					!c.wantLine, c.wantLine, got)
+			}
+		})
+	}
+}
+
+// TestTelemetryHUD_Apply_ReportsEveryFrameAndEndsAtTheLastOne pins the two
+// properties the "did a line reach the logger" test above cannot see, both of
+// which are silent no-ops of exactly the kind this codebase keeps producing:
+//
+//  1. CADENCE. Report is called once per LOOP ITERATION, deliberately outside
+//     the i%256 ctx.Err() gate two lines below it (see the comment there).
+//     Folding it into that gate is an easy, plausible "tidy-up" -- and it
+//     survives every other test in this package, because i%256==0 fires on
+//     frame 0, so a short fixture still produces one line and every
+//     presence assertion still passes. What it actually ships is a CLI whose
+//     --progress-interval quietly loses its resolution: on a 4K HUD, 256
+//     frames is minutes, so a user asking for a line every 5s gets one every
+//     few minutes. With Interval 1ns and WarmUp 0 EVERY Report call is due
+//     (nextDue is bumped to the emitting call's own instant plus 1ns, and a
+//     single HUD frame render takes many orders of magnitude longer than
+//     that), so the number of lines equals the number of calls exactly --
+//     which is what makes an exact count a legitimate assertion here rather
+//     than a flaky one.
+//
+//  2. COMPLETION. Report(i+1, frameCount), not Report(i, frameCount): with
+//     the off-by-one, frame 0 reports done=0, which progress.Report
+//     deliberately swallows (its done<=0 guard), and the loop's LAST line
+//     reads 19/20 -- a HUD render that finishes but whose progress display
+//     stops one frame short and never says 100%. Off-by-ones are invisible to
+//     any presence check, and both bounds here are derived independently of
+//     the effect: the total is what ffprobe counts in the source (the same
+//     number TestTelemetryHUD_Apply_OutputMatchesTheSourceFrameForFrame pins
+//     Apply's own frameCount against), not whatever the code chose to print.
+func TestTelemetryHUD_Apply_ReportsEveryFrameAndEndsAtTheLastOne(t *testing.T) {
+	requireFFmpeg(t)
+
+	dir := t.TempDir()
+	src := generateHUDSource(t, dir)
+	out := filepath.Join(dir, "out.mp4")
+
+	// Independent of the effect: what the source actually decodes to.
+	frames := countVideoFrames(t, src)
+	if frames <= 1 {
+		t.Fatalf("fixture is useless for a cadence assertion: it decodes to %d frame(s)", frames)
+	}
+
+	var buf bytes.Buffer
+	log := logging.New(&buf, logging.LevelInfo).WithField("file", src)
+
+	e := &TelemetryHUD{FitPath: testFITPath(t)}
+	if err := e.Apply(context.Background(), Input{
+		SourcePath: src,
+		OutputPath: out,
+		Log:        log,
+		Progress:   &progress.Config{Interval: time.Nanosecond, WarmUp: 0},
+	}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	got := buf.String()
+	lines := progressLine("overlaying").FindAllString(got, -1)
+	if len(lines) != frames {
+		t.Errorf("got %d \"overlaying\" progress lines for a %d-frame clip, want one per frame "+
+			"(a Report call moved behind the i%%256 gate, or made conditional, looks exactly like this):\n%s",
+			len(lines), frames, got)
+	}
+	if len(lines) == 0 {
+		t.Fatalf("no \"overlaying\" progress line at all:\n%s", got)
+	}
+
+	// The last line must account for every frame the clip has: done reaches
+	// total, and total is the clip's own frame count.
+	wantLast := fmt.Sprintf("overlaying 100%% (%d/%d frames),", frames, frames)
+	if last := lines[len(lines)-1]; !strings.HasPrefix(last, wantLast) {
+		t.Errorf("last progress line = %q, want it to start %q (the loop must report its final frame, "+
+			"and the total must be the clip's frame count)", last, wantLast)
 	}
 }

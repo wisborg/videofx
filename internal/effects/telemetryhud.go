@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"videofx/internal/hud"
+	"videofx/internal/progress"
 	"videofx/internal/telemetry"
 	"videofx/internal/vidio"
 )
@@ -355,6 +356,16 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	// One RGBA buffer, reused each frame (a fresh 4K RGBA per frame would
 	// allocate ~33MB every frame).
 	img := image.NewRGBA(image.Rect(0, 0, dw, dh))
+
+	// This loop knows its own total (frameCount, above) WITHOUT a probe --
+	// unlike WarpStabilizer.Apply, which also hands progress.New a
+	// known-total Reporter directly but has to pay for a vidio.Probe call to
+	// get that total first, since ffmpeg's own vidstab passes never learn or
+	// report one. Here frameCount already came out of the vidio.Probe this
+	// Apply needed anyway (for FPS/dimensions), so there is nothing extra to
+	// fetch before building the Reporter.
+	overlayProgress := progress.New(in.Progress, "overlaying", progressEmitter(log))
+
 	for i := 0; i < frameCount; i++ {
 		if i%256 == 0 {
 			if err := ctx.Err(); err != nil {
@@ -384,6 +395,22 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		if err := enc.WriteFrame(img); err != nil {
 			return fmt.Errorf("rendering frame %d: %w", i, err)
 		}
+
+		// After the frame has actually landed, matching stabilize.Analyze and
+		// stabilize.Render -- Report-ing before WriteFrame let a line claim
+		// "N/N frames" while the last frame was still being composited and the
+		// container not yet finalized, and made every reported rate cover N+1
+		// frames of N frames' actual work. Deliberately NOT folded into the
+		// i%256 ctx.Err() check above: that gate amortizes a syscall-ish
+		// check, so widening its stride to 256 frames is fine, but Report's
+		// non-emitting path is just a clock read and a comparison (see
+		// progress.Reporter) and is meant to be called every frame -- sharing
+		// the gate would coarsen the throttle's own resolution and delay the
+		// first line by however long 256 frames of a 4K HUD take, undermining
+		// the point of a short --progress-interval. The loop body has no
+		// continue and no inner loop, so this still runs exactly once per
+		// iteration.
+		overlayProgress.Report(i+1, frameCount)
 	}
 
 	if err := enc.Close(); err != nil {
