@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 
+	"videofx/internal/logging"
+	"videofx/internal/progress"
 	"videofx/internal/runner"
 	"videofx/internal/vidio"
 )
@@ -154,6 +156,10 @@ func (w *WarpStabilizer) Apply(ctx context.Context, in Input) error {
 		return err
 	}
 
+	// Narrowed once, same convention as GoCVStabilizer/TelemetryHUD's Apply,
+	// so nothing below writes its own name/severity prefix.
+	log := in.Log.Named(w.Name())
+
 	tmpDir, err := os.MkdirTemp("", "videofx-vidstab-*")
 	if err != nil {
 		return fmt.Errorf("creating temp dir: %w", err)
@@ -170,6 +176,43 @@ func (w *WarpStabilizer) Apply(ctx context.Context, in Input) error {
 	}
 	threadArgs := []string{"-threads", strconv.Itoa(w.perf.Threads)}
 
+	// Hoisted once, rather than re-derived at each of the three places that
+	// used to check it independently (argv, the run path, the -nostats
+	// gate): a nil interface here means "this Runner cannot deliver
+	// progress", full stop, for the rest of Apply. Every Runner this
+	// project ships (runner.ExecRunner) implements ProgressRunner; the
+	// fakeRunner every pre-existing test in this file uses does not, so
+	// progressRunner is nil there and every path below falls back to plain
+	// Run exactly as before.
+	progressRunner, _ := w.Runner.(runner.ProgressRunner)
+
+	// Two Reporters, not one shared across both passes: detect and transform
+	// run at different speeds (this project's own measurement puts them on
+	// the order of 3fps end to end, but not evenly split between the two),
+	// so a rate estimate carried across the phase boundary would produce a
+	// visibly wrong ETA at the start of the second pass. Building both
+	// unconditionally is cheap -- progress.New does no I/O, and a nil
+	// *progress.Config (in.Progress unset, or --progress-interval disabled)
+	// makes both nil with nothing else to check.
+	detectProgress := progress.New(in.Progress, "detecting", progressEmitter(log))
+	transformProgress := progress.New(in.Progress, "transforming", progressEmitter(log))
+
+	// A probe failure must disable progress for this job, never fail the
+	// render: reporting is a diagnostic layered on top of a render that was
+	// already going to run, not a precondition for it. Only paid when a
+	// Reporter actually exists AND this Runner can actually deliver it --
+	// this project's slowest effect should not gain an extra ffprobe
+	// invocation on every ordinary, progress-off run, nor on a run whose
+	// Runner (a test fake, today; conceivably something else later) has no
+	// way to report progress regardless of what was asked for. detectProgress
+	// and transformProgress are always both nil or both non-nil (built from
+	// the same *progress.Config two lines up), so checking one is checking
+	// both -- there is no state where they disagree.
+	var totalFrames int
+	if progressRunner != nil && detectProgress != nil {
+		totalFrames = probeTotalFrames(ctx, log, in.SourcePath)
+	}
+
 	// Pass 1: detect camera motion, write transform log. This pass only
 	// reads video frames (output goes to the null muxer), so audio and
 	// subtitle streams are dropped up front (-an -sn) to avoid decoding
@@ -180,11 +223,13 @@ func (w *WarpStabilizer) Apply(ctx context.Context, in Input) error {
 		strconv.FormatFloat(w.analysis.MinContrast, 'f', -1, 64),
 		escapeFilterPath(transformLog),
 	)
-	detectArgs := append([]string{"-y"}, hwArgs...)
+	detectArgs := []string{"-y"}
+	detectArgs = append(detectArgs, progressArgs(detectProgress, progressRunner)...)
+	detectArgs = append(detectArgs, hwArgs...)
 	detectArgs = append(detectArgs, "-i", in.SourcePath, "-an", "-sn")
 	detectArgs = append(detectArgs, threadArgs...)
 	detectArgs = append(detectArgs, "-vf", detectFilter, "-f", "null", "-")
-	if err := w.Runner.Run(ctx, ffmpegBin, detectArgs...); err != nil {
+	if err := w.runVidstabPass(ctx, ffmpegBin, detectArgs, progressRunner, detectProgress, totalFrames); err != nil {
 		return fmt.Errorf("detect pass (using %s): %w", ffmpegBin, err)
 	}
 
@@ -196,7 +241,9 @@ func (w *WarpStabilizer) Apply(ctx context.Context, in Input) error {
 		"vidstabtransform=input=%s:smoothing=%d:zoom=%d:optzoom=1",
 		escapeFilterPath(transformLog), params.smoothing, params.zoom,
 	)
-	transformArgs := append([]string{"-y"}, hwArgs...)
+	transformArgs := []string{"-y"}
+	transformArgs = append(transformArgs, progressArgs(transformProgress, progressRunner)...)
+	transformArgs = append(transformArgs, hwArgs...)
 	transformArgs = append(transformArgs, "-i", in.SourcePath)
 	transformArgs = append(transformArgs, threadArgs...)
 	transformArgs = append(transformArgs,
@@ -224,11 +271,86 @@ func (w *WarpStabilizer) Apply(ctx context.Context, in Input) error {
 		"-map_metadata:s:v:0", "0:s:v:0",
 		vidio.PositionalPath(in.OutputPath),
 	)
-	if err := w.Runner.Run(ctx, ffmpegBin, transformArgs...); err != nil {
+	if err := w.runVidstabPass(ctx, ffmpegBin, transformArgs, progressRunner, transformProgress, totalFrames); err != nil {
 		return fmt.Errorf("transform pass (using %s): %w", ffmpegBin, err)
 	}
 
 	return nil
+}
+
+// probeTotalFrames resolves the frame count a Reporter needs for a
+// percentage/ETA, via a cheap vidio.Probe of the source -- the same
+// PresentedFrames denominator every other stage's progress reporting uses
+// (see vidio.Info.PresentedFrames), with 0 meaning "unknown" (the Reporter
+// already degrades to a count-only line; see progress.formatLine).
+//
+// Failure here must never fail the render: a source ffprobe cannot parse (or
+// one that vanished between CLI validation and this call) is a reason to
+// report progress without a total, not a reason to abandon a render that was
+// already going to run regardless.
+//
+// Package-level, not a *WarpStabilizer method: it uses no field of the
+// receiver, matching mapStrength and escapeFilterPath below.
+func probeTotalFrames(ctx context.Context, log *logging.Logger, sourcePath string) int {
+	info, err := vidio.Probe(ctx, sourcePath)
+	if err != nil {
+		log.Debugf("could not probe %s for a frame count -- progress will show frame counts without a percentage or ETA: %v", sourcePath, err)
+		return 0
+	}
+	return info.PresentedFrames()
+}
+
+// progressArgs returns the ffmpeg global options this pass's argv needs, or
+// nil when a progress line can never actually reach the terminal for this
+// call.
+//
+// -nostats suppresses ffmpeg's own default "frame= fps= time=..." line,
+// which ExecRunner.Run and RunWithProgress both stream straight to the
+// terminal via ffmpeg's stderr (see ExecRunner's doc comment: Stderr is nil,
+// i.e. os.Stderr, at every construction site in this codebase). It is added
+// ONLY when BOTH a Reporter is configured for this call AND progressRunner
+// is non-nil (the same capability Apply hoisted once and runVidstabPass
+// below checks to decide how to run) -- reporter alone used to be the whole
+// condition, and that was the bug: a Runner that cannot honor -progress
+// pipe:3 (any fake without RunWithProgress; conceivably a future non-ffmpeg
+// Runner) would still get -nostats, suppressing ffmpeg's own line with
+// nothing standing in to replace it, and the run would fall through to
+// runVidstabPass's plain-Run branch in total silence. Gating both here on
+// the one hoisted value keeps that impossible: -nostats appears exactly when
+// a progress line is actually going to take its place.
+func progressArgs(reporter *progress.Reporter, progressRunner runner.ProgressRunner) []string {
+	if reporter == nil || progressRunner == nil {
+		return nil
+	}
+	return []string{"-nostats"}
+}
+
+// runVidstabPass runs one of the two ffmpeg passes (detect or transform),
+// reporting per-frame progress through reporter when progressRunner is
+// non-nil.
+//
+// It falls back to plain Run -- exactly the path every pre-existing test in
+// this file exercises via fakeRunner, unchanged -- when EITHER progressRunner
+// is nil (the type assertion Apply made against w.Runner failed: a fake
+// Runner in a test, since every Runner this project ships, runner.ExecRunner,
+// implements ProgressRunner) OR no reporter is configured for this call. See
+// runner.ProgressRunner's own doc comment for why this is a second, optional
+// interface rather than a widened Runner, and progressArgs above for the
+// argv half of this same capability check -- the two must agree, since
+// -nostats only makes sense when a progress line is actually going to
+// replace ffmpeg's own.
+//
+// -progress pipe:3 is no longer written here or in progressArgs: it is
+// RunWithProgress's own job to add it, alongside opening the fd it points at
+// -- see its doc comment for why the flag and the plumbing must never travel
+// apart.
+func (w *WarpStabilizer) runVidstabPass(ctx context.Context, ffmpegBin string, args []string, progressRunner runner.ProgressRunner, reporter *progress.Reporter, totalFrames int) error {
+	if progressRunner != nil && reporter != nil {
+		return progressRunner.RunWithProgress(ctx, func(frame int) {
+			reporter.Report(frame, totalFrames)
+		}, ffmpegBin, args...)
+	}
+	return w.Runner.Run(ctx, ffmpegBin, args...)
 }
 
 type vidstabParams struct {
