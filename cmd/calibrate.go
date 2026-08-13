@@ -100,7 +100,7 @@ func calibrateOptions(ctx context.Context, source string, log *logging.Logger) (
 	if err != nil {
 		return calibrate.Options{}, fmt.Errorf("--ss %w", err)
 	}
-	duration, err := parseSegmentDuration(calDuration)
+	duration, err := parseSegmentDuration("--duration", calDuration)
 	if err != nil {
 		return calibrate.Options{}, err
 	}
@@ -168,12 +168,17 @@ func resolveCalibrateStart(path string, spec cliutil.TimeSpec, info vidio.Info) 
 	return secs, warnings, nil
 }
 
-// parseSegmentDuration parses --duration, which is a LENGTH: the two relative
-// forms are both meaningful, and an absolute timestamp is not a length at all.
-// Accepting one would have to mean something invented (a length from when?),
-// so it is rejected by name instead. 0 keeps its existing meaning of "use
-// calibrate's own default".
-func parseSegmentDuration(s string) (float64, error) {
+// parseSegmentDuration parses a LENGTH-valued flag (--duration,
+// --progress-interval): the two relative forms are both meaningful, and an
+// absolute timestamp is not a length at all. Accepting one would have to
+// mean something invented (a length from when?), so it is rejected by name
+// instead. flag names the flag being parsed, so the three messages below
+// name whichever one actually rejected the value rather than always saying
+// "--duration". 0 keeps its existing meaning for --duration ("use
+// calibrate's own default"); --progress-interval gives 0 a different meaning
+// of its own ("off"), which this function does not need to know about -- it
+// only parses the length.
+func parseSegmentDuration(flag, s string) (float64, error) {
 	spec, err := cliutil.ParseTimeSpec(s)
 	if err != nil {
 		// ParseTimeSpec's "matched nothing" message names all four forms,
@@ -182,13 +187,13 @@ func parseSegmentDuration(s string) (float64, error) {
 		// that one is replaced; a negative time or an out-of-range clock
 		// component is diagnosed correctly whichever forms this flag takes.
 		if errors.Is(err, cliutil.ErrNotATime) {
-			return 0, fmt.Errorf("--duration %q is not a valid length: use seconds (2, 2.5), "+
-				"an h/m/s duration (90s, 2m) or a clock duration (1:30)", s)
+			return 0, fmt.Errorf("%s %q is not a valid length: use seconds (2, 2.5), "+
+				"an h/m/s duration (90s, 2m) or a clock duration (1:30)", flag, s)
 		}
-		return 0, fmt.Errorf("--duration %w", err)
+		return 0, fmt.Errorf("%s %w", flag, err)
 	}
 	if spec.IsAbsolute() {
-		return 0, fmt.Errorf("--duration %s is a timestamp, but this flag takes a length: plain seconds (2, 2.5) or an h/m/s duration (90s, 2m)", spec)
+		return 0, fmt.Errorf("%s %s is a timestamp, but this flag takes a length: plain seconds (2, 2.5) or an h/m/s duration (90s, 2m)", flag, spec)
 	}
 	return spec.Seconds, nil
 }

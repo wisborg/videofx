@@ -18,6 +18,7 @@ import (
 	"videofx/internal/cliutil"
 	"videofx/internal/effects"
 	"videofx/internal/logging"
+	"videofx/internal/progress"
 	"videofx/internal/runner"
 	"videofx/internal/stabilize"
 	"videofx/internal/telemetry"
@@ -36,6 +37,8 @@ var (
 	debugMode   bool
 	logLevel    string
 	rotateDeg   int
+
+	progressInterval string
 
 	preset        string
 	crf           int
@@ -113,6 +116,8 @@ func NewRootCmd() *cobra.Command {
 		"lowest severity to print: debug (everything, same as --debug), info (progress and warnings -- the default), warn (warnings only, no progress lines), or error (failures only). All of it goes to stderr")
 	root.Flags().IntVar(&rotateDeg, "rotate", 0,
 		"rotate effect only (--effect rotate): rotate the video this many degrees CLOCKWISE for display -- 90, 180, or 270. Lossless: it sets the display-rotation flag via stream copy (no re-encode) and composes with any rotation the source already has. Required (and must be 90/180/270) when --effect includes rotate")
+	root.Flags().StringVar(&progressInterval, "progress-interval", "5m",
+		"how often to log a progress line with an ETA during a long operation (analysis, render, HUD overlay). Takes a length: seconds (300), an h/m/s duration (5m, 90s) or a clock duration (5:00). A first line appears shortly after each phase starts, once a usable rate has been measured; 0 turns progress lines off, and so does \"\" -- unlike --duration on calibrate, where an empty value falls back to that command's own default, an empty --progress-interval parses to 0 and disables progress rather than restoring 5m. Lines are logged at info level, so --log-level warn silences them. With --sidecar, a cached run skips analysis entirely and so shows only the render phase")
 
 	def := effects.DefaultPerfOptions()
 	root.Flags().StringVar(&preset, "preset", def.Preset,
@@ -842,6 +847,47 @@ func validateZoomTransition(seconds float64) error {
 	return nil
 }
 
+// progressWarmUp bounds how soon the FIRST progress line can appear once a
+// phase starts decoding frames (see progress.Config.WarmUp's own doc for
+// what it does and does not guarantee). 10s is short against the
+// --progress-interval default of 5m: without a warm-up, a run at the default
+// interval would print nothing for a full five minutes before its first
+// line, which reads as hung rather than working. progress.New caps the
+// EFFECTIVE warm-up at Interval, so a short --progress-interval (say, 5s)
+// is never gated behind this default -- it only matters when Interval is
+// longer than it is.
+const progressWarmUp = 10 * time.Second
+
+// buildProgressConfig turns --progress-interval (already parsed to seconds)
+// and the run's configured logger into the progress.Config every effect's
+// Apply receives via effects.Input.Progress, or nil to disable progress
+// reporting entirely.
+//
+// Two conditions return nil, but they are not equals. intervalSeconds <= 0
+// (the user passed --progress-interval 0, or "") only restates
+// progress.New's own contract -- a Config with Interval <= 0 already yields
+// a nil *Reporter at every call site, so this branch changes nothing New
+// would not already have done. !log.Enabled(logging.LevelInfo) is the one
+// that matters: progress lines are logged at info level (see
+// internal/effects' progressEmitter, which every effect's Apply builds its
+// Reporter's emit func from), so under --log-level warn or stricter a live
+// Config would be built and immediately dropped on the floor, unseen, by
+// every line it produced. Returning nil here instead means the run does not
+// configure a feature whose output nobody can see. The frame loop still
+// calls Report unconditionally either way -- it is a documented no-op on a
+// nil *Reporter (see progress.Reporter.Report) -- so what this branch saves
+// is not the call itself but the clock read and comparison inside it, paid
+// on every decoded frame for no visible benefit.
+func buildProgressConfig(intervalSeconds float64, log *logging.Logger) *progress.Config {
+	if intervalSeconds <= 0 || !log.Enabled(logging.LevelInfo) {
+		return nil
+	}
+	return &progress.Config{
+		Interval: time.Duration(intervalSeconds * float64(time.Second)),
+		WarmUp:   progressWarmUp,
+	}
+}
+
 // validateSuffix rejects a --suffix override that would break the
 // non-destructive-sibling-filename invariant. naming.Resolve enforces the
 // same rule (it is the actual path constructor), but checking here too
@@ -1185,6 +1231,15 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	if err := validateWarpModel(warpModel); err != nil {
 		return err
 	}
+	// Parsed once, here, rather than validated now and reparsed later beside
+	// ProcessorConfig -- the same shape --start/--end use above, parsing into
+	// a value that is then carried down to where it's needed (applyTrimWindows
+	// there, buildProgressConfig here) instead of re-deriving it from the raw
+	// flag string a second time.
+	progressSeconds, err := parseSegmentDuration("--progress-interval", progressInterval)
+	if err != nil {
+		return err
+	}
 
 	// Verify dependencies, validate strength, and apply per-effect flags for
 	// every effect in the pipeline -- see the helpers' doc comments for why
@@ -1251,6 +1306,7 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		Suffix:      suffix,
 		Concurrency: concurrency,
 		Log:         log,
+		Progress:    buildProgressConfig(progressSeconds, log),
 	}
 
 	// Stream progress as the batch runs rather than printing everything at

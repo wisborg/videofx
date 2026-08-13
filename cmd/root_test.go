@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,6 +23,7 @@ import (
 	"videofx/internal/effects"
 	"videofx/internal/fittest"
 	"videofx/internal/logging"
+	"videofx/internal/progress"
 	"videofx/internal/stabilize"
 	"videofx/internal/telemetry"
 	"videofx/internal/video"
@@ -260,7 +263,7 @@ func TestCalibrateSubcommandRegistered(t *testing.T) {
 	if ss.DefValue != "" {
 		t.Errorf("--ss default = %q, want \"\" (from the beginning)", ss.DefValue)
 	}
-	if got, err := parseSegmentDuration(dur.DefValue); err != nil || got != calibrate.DefaultDuration {
+	if got, err := parseSegmentDuration("--duration", dur.DefValue); err != nil || got != calibrate.DefaultDuration {
 		t.Errorf("--duration default %q parses to %v (err %v), want calibrate.DefaultDuration %v",
 			dur.DefValue, got, err, calibrate.DefaultDuration)
 	}
@@ -331,16 +334,25 @@ func TestResolveCalibrateStart(t *testing.T) {
 	}
 }
 
-// TestParseSegmentDuration pins that --duration takes a LENGTH. The case worth
-// the test is the timestamp: it parses perfectly well as a time spec, and
-// accepting it here would mean inventing a meaning for "a segment 2026-08-01
-// long" -- most likely a silent 0 that then becomes calibrate's default while
-// the user believes their value took effect.
+// TestParseSegmentDuration pins that a LENGTH-valued flag (--duration,
+// --progress-interval) takes a LENGTH. The case worth the test is the
+// timestamp: it parses perfectly well as a time spec, and accepting it here
+// would mean inventing a meaning for "a segment 2026-08-01 long" -- most
+// likely a silent 0 that then becomes calibrate's default while the user
+// believes their value took effect.
+//
+// One case passes "--progress-interval" instead of the "--duration" every
+// other case defaults to, pinning that the error names WHICHEVER flag asked
+// -- parseSegmentDuration is shared by both callers (see its own doc
+// comment), and a hardcoded "--duration" in its message would misdirect a
+// --progress-interval user at the one flag that actually rejected them.
 func TestParseSegmentDuration(t *testing.T) {
 	cases := []struct {
-		in      string
-		want    float64
-		wantErr bool
+		in          string
+		flag        string // defaults to "--duration" when empty
+		want        float64
+		wantErr     bool
+		wantErrText string // substring the error must contain, if wantErr
 	}{
 		{in: "2", want: 2},
 		{in: "2.5", want: 2.5},
@@ -351,15 +363,28 @@ func TestParseSegmentDuration(t *testing.T) {
 		{in: "2026-08-01T09:03:12Z", wantErr: true},
 		{in: "-5", wantErr: true},
 		{in: "2ms", wantErr: true},
+		{
+			in:          "half past",
+			flag:        "--progress-interval",
+			wantErr:     true,
+			wantErrText: "--progress-interval",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.in, func(t *testing.T) {
-			got, err := parseSegmentDuration(c.in)
+			flag := c.flag
+			if flag == "" {
+				flag = "--duration"
+			}
+			got, err := parseSegmentDuration(flag, c.in)
 			if (err != nil) != c.wantErr {
-				t.Fatalf("parseSegmentDuration(%q) = %v, %v; wantErr %v", c.in, got, err, c.wantErr)
+				t.Fatalf("parseSegmentDuration(%q, %q) = %v, %v; wantErr %v", flag, c.in, got, err, c.wantErr)
 			}
 			if err == nil && got != c.want {
-				t.Errorf("parseSegmentDuration(%q) = %v, want %v", c.in, got, c.want)
+				t.Errorf("parseSegmentDuration(%q, %q) = %v, want %v", flag, c.in, got, c.want)
+			}
+			if c.wantErr && c.wantErrText != "" && !strings.Contains(err.Error(), c.wantErrText) {
+				t.Errorf("parseSegmentDuration(%q, %q) = %v, want it to mention %q", flag, c.in, err, c.wantErrText)
 			}
 		})
 	}
@@ -522,14 +547,14 @@ func TestCalibrateOptions_Rejects(t *testing.T) {
 // out-of-range clock component is diagnosed correctly whichever subset of the
 // forms a flag takes, and replacing those would lose information.
 func TestParseSegmentDuration_ErrorDoesNotRecommendATimestamp(t *testing.T) {
-	_, err := parseSegmentDuration("half past")
+	_, err := parseSegmentDuration("--duration", "half past")
 	if err == nil {
-		t.Fatal(`parseSegmentDuration("half past") succeeded, want an error`)
+		t.Fatal(`parseSegmentDuration("--duration", "half past") succeeded, want an error`)
 	}
 	if strings.Contains(err.Error(), "timestamp") {
 		t.Errorf("--duration's parse error recommends a form it rejects: %v", err)
 	}
-	for _, want := range []string{"length", "90s", "1:30"} {
+	for _, want := range []string{"--duration", "length", "90s", "1:30"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %q, so it does not say what --duration does take: %v", want, err)
 		}
@@ -537,13 +562,13 @@ func TestParseSegmentDuration_ErrorDoesNotRecommendATimestamp(t *testing.T) {
 
 	// A specific diagnosis survives rather than being flattened into the
 	// generic one.
-	_, err = parseSegmentDuration("-5")
+	_, err = parseSegmentDuration("--duration", "-5")
 	if err == nil || !strings.Contains(err.Error(), "negative") {
-		t.Errorf(`parseSegmentDuration("-5") = %v, want the "must not be negative" diagnosis`, err)
+		t.Errorf(`parseSegmentDuration("--duration", "-5") = %v, want the "must not be negative" diagnosis`, err)
 	}
-	_, err = parseSegmentDuration("1:75")
+	_, err = parseSegmentDuration("--duration", "1:75")
 	if err == nil || !strings.Contains(err.Error(), "under 60") {
-		t.Errorf(`parseSegmentDuration("1:75") = %v, want the out-of-range clock diagnosis`, err)
+		t.Errorf(`parseSegmentDuration("--duration", "1:75") = %v, want the out-of-range clock diagnosis`, err)
 	}
 }
 
@@ -1736,6 +1761,280 @@ func TestNewRootCmd_ZoomTransitionFlagRegistered(t *testing.T) {
 	}
 	if f.DefValue != "0.5" {
 		t.Errorf("--zoom-transition default = %q, want \"0.5\" (time-varying zoom on by default)", f.DefValue)
+	}
+}
+
+// TestNewRootCmd_ProgressIntervalFlagRegistered guards the --progress-interval
+// flag's existence and pins two things a bare float64 flag could not: it must
+// be a STRING flag (see TestNewRootCmd_TrimFlagsAreStrings's doc comment for
+// why -- it takes the same length grammar as --start/--end/--duration, not a
+// bare number), and its default is the documented "5m", not "300" or some
+// other equivalent spelling that would still parse but silently disagree with
+// the help text and the README.
+func TestNewRootCmd_ProgressIntervalFlagRegistered(t *testing.T) {
+	f := NewRootCmd().Flags().Lookup("progress-interval")
+	if f == nil {
+		t.Fatal("flag --progress-interval not registered")
+	}
+	if f.Value.Type() != "string" {
+		t.Errorf("--progress-interval is a %s flag; it must be a string to accept 5m/90s/5:00 (see TestNewRootCmd_TrimFlagsAreStrings)", f.Value.Type())
+	}
+	if f.DefValue != "5m" {
+		t.Errorf("--progress-interval default = %q, want \"5m\"", f.DefValue)
+	}
+}
+
+// TestBuildProgressConfig covers buildProgressConfig's two independent
+// reasons to disable progress reporting (a non-positive interval, and a
+// logger that would drop an info-level line anyway) and the config it builds
+// otherwise.
+func TestBuildProgressConfig(t *testing.T) {
+	infoLog := logging.New(io.Discard, logging.LevelInfo)
+	warnLog := logging.New(io.Discard, logging.LevelWarn)
+
+	if got := buildProgressConfig(0, infoLog); got != nil {
+		t.Errorf("buildProgressConfig(0, infoLog) = %+v, want nil (0 means off)", got)
+	}
+	if got := buildProgressConfig(-5, infoLog); got != nil {
+		t.Errorf("buildProgressConfig(-5, infoLog) = %+v, want nil", got)
+	}
+	if got := buildProgressConfig(300, warnLog); got != nil {
+		t.Errorf("buildProgressConfig(300, warnLog) = %+v, want nil (--log-level warn drops info-level progress lines anyway)", got)
+	}
+
+	got := buildProgressConfig(300, infoLog)
+	if got == nil {
+		t.Fatal("buildProgressConfig(300, infoLog) = nil, want a Config")
+	}
+	if got.Interval != 300*time.Second {
+		t.Errorf("Interval = %v, want 300s", got.Interval)
+	}
+	if got.WarmUp != progressWarmUp {
+		t.Errorf("WarmUp = %v, want progressWarmUp (%v)", got.WarmUp, progressWarmUp)
+	}
+}
+
+// frameClock is a Now func for progress.Config that advances a fixed step on
+// EVERY call, so simulated time tracks the number of Report calls (i.e.
+// decoded frames) rather than wall-clock time. progress.Reporter reads the
+// clock exactly once per Report, so a step of 10ms is a decode running at a
+// steady 100fps -- roughly this project's measured analysis rate -- and the
+// whole test is deterministic: no sleeping, no tolerance for scheduling.
+type frameClock struct {
+	t    time.Time
+	step time.Duration
+}
+
+func (c *frameClock) now() time.Time {
+	c.t = c.t.Add(c.step)
+	return c.t
+}
+
+// TestProgressWarmUp_FirstLineArrivesLongBeforeTheDefaultInterval pins what
+// progressWarmUp is FOR, which the field-equality check in
+// TestBuildProgressConfig above cannot: `got.WarmUp != progressWarmUp`
+// compares the constant with itself, so it passes unchanged whether the
+// constant is 10s, 0 or three hours. Both of those are real bugs with no
+// other symptom -- mutation-tested, and both survive every other test in this
+// package:
+//
+//   - progressWarmUp = 0 makes the first line fire on the FIRST decoded frame,
+//     quoting a "rate" measured over ffmpeg's own spin-up. That is the
+//     pessimistic-by-a-factor-of-ten number this project has been misled by
+//     before (a cold file cache once faked a 5x scaler difference), printed as
+//     the user's first impression of how long their render will take.
+//   - progressWarmUp larger than the interval is capped to it by progress.New,
+//     so the first line lands a full --progress-interval after the phase
+//     starts: five silent minutes at the shipped default, which is the exact
+//     "it looks hung" complaint the warm-up exists to answer.
+//
+// The bounds are therefore derived from the flag's own promise ("A first line
+// appears shortly after each phase starts, once a usable rate has been
+// measured") rather than from the constant: a line has to appear after enough
+// decoding to have measured something (>= 1s of it), and soon enough that a
+// user waiting on a phase sees it (<= 30s), which is far below the 5m
+// steady-state cadence. Everything after the first line is the cadence
+// --progress-interval asked for, checked here as the gap between consecutive
+// lines so that the interval is pinned as OBSERVED SPACING and not just as a
+// struct field.
+func TestProgressWarmUp_FirstLineArrivesLongBeforeTheDefaultInterval(t *testing.T) {
+	// The shipped default, taken from the registered flag rather than
+	// re-spelled here, so this test follows the flag if it is ever retuned.
+	defValue := NewRootCmd().Flags().Lookup("progress-interval").DefValue
+	seconds, err := parseSegmentDuration("--progress-interval", defValue)
+	if err != nil {
+		t.Fatalf("the --progress-interval default %q does not parse: %v", defValue, err)
+	}
+
+	cfg := buildProgressConfig(seconds, logging.New(io.Discard, logging.LevelInfo))
+	if cfg == nil {
+		t.Fatalf("buildProgressConfig(%v, an info logger) = nil; the shipped default must enable progress reporting", seconds)
+	}
+	interval := cfg.Interval
+
+	// A copy, so Interval and WarmUp are exactly what the CLI ships and only
+	// the clock is the test's.
+	driven := *cfg
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := &frameClock{t: base, step: 10 * time.Millisecond}
+	driven.Now = clock.now
+
+	var at []time.Duration // simulated time of each emitted line, since base
+	r := progress.New(&driven, "rendering", func(string) { at = append(at, clock.t.Sub(base)) })
+	if r == nil {
+		t.Fatal("progress.New returned nil for the shipped default config")
+	}
+
+	// 12 simulated minutes at 100fps: long enough for the warm-up line plus
+	// two more at the default 5m cadence.
+	const frames = 72000
+	for i := 1; i <= frames; i++ {
+		r.Report(i, frames)
+	}
+
+	if len(at) == 0 {
+		t.Fatalf("no progress line in %v of simulated decoding at the shipped default interval %v", time.Duration(frames)*10*time.Millisecond, interval)
+	}
+	if at[0] < time.Second {
+		t.Errorf("first line at %v, want no sooner than 1s in: a rate measured over a fraction of a second is the tool's own start-up cost, not its speed", at[0])
+	}
+	if at[0] > 30*time.Second {
+		t.Errorf("first line at %v, want within 30s of the phase starting (interval is %v, so without a warm-up a user waits that long in silence)", at[0], interval)
+	}
+	if len(at) < 2 {
+		t.Fatalf("only %d line(s) in 12 simulated minutes at interval %v, want the steady-state cadence to keep reporting", len(at), interval)
+	}
+	// One clock step of slack: a line can only be emitted on a Report call,
+	// and calls land every 10ms.
+	for i := 1; i < len(at); i++ {
+		gap := at[i] - at[i-1]
+		if gap < interval-clock.step || gap > interval+clock.step {
+			t.Errorf("gap between line %d and %d = %v, want the configured interval %v", i-1, i, gap, interval)
+		}
+	}
+}
+
+// TestRunRoot_BadProgressIntervalIsRejectedBeforeTheInputFiles pins that
+// runRoot actually READS --progress-interval, and reads it among the up-front
+// flag validators (parsing it once via parseSegmentDuration, see runRoot)
+// rather than on the way into the processor.
+//
+// The input file named here does not exist, so a build in which runRoot never
+// parses --progress-interval up front still fails -- with ValidateInputFiles'
+// complaint about the missing file, not a word about the flag. Asserting on
+// the message by name is what tells those two apart, and it is the same
+// ordering promise every other flag validator in runRoot keeps: an objection
+// that costs nothing is raised before anything touches the disk.
+func TestRunRoot_BadProgressIntervalIsRejectedBeforeTheInputFiles(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH") // the rotate effect's availability check runs first
+	}
+	missing := filepath.Join(t.TempDir(), "not-a-clip.mp4")
+
+	cases := []struct {
+		name string
+		in   string
+		want string // the diagnosis this value in particular must draw
+	}{
+		{name: "not a length at all", in: "half past", want: "length"},
+		{name: "an absolute timestamp is not a cadence", in: "2026-08-01T09:03:12Z", want: "timestamp"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err, _ := runRootCmd(t, "--effect", "rotate", "--rotate", "90",
+				"--progress-interval", c.in, missing)
+			if err == nil {
+				t.Fatalf("--progress-interval %q was accepted, want a rejection", c.in)
+			}
+			if !strings.Contains(err.Error(), "--progress-interval") {
+				t.Errorf("error does not name the flag that rejected the value (so the flag may not be read at all): %v", err)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error does not mention %q: %v", c.want, err)
+			}
+			if strings.Contains(err.Error(), "not-a-clip.mp4") {
+				t.Errorf("the run got as far as the input files before objecting to the flag: %v", err)
+			}
+		})
+	}
+}
+
+// progressLine matches one formatted progress line for a named phase. It
+// duplicates internal/effects' identically-named helper on purpose: the two
+// packages assert the same wire format from opposite ends (there, that Apply
+// emits it; here, that the CLI's own flag plumbing turns it on and off), and
+// an exported test helper shared between them would make either package's
+// test pass because of the other's fixture. See internal/effects'
+// progressLine for why this is a regexp rather than a substring match.
+func progressLine(phase string) *regexp.Regexp {
+	return regexp.MustCompile(phase + ` (?:\d+% \(\d+/\d+ frames\)|\d+ frames), [0-9.]+ fps`)
+}
+
+// TestRunRoot_ProgressIntervalReachesTheRunningEffect is the end-to-end
+// wiring test for --progress-interval, and it is the ONLY thing standing
+// between a shipped flag and a feature that is fully unit-tested at every
+// level and never fires once.
+//
+// Everything below this line is covered: progress.Reporter's throttle and
+// formatting, buildProgressConfig's two off-switches, ProcessorConfig.Progress
+// reaching effects.Input, and GoCVStabilizer.Apply reporting both phases. What
+// none of that can see is runRoot's own three-line hand-off -- parse the flag,
+// build the Config, put it on the ProcessorConfig -- and dropping any of it
+// leaves a run that exits 0, writes a correct video, and prints nothing.
+// Mutation-tested: replacing the parsed interval with a hardcoded 0 (the
+// "registered but never read" bug) survives every other test in this tree.
+//
+// The interval is 1ms rather than the shipped 5m because the clock cannot be
+// injected through a CLI flag, and this test's subject is the hand-off, not
+// the cadence (TestProgressWarmUp_FirstLineArrivesLongBeforeTheDefaultInterval
+// owns that, deterministically). 1ms is not a race: the first Report of each
+// phase cannot happen until ffmpeg has been spawned and a frame decoded, which
+// is tens of milliseconds at best, so the throttle is always already open.
+// progress.New caps the effective warm-up at the interval, so the 10s
+// progressWarmUp does not gate it either.
+//
+// The "off" case is the control that makes the "on" case mean something: the
+// same clip, the same effect, the same successful run, with only the flag
+// changed.
+func TestRunRoot_ProgressIntervalReachesTheRunningEffect(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+
+	cases := []struct {
+		name      string
+		interval  string
+		wantLines bool
+	}{
+		{name: "a cadence turns reporting on", interval: "0.001", wantLines: true},
+		{name: "0 turns reporting off", interval: "0", wantLines: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := filepath.Join(dir, "clip.mp4")
+			genClipAt(t, src, 1, time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)) // 10 frames, 64x48
+
+			err, logged := runRootCmd(t, "--effect", "gocv-stabilizer",
+				"--progress-interval", c.interval, src)
+			if err != nil {
+				t.Fatalf("run: %v\n%s", err, logged)
+			}
+			// The control for the absence assertion below: the work really
+			// did happen, so "no progress lines" is about reporting and not
+			// about a run that quietly did nothing.
+			out := filepath.Join(dir, "clip - gocv-stabilized.mp4")
+			if _, statErr := os.Stat(out); statErr != nil {
+				t.Fatalf("expected a stabilized output at %s: %v\n%s", out, statErr, logged)
+			}
+
+			for _, phase := range []string{"analyzing", "rendering"} {
+				if progressLine(phase).MatchString(logged) != c.wantLines {
+					t.Errorf("--progress-interval %s: %q progress line present = %v, want %v; log was:\n%s",
+						c.interval, phase, !c.wantLines, c.wantLines, logged)
+				}
+			}
+		})
 	}
 }
 
