@@ -77,14 +77,48 @@ func TestMetadataCarryArgs_PairsTheMapWithTheMuxerFlag(t *testing.T) {
 	}
 }
 
+// TestMetadataStripArgs_DropsMetadataWithoutTheMuxerFlag is
+// MetadataStripArgs' half of the pairing pin above: unlike MetadataCarryArgs,
+// the muxer flag must be ABSENT, because there is nothing being carried for
+// it to help write -- measured on ffmpeg 8.1.2, adding it to a
+// "-map_metadata -1" output costs +16 bytes of empty "mdta" key scaffolding
+// for no benefit.
+func TestMetadataStripArgs_DropsMetadataWithoutTheMuxerFlag(t *testing.T) {
+	args := MetadataStripArgs()
+	if !containsPair(args, "-map_metadata", "-1") {
+		t.Errorf("MetadataStripArgs() = %v, want -map_metadata -1", args)
+	}
+	// The doc comment argues this one is redundant TODAY and kept on purpose,
+	// which makes it the single argument in the list most likely to be deleted
+	// as dead weight by someone who reads only the first half of that
+	// sentence. Pinned so the deletion is a failure, not a silent bet on an
+	// ffmpeg default nobody here controls.
+	if !containsPair(args, "-map_metadata:s", "-1") {
+		t.Errorf("MetadataStripArgs() = %v, want -map_metadata:s -1 -- redundant on the measured build, kept because per-stream mapping is a separate default whose change would be silent", args)
+	}
+	if !containsPair(args, "-map_chapters", "-1") {
+		t.Errorf("MetadataStripArgs() = %v, want -map_chapters -1 -- chapters survive -map_metadata -1 on their own and get re-materialised as a text track", args)
+	}
+	if !containsPair(args, "-fflags", "+bitexact") {
+		t.Errorf("MetadataStripArgs() = %v, want -fflags +bitexact, which is what removes the muxer's own encoder tag", args)
+	}
+	if containsPair(args, "-movflags", "use_metadata_tags") {
+		t.Errorf("MetadataStripArgs() = %v, must NOT pass -movflags use_metadata_tags -- this builder strips, it carries nothing for that flag to help write, and measured it costs +16 bytes for no benefit", args)
+	}
+}
+
 // TestArgvBuilders_NeverMapMetadataWithoutTheMuxerFlag is the invariant behind
-// the helper, asserted where it can actually be broken: in the argument lists.
+// the two helpers above, asserted where it can actually be broken: in the
+// argument lists.
 //
-// Each of these builders carries a source's metadata onto its output, and each
-// one of them lost the Apple location key by writing -map_metadata on its own.
-// A new builder (or a "simplification" back to the literal) is caught here
-// rather than by someone noticing months later that their clips stopped
-// appearing on a map.
+// The rule has two directions, one per helper: a builder that maps metadata
+// FROM a real input (value >= 0, MetadataCarryArgs' shape) must pair it with
+// the muxer flag, because each one of them lost the Apple location key by
+// writing -map_metadata on its own. A builder that STRIPS metadata (value
+// -1, MetadataStripArgs' shape) must NOT pair it -- see that function's own
+// doc comment on why the flag is not simply harmless there. A single
+// "mapped => flag required" rule would get the second case backwards and
+// pass a strip builder someone "fixed" by adding the carry flag back in.
 func TestArgvBuilders_NeverMapMetadataWithoutTheMuxerFlag(t *testing.T) {
 	cases := []struct {
 		name string
@@ -97,19 +131,31 @@ func TestArgvBuilders_NeverMapMetadataWithoutTheMuxerFlag(t *testing.T) {
 			SourcePath: "src.mp4", OutputPath: "out.mp4", Width: 64, Height: 48, FPS: 30,
 		})},
 		{"trimArgs", trimArgs("src.mp4", "out.mp4", 1, 3, Info{})},
+		// The STRIP side of the rule (mapValue == "-1") is otherwise
+		// unreachable in this table -- none of the three builders above ever
+		// map -1, so that whole branch would pass even if it were deleted.
+		// MetadataStripArgs is what makes it a real assertion.
+		{"MetadataStripArgs", MetadataStripArgs()},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			mapValue := ""
 			mapped := false
-			for _, a := range c.args {
-				if strings.HasPrefix(a, "-map_metadata") {
+			for i, a := range c.args {
+				if a == "-map_metadata" && i+1 < len(c.args) {
 					mapped = true
+					mapValue = c.args[i+1]
 				}
 			}
 			if !mapped {
 				t.Fatalf("%s no longer maps metadata at all: %v", c.name, c.args)
 			}
-			if !containsPair(c.args, "-movflags", "use_metadata_tags") {
+			hasFlag := containsPair(c.args, "-movflags", "use_metadata_tags")
+			if mapValue == "-1" {
+				if hasFlag {
+					t.Errorf("%s maps metadata -1 (strip) but also passes -movflags use_metadata_tags: %v\nthat flag pairs with a carry, not a strip -- see MetadataStripArgs", c.name, c.args)
+				}
+			} else if !hasFlag {
 				t.Errorf("%s maps metadata without -movflags use_metadata_tags: %v\nthe mov/mp4 muxer drops %s silently, exit code 0",
 					c.name, c.args, appleLocationKey)
 			}

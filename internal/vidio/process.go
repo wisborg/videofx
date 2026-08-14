@@ -181,3 +181,71 @@ func MetadataCarryArgs(from int) []string {
 		"-movflags", "use_metadata_tags",
 	}
 }
+
+// MetadataStripArgs returns the output arguments that REMOVE a source's
+// container-level metadata, for the strip-metadata effect
+// (internal/effects/stripmetadata.go): "-map_metadata -1" drops both global
+// and per-stream tags and zeroes the mvhd/tkhd/mdhd creation/modification
+// timestamps; "-map_metadata:s -1" does the same for per-stream metadata a
+// second time (see below -- it is not redundant in principle, even though it
+// measured as byte-identical on this build); "-map_chapters -1" is required
+// separately, because chapters SURVIVE "-map_metadata -1" on their own and,
+// left in, get re-materialised by the muxer as a "text" track whose samples
+// contain the chapter titles -- exactly the kind of track this effect exists
+// to remove; and "-fflags +bitexact" removes the muxer's own
+// "encoder=Lavf62.12.102"-style tag. Measured on ffmpeg 8.1.2.
+//
+// # This is a SEPARATE function from MetadataCarryArgs, not a mode parameter
+//
+// A shared func(from int) where -1 means "strip everything" would be exactly
+// the shape WarpModelSimilarity == "" is (see options.go): one value flowing
+// into a switch that silently means something the caller did not intend. Two
+// named functions make the intent legible at the call site instead of
+// legible only to a reader who already knows what -1 means to this
+// particular argument.
+//
+// # -movflags use_metadata_tags must be ABSENT here
+//
+// MetadataCarryArgs pairs -map_metadata with that flag because, without it,
+// the muxer drops any key it does not recognize from its own internal table
+// -- but that only matters when there is something to carry. Measured on
+// ffmpeg 8.1.2: adding the flag to a "-map_metadata -1" output is NOT a
+// no-op, but not in the direction that would argue for keeping it either --
+// it costs +16 bytes of empty "mdta" key scaffolding for a run that maps
+// nothing into it. So the flag stays out on purpose, and it is the one
+// invariant a "simplify this to reuse MetadataCarryArgs" change would get
+// backwards: see TestArgvBuilders_NeverMapMetadataWithoutTheMuxerFlag, which
+// treats "-map_metadata -1" as the one case where the flag is FORBIDDEN
+// rather than required.
+//
+// # What this does NOT remove
+//
+// The stream selection that drops a gpmd/tmcd/mebx/sbtl track is the
+// caller's job (its own -map arguments), not this function's -- these args
+// alone only ever touch metadata, never which streams are present. Two
+// things this DOES leave alone regardless of stream selection: the display
+// rotation matrix (it lives in tkhd's matrix field, not in metadata -- it is
+// how the clip is meant to be shown, not who shot it -- and is measured to
+// survive the full strip untouched) and any MP4 edit list (also measured to
+// survive: a trim-then-strip keeps its elst, so PresentedFrames is
+// unaffected).
+//
+// # -fflags +bitexact must appear AFTER -i
+//
+// It is parsed as applying to whichever -i most recently preceded it, so a
+// caller that put these args (or a copy of "+bitexact" alone) BEFORE the
+// input would have it silently do nothing at all -- same string, exit code
+// 0, the encoder tag still there. Measured on ffmpeg 8.1.2. Every caller in
+// this tree appends output args (this function's whole return value) after
+// -i, matching MetadataCarryArgs' own contract, so that placement is
+// automatic here -- but it is not enforced by the type system, only by every
+// call site following the same convention, which is why it is written down
+// this bluntly.
+func MetadataStripArgs() []string {
+	return []string{
+		"-map_metadata", "-1",
+		"-map_metadata:s", "-1",
+		"-map_chapters", "-1",
+		"-fflags", "+bitexact",
+	}
+}
