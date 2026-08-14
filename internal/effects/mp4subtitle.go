@@ -49,6 +49,43 @@ import (
 // size comes off disk and a corrupt one can name any 64-bit length.
 const maxMoovLen = 256 << 20
 
+// readMoovContent finds f's top-level moov box and reads its content (the
+// bytes strictly inside the box, past its 8- or 16-byte header) into memory,
+// returning that content and the absolute file offset it starts at. size is
+// f's file size; every caller already has it from a Stat, so this does not
+// take one itself.
+//
+// This is the "find moov, bounds-check it, read it into memory" preamble
+// that used to be written out separately, byte for byte including its error
+// strings, in hideSubtitleTrack below, readHeaderTimestamps (mp4times.go)
+// and two test helpers that patch their own MP4 fixtures
+// (mp4times_test.go's patchFirstTrakTkhdCreationTime,
+// stripmetadata_test.go's hasEditList). The box WALKER below
+// (findTopLevelBox/readBox/findBox) was already shared between all four;
+// this was the one piece of it that was not. contentOff is returned because
+// hideSubtitleTrack needs it to convert a content-relative index into a
+// WriteAt offset, and the two test helpers that patch a byte back in need it
+// for the same reason.
+func readMoovContent(f *os.File, size int64) (content []byte, contentOff int64, err error) {
+	moovOff, moovSize, moovHdr, err := findTopLevelBox(f, size, "moov")
+	if err != nil {
+		return nil, 0, err
+	}
+	if moovOff < 0 {
+		return nil, 0, fmt.Errorf("no moov box (not an MP4/MOV?)")
+	}
+	contentLen := moovSize - int64(moovHdr)
+	if contentLen <= 0 || contentLen > maxMoovLen {
+		return nil, 0, fmt.Errorf("declares a %d-byte moov box -- the file is corrupt", moovSize)
+	}
+	contentOff = moovOff + int64(moovHdr)
+	content = make([]byte, contentLen)
+	if _, err := f.ReadAt(content, contentOff); err != nil {
+		return nil, 0, fmt.Errorf("reading moov: %w", err)
+	}
+	return content, contentOff, nil
+}
+
 func hideSubtitleTrack(path string) error {
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
@@ -61,22 +98,9 @@ func hideSubtitleTrack(path string) error {
 		return fmt.Errorf("stat %s: %w", path, err)
 	}
 
-	moovOff, moovSize, moovHdr, err := findTopLevelBox(f, fi.Size(), "moov")
+	content, contentOff, err := readMoovContent(f, fi.Size())
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", path, err)
-	}
-	if moovOff < 0 {
-		return fmt.Errorf("no moov box in %s (not an MP4/MOV?)", path)
-	}
-	contentLen := moovSize - int64(moovHdr)
-	if contentLen <= 0 || contentLen > maxMoovLen {
-		return fmt.Errorf("%s declares a %d-byte moov box -- the file is corrupt", path, moovSize)
-	}
-	contentOff := moovOff + int64(moovHdr)
-
-	content := make([]byte, contentLen)
-	if _, err := f.ReadAt(content, contentOff); err != nil {
-		return fmt.Errorf("reading moov of %s: %w", path, err)
 	}
 
 	// Offsets below index into content, so each write converts back to a file
