@@ -1063,7 +1063,7 @@ func TestReencodingEffectNames_ListsTheWayOutFromTheRegistry(t *testing.T) {
 	}
 	// The lossless ones must NOT be advertised as a way out; suggesting rotate
 	// to someone whose rotate output is misaligned is worse than saying nothing.
-	for _, name := range []string{"rotate", "telemetry"} {
+	for _, name := range []string{"rotate", "telemetry", "strip-metadata"} {
 		if listed[name] {
 			t.Errorf("the way out is %v, which offers %q -- that effect copies the stream through and has "+
 				"the very problem being warned about", listed, name)

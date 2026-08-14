@@ -198,12 +198,17 @@ func TestWarpStabilizer_Apply_PairsTheMetadataMapWithTheMuxerFlag(t *testing.T) 
 // that has to have one.)
 //
 // vidio's TestArgvBuilders_NeverMapMetadataWithoutTheMuxerFlag guards this for
-// encoderArgs, overlayArgs and trimArgs. These are the other three argument
-// lists in the tree that carry a source's metadata, and faststart is exactly as
+// encoderArgs, overlayArgs and trimArgs. These are the other argument lists in
+// the tree that map metadata one way or the other, and faststart is exactly as
 // plausible an addition here -- more so for rotate and the telemetry mux, whose
 // stream-copy outputs are the ones someone might want web-streamable. So the
 // same rule, asserted where it can be broken: at most one bare -movflags, and
-// any further one must be additive.
+// any further one must be additive -- WHEN the builder carries metadata at all
+// (value >= 0). stripArgs is in this table under the opposite half of the same
+// rule: it maps metadata -1 (strip, not carry -- see vidio.MetadataStripArgs),
+// and for that value the flag must be ABSENT, not merely paired correctly, so
+// nobody "fixes" what looks like a missing muxer flag by adding the carry
+// flag back onto a builder that strips.
 func TestArgvBuilders_NeverPassASecondNonAdditiveMovflags(t *testing.T) {
 	fr := &fakeRunner{}
 	w := &WarpStabilizer{Runner: fr, perf: DefaultPerfOptions()}
@@ -227,22 +232,28 @@ func TestArgvBuilders_NeverPassASecondNonAdditiveMovflags(t *testing.T) {
 		})},
 		{"rotateArgs", rotateArgs(90, "in.mp4", "out.mp4", false)},
 		{"warp-stabilizer transform pass", fr.calls[1].args},
+		{"stripArgs", stripArgs("in.mp4", "out.mp4", false)},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			// The premise: this builder carries metadata at all. A builder that
-			// stopped would make the rest of this vacuously true.
+			mapValue := ""
 			mapped := false
-			for _, a := range c.args {
-				if strings.HasPrefix(a, "-map_metadata") {
+			for i, a := range c.args {
+				if a == "-map_metadata" && i+1 < len(c.args) {
 					mapped = true
+					mapValue = c.args[i+1]
 				}
 			}
 			if !mapped {
 				t.Fatalf("%s no longer maps metadata at all: %v", c.name, c.args)
 			}
-			if !containsAdjacent(c.args, "-movflags", "use_metadata_tags") {
+			hasFlag := containsAdjacent(c.args, "-movflags", "use_metadata_tags")
+			if mapValue == "-1" {
+				if hasFlag {
+					t.Errorf("%s maps metadata -1 (strip) but also passes -movflags use_metadata_tags: %v\nthat flag pairs with a carry, not a strip", c.name, c.args)
+				}
+			} else if !hasFlag {
 				t.Errorf("%s maps metadata without -movflags use_metadata_tags: %v\nthe mov/mp4 muxer drops %s silently, exit code 0",
 					c.name, c.args, appleLocationKey)
 			}

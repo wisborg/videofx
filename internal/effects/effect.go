@@ -226,6 +226,35 @@ type Reencoder interface {
 	ReencodesVideo()
 }
 
+// DropsNonAVTracks is implemented by effects that emit ONLY video and audio
+// streams from a stream COPY -- currently only strip-metadata, whose whole
+// job is dropping every other track a source carries (see
+// stripArgs' "-map 0:V -map 0:a?" in stripmetadata.go).
+//
+// It exists for the same property Reencoder exists for -- whether a later
+// effect in a chain keeps a subtitle track an earlier telemetry pass muxed
+// in -- read from the OTHER end. Reencoder answers "does this effect emit a
+// freshly encoded video stream that never decoded a subtitle to begin with";
+// this one answers "does this effect stream-copy but still never map the
+// subtitle in". cmd's warnTelemetryNotLast checks both before its own
+// re-enable arm, which would otherwise warn that a telemetry subtitle track
+// is about to "display during playback" when an effect implementing this one
+// has just removed the track outright.
+//
+// # The polarity is the safe way round, deliberately -- same rule as Reencoder
+//
+// NOT implementing this means "assume every track survives the copy", i.e.
+// assume the case that needs the re-enable warning. A new stream-copying
+// effect that forgets to implement it gets a warning about a track it
+// happens to keep -- annoying, visible, fixed in one line. The reverse -- a
+// marker effects have to remember to add in order to be warned about
+// correctly -- is how the false-positive/false-negative subtitle warning
+// this whole area exists to prevent would come back.
+type DropsNonAVTracks interface {
+	// DropsNonAVTracks is a marker. It is never called for its value.
+	DropsNonAVTracks()
+}
+
 // ValidateStrength: it requires strength to be in [0.0, 1.0].
 func ValidateUnitRange(strength float64) error {
 	if strength < 0.0 || strength > 1.0 {

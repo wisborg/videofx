@@ -35,6 +35,7 @@ func TestArgvBuilders_GuardTheOutputPositional(t *testing.T) {
 			SourcePath: "in.mp4",
 			OutputPath: dashOut,
 		})},
+		{"stripArgs", stripArgs("in.mp4", dashOut, false)},
 	}
 
 	for _, tt := range tests {
