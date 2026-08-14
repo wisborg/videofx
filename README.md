@@ -27,6 +27,11 @@ several to apply them as a pipeline, see [Chaining effects](#chaining-effects)):
   (`--rotate`). **Lossless**: it stream-copies the video and only rewrites the
   container's display-rotation flag (no re-encode), composing with any rotation the
   source already carries. See [Rotate](#rotate) below.
+- **`strip-metadata`** — removes the container metadata that identifies where
+  and when a clip was recorded (`creation_time`, location, make/model/artist/
+  comment, chapters, and every non-audio/video track), so it can be shared.
+  **Lossless**, and verified after every run. See
+  [Strip metadata](#strip-metadata) below.
 
 ## Requirements
 
@@ -102,10 +107,10 @@ videofx calibrate <source-video> [flags]          # suggest a --quality value; s
 
 Flags:
 
-- `--effect` (required) — effect(s) to apply: `gocv-stabilizer`, `warp-stabilizer`, `telemetry`, `telemetry-hud`, or `rotate`. Comma-separate (or repeat the flag) to **chain** several, applied left-to-right — see [Chaining effects](#chaining-effects). Each effect's flags still apply to whichever effect in the chain they belong to.
+- `--effect` (required) — effect(s) to apply: `gocv-stabilizer`, `warp-stabilizer`, `telemetry`, `telemetry-hud`, `rotate`, or `strip-metadata`. Comma-separate (or repeat the flag) to **chain** several, applied left-to-right — see [Chaining effects](#chaining-effects). Each effect's flags still apply to whichever effect in the chain they belong to.
 - `--strength` — effect strength, `0.0` (subtle) to `1.0` (strong). Default `0.5`.
 - `--output-dir` — write results here instead of alongside each input. The directory is **created** (with any missing parents) if it is not there, and checked once, before any file is opened, that something can actually be written into it — a read-only or otherwise unwritable directory fails the run immediately instead of at write time, which for a long `telemetry-hud` render is after every frame has already been drawn.
-- `--suffix` — override the filename suffix appended before the extension. By default each effect supplies its own (`gocv-stabilizer` → `gocv-stabilized`, `warp-stabilizer` → `stabilized`, `telemetry` → `telemetry`), so `clip.mp4` becomes e.g. `clip - gocv-stabilized.mp4`; `--suffix stable` makes it `clip - stable.mp4` instead. The ` - ` separator and the collision counter (`clip - stable - 1.mp4`, …) are added automatically, so give just the word. Applies to every input in the batch, and to any sidecar an effect derives from the output name (e.g. `telemetry`'s `.gpx`). Must not contain a path separator (the output is always a sibling of the input, never redirected elsewhere — use `--output-dir` to change the directory).
+- `--suffix` — override the filename suffix appended before the extension. By default each effect supplies its own (`gocv-stabilizer` → `gocv-stabilized`, `warp-stabilizer` → `stabilized`, `telemetry` → `telemetry`, `strip-metadata` → `stripped`), so `clip.mp4` becomes e.g. `clip - gocv-stabilized.mp4`; `--suffix stable` makes it `clip - stable.mp4` instead. The ` - ` separator and the collision counter (`clip - stable - 1.mp4`, …) are added automatically, so give just the word. Applies to every input in the batch, and to any sidecar an effect derives from the output name (e.g. `telemetry`'s `.gpx`). Must not contain a path separator (the output is always a sibling of the input, never redirected elsewhere — use `--output-dir` to change the directory).
 - `--concurrency` — number of videos to process in parallel. Default `1`. When it is greater than `1` and more than one file is given, the batch is dispatched **largest-first** (see [Batch ordering](#batch-ordering) below) so the overall run finishes as quickly as possible.
 - `--debug` — print extra diagnostic output that a successful run otherwise keeps to itself. By default the `telemetry` and `rotate` effects' underlying ffmpeg calls run at ffmpeg's `error` log level, so a successful run is silent (no banner/stream-info dump) and only real errors surface; `--debug` restores ffmpeg's full output. It also makes `gocv-stabilizer` report the lens it calibrated under `--warp-model rotation` (which model, focal length, field of view, and how well it fitted) — useful when investigating a clip, noise on every other run, and the value to copy into `--lens`/`--lens-focal` for a clip too gentle to calibrate itself. **Warnings are not affected and always print**: anything that makes the render differ from what the flags asked for says so regardless. Shorthand for `--log-level debug`, and it wins if both are given.
 - `--log-level` — lowest severity to print: `debug` (everything, same as `--debug`), `info` (**default** — per-file progress plus warnings), `warn` (warnings only: no `processing …` or `[1/3] OK` lines), or `error` (failures only). All output goes to **stderr**, so `--log-level warn` is the way to keep a scripted batch quiet without losing the messages that matter.
@@ -204,8 +209,8 @@ to write metadata it does not recognize; every argument list here that maps meta
 the two — see `vidio.MetadataCarryArgs`. Without it the tag is dropped silently, exit code
 0, which is exactly how it once escaped notice.) `--location=false` governs only the tag
 videofx would *add*; it does not remove one that was already there. To drop the source's
-tags, run the output through `ffmpeg -map_metadata -1` or `exiftool` — which also drops
-`creation_time`, the tag telemetry syncing depends on.
+tags entirely — including `creation_time` — run `--effect strip-metadata` (see
+[Strip metadata](#strip-metadata) below) as the **last** effect in the chain.
 
 ### Chaining effects
 
@@ -496,6 +501,97 @@ deliberately avoids.)
 Because it re-encodes nothing, `rotate` composes cleanly in a chain, e.g.
 `--effect gocv-stabilizer,rotate` (stabilize, then flag the rotation) or
 `--effect rotate,telemetry-hud`.
+
+## Strip metadata
+
+`--effect strip-metadata` removes the container metadata that identifies
+where and when a clip was recorded, so it can be shared or published:
+
+```
+videofx clip.mp4 --effect strip-metadata
+```
+
+produces `clip - stripped.mp4`. It is **lossless**: video and audio are
+stream-copied, never re-encoded (a plain `-c copy` mux, like `rotate`).
+
+What it removes:
+
+- Global and per-stream tags — `creation_time`, the `location` tag and
+  Apple's `com.apple.quicktime.location.ISO6709`, `make`/`model`/`artist`/
+  `comment`, per-stream `handler_name` and `language`.
+- Chapters (chapter titles are free text, and the mp4 muxer otherwise
+  re-materializes them as a `text` track carrying the titles as samples).
+- The MP4 header timestamps in `mvhd`/`tkhd`/`mdhd` — a **separate** set of
+  creation/modification fields from the tags above, invisible to `ffprobe`
+  and to any tool that only reads it, so a metadata-stripped file that still
+  named a recording instant there would look clean and not be.
+- The muxer's own `encoder=Lavf…` tag.
+- Every track that is neither video nor audio: GoPro `gpmd` telemetry,
+  timecode (`tmcd`), timed metadata (`mebx`), and any subtitle track —
+  **including one this project's own `telemetry` effect added**.
+- An embedded cover image flagged as an attached picture (`disposition:
+  attached_pic`) — dropped from the output rather than stripped, since its
+  own EXIF (camera make/model/serial, GPS) is a whole JPEG inside `mdat`
+  that no metadata mapping touches. A cover image mapped in *without* that
+  disposition survives the mapping like any other video stream, but as long
+  as the file also has a real video stream the run fails closed on it rather
+  than delivering a file that still carries it: see "verifies its own output"
+  below. The exception is a file whose *only* video stream is the still —
+  see the next list.
+
+What it does **not** remove, because it is not container metadata:
+
+- **Display rotation.** It lives in the track header's display matrix, not
+  in metadata — it says how the clip is meant to be shown, not who shot it —
+  and survives untouched.
+- Anything **burned into the pixels or the audio**: a `telemetry-hud` course
+  map, on-screen clock or gauges, faces, voices.
+- An encoder fingerprint the video **bitstream itself** carries (e.g. an
+  x264 SEI) — that lives inside the sample data (`mdat`), which a stream
+  copy moves through unchanged by design (see "lossless" above). This is not
+  just an encoder *name*: an x264 SEI carries the **full option string** it
+  encoded with (`x264 - core 165 r3222 b35605a - ... - options: cabac=1
+  ref=3 deblock=1:0:0 ...`), a stronger fingerprint than "encoded with
+  libx264".
+- **A still image's own EXIF**, when that still is the file's *only* video
+  stream (a photo muxed with a soundtrack, say). An image codec's EXIF —
+  camera make, model, serial, GPS — sits in the picture data alongside the
+  x264 SEI above, out of reach of any metadata mapping. The check that
+  catches a cover image riding *beside* real video is deliberately not
+  applied here, because an ordinary MJPEG clip (dashcams write those) and a
+  single-frame clip from a very short trim are indistinguishable from a bare
+  still by codec alone — refusing them would make a whole codec family
+  un-strippable. The run warns instead of failing; heed the warning.
+- The file's own **filesystem** modification time (`mtime`) — a property of
+  the file, not the video container.
+- The **output filename itself**. `strip-metadata` names its output
+  `<input> - stripped.mp4`, so a source named for where or when it was shot
+  still publishes that in a name the tool constructs — rename the file if the
+  source filename is itself identifying.
+
+It builds the output as a **full remux** rather than patching known boxes in
+place: `ffmpeg` rebuilds `moov` from what it parsed and never writes back a
+box type it does not recognize, so a vendor-specific atom nobody enumerated
+in advance is dropped too. The cost is a full copy of the source at disk
+speed, with both files existing on disk at once.
+
+**Put it last in `--effect`.** `telemetry` and `telemetry-hud` both need the
+source's `creation_time` to sync against a FIT file and fail immediately if
+it is missing, so `strip-metadata` before either is rejected up front, before
+any file is opened, rather than left to fail partway through a chain. Placing
+it after `telemetry`/`telemetry-hud` — the recommended combination for
+"anonymised clip with telemetry baked in" — works as expected: attach the
+telemetry, then strip the identifying metadata from the result. (`--gpx`/
+`--srt-sidecar` write next to `telemetry`'s own output and are already
+rejected when `telemetry` is not last in the chain, so producing "an
+anonymised clip *and* a GPX sidecar" from one run isn't possible — run
+`telemetry --gpx` and `strip-metadata` as two separate invocations instead.)
+
+Every run **verifies** its own output before finishing: it scans the result
+the same way it scanned the source and fails the run — deleting the
+half-stripped output rather than delivering it under a name that claims to
+be clean — if anything identifying survived. There is no way to skip this
+check.
 
 ## Calibrating quality
 

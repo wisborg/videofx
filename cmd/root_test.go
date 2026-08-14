@@ -76,14 +76,16 @@ func telemetryEffect(t *testing.T, srtFormat string, sidecar, showSubtitle bool)
 func TestWarnTelemetryNotLast_ReportsTheRightLossForWhatFollows(t *testing.T) {
 	const (
 		dropped   = "re-encodes the video and so strips"
+		removed   = "removes the subtitle track entirely"
 		reenabled = "re-enables the telemetry subtitle track"
 	)
 	cases := []struct {
-		name     string
-		effs     []effects.Effect
-		wantMsg  string // "" = must not warn at all
-		wantAlso []string
-		why      string
+		name    string
+		effs    []effects.Effect
+		wantMsg string // "" = must not warn at all
+		wantAlso,
+		wantNot []string
+		why string
 	}{
 		{
 			name: "telemetry last",
@@ -149,7 +151,45 @@ func TestWarnTelemetryNotLast_ReportsTheRightLossForWhatFollows(t *testing.T) {
 			effs: []effects.Effect{getEffect(t, "gocv-stabilizer"), getEffect(t, "rotate")},
 			why:  "there is no telemetry pass to warn about",
 		},
+		{
+			// wantNot "put telemetry last" pins the round-3 fix: that advice
+			// is the OTHER two arms' phrasing, and it is not actionable here
+			// -- requireStripMetadataNotBeforeTelemetry forbids the reverse
+			// order too, so there is no position in the chain that keeps
+			// both telemetry's subtitle and a strip-metadata pass. Before
+			// the fix, this arm handed out that same advice regardless of
+			// which effect triggered it, telling the user to do the one
+			// thing the validator would then reject.
+			name:    "telemetry then strip-metadata",
+			effs:    []effects.Effect{telemetryEffect(t, "dji", false, false), getEffect(t, "strip-metadata")},
+			wantMsg: removed,
+			wantNot: []string{"put telemetry last"},
+			why:     "strip-metadata maps only 0:V and 0:a?, so the subtitle track is never mapped in at all -- gone, not re-encoded away",
+		},
+		{
+			name:    "telemetry then strip-metadata, --show-subtitle",
+			effs:    []effects.Effect{telemetryEffect(t, "dji", false, true), getEffect(t, "strip-metadata")},
+			wantMsg: removed,
+			wantNot: []string{"put telemetry last"},
+			why:     "the track is gone regardless of whether it was asked to be visible; --show-subtitle governs the RE-ENABLE arm, not this one",
+		},
+		{
+			name:     "telemetry then strip-metadata then rotate",
+			effs:     []effects.Effect{telemetryEffect(t, "dji", false, false), getEffect(t, "strip-metadata"), getEffect(t, "rotate")},
+			wantMsg:  removed,
+			wantAlso: []string{"strip-metadata"},
+			wantNot:  []string{"put telemetry last"},
+			why:      "no later effect re-encodes, so the removal arm applies; rotate alone (nothing before it) would otherwise trigger the re-enable arm, but the track is already gone",
+		},
+		{
+			name:    "telemetry then strip-metadata then gocv-stabilizer",
+			effs:    []effects.Effect{telemetryEffect(t, "dji", false, false), getEffect(t, "strip-metadata"), getEffect(t, "gocv-stabilizer")},
+			wantMsg: dropped,
+			why:     "a re-encoder ANYWHERE later wins over the removal arm too, the same rule the rotate-then-gocv-stabilizer case above already pins -- both describe a track that ends up gone, but the message should name the actual re-encode",
+		},
 	}
+
+	fates := []string{dropped, removed, reenabled}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -170,18 +210,21 @@ func TestWarnTelemetryNotLast_ReportsTheRightLossForWhatFollows(t *testing.T) {
 			if !strings.Contains(logged, c.wantMsg) {
 				t.Errorf("warning does not say %q -- %s\nlogged: %q", c.wantMsg, c.why, logged)
 			}
-			// The two arms describe different fates; naming both would mean the
-			// message was assembled without deciding which one applies.
-			other := dropped
-			if c.wantMsg == dropped {
-				other = reenabled
-			}
-			if strings.Contains(logged, other) {
-				t.Errorf("warning claims BOTH losses at once: %q", logged)
+			// The three arms describe different fates; naming more than one would
+			// mean the message was assembled without deciding which one applies.
+			for _, fate := range fates {
+				if fate != c.wantMsg && strings.Contains(logged, fate) {
+					t.Errorf("warning claims more than one fate at once (%q and %q): %q", c.wantMsg, fate, logged)
+				}
 			}
 			for _, want := range c.wantAlso {
 				if !strings.Contains(logged, want) {
 					t.Errorf("warning does not mention %q: %q", want, logged)
+				}
+			}
+			for _, notWant := range c.wantNot {
+				if strings.Contains(logged, notWant) {
+					t.Errorf("warning says %q, which it should not: %q", notWant, logged)
 				}
 			}
 		})
@@ -1422,6 +1465,84 @@ func TestRequireRotateDegrees(t *testing.T) {
 	}
 }
 
+// TestRequireStripMetadataNotBeforeTelemetry covers the up-front rejection:
+// both telemetry and telemetry-hud hard-fail on a missing creation_time, and
+// strip-metadata's whole job is removing it, so a chain that puts
+// strip-metadata anywhere before either of them is rejected before the first
+// file is opened rather than failing late, after whatever ran in between.
+//
+// Every case here is already a RESOLVED chain -- the shape this function's
+// own doc says it takes, post impliedEffects -- not a raw --effect string.
+// "telemetry-hud, strip-metadata" is deliberately NOT one of these cases: as
+// raw --effect input that never reaches this function unresolved, since
+// impliedEffects inserts the implied telemetry pass right after telemetry-hud
+// before this ever runs (see TestRequireStripMetadataNotBeforeTelemetry_
+// AfterImpliedEffectsAllowsTheReadmesRecommendedChain, which drives the raw
+// input through the real resolve -> imply pipeline this table skips).
+func TestRequireStripMetadataNotBeforeTelemetry(t *testing.T) {
+	cases := []struct {
+		name        string
+		effectNames []string
+		wantErr     bool
+	}{
+		{"strip-metadata alone", []string{"strip-metadata"}, false},
+		{"strip-metadata last, after telemetry", []string{"telemetry", "strip-metadata"}, false},
+		{"strip-metadata last, after telemetry-hud then telemetry (the resolved shape impliedEffects now produces)", []string{"telemetry-hud", "telemetry", "strip-metadata"}, false},
+		{"strip-metadata before telemetry", []string{"strip-metadata", "telemetry"}, true},
+		{"strip-metadata before telemetry-hud", []string{"strip-metadata", "telemetry-hud"}, true},
+		{"strip-metadata before telemetry, other effects around", []string{"gocv-stabilizer", "strip-metadata", "rotate", "telemetry"}, true},
+		{"no strip-metadata at all", []string{"gocv-stabilizer", "telemetry"}, false},
+		{"no telemetry at all", []string{"gocv-stabilizer", "strip-metadata"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := requireStripMetadataNotBeforeTelemetry(c.effectNames)
+			if (err != nil) != c.wantErr {
+				t.Errorf("requireStripMetadataNotBeforeTelemetry(%v) = %v, wantErr %v", c.effectNames, err, c.wantErr)
+			}
+		})
+	}
+}
+
+// TestRequireStripMetadataNotBeforeTelemetry_AfterImpliedEffectsAllowsTheReadmesRecommendedChain
+// is the integration-level test the table above cannot be: it drives the raw
+// --effect value a user would actually type through resolveEffects and
+// impliedEffects -- the same two steps runRoot performs before ever calling
+// requireStripMetadataNotBeforeTelemetry -- rather than hand-writing the
+// already-resolved chain shape the table above uses.
+//
+// Before the fix, impliedEffects appended the implied telemetry pass at the
+// END of the chain, turning "telemetry-hud, strip-metadata" into
+// [telemetry-hud, strip-metadata, telemetry] -- strip-metadata BEFORE
+// telemetry, rejected by this very function, even though the user put
+// strip-metadata last exactly as the README and the rejection's own error
+// message told them to. A table test built from an already-resolved chain
+// could not see that: it never exercises impliedEffects, so it could assert
+// "strip-metadata after telemetry-hud is fine" while the real pipeline
+// disagreed. This test is what would have caught that disagreement.
+func TestRequireStripMetadataNotBeforeTelemetry_AfterImpliedEffectsAllowsTheReadmesRecommendedChain(t *testing.T) {
+	effs, err := resolveEffects([]string{"telemetry-hud", "strip-metadata"})
+	if err != nil {
+		t.Fatalf("resolveEffects: %v", err)
+	}
+	effs = impliedEffects(effs)
+
+	got := names(effs)
+	want := []string{"telemetry-hud", "telemetry", "strip-metadata"}
+	if len(got) != len(want) {
+		t.Fatalf("resolved chain = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("resolved chain = %v, want %v", got, want)
+		}
+	}
+
+	if err := requireStripMetadataNotBeforeTelemetry(got); err != nil {
+		t.Errorf("--effect telemetry-hud,strip-metadata was rejected after resolving: %v -- this is the chain the README recommends, and the user already put strip-metadata last", err)
+	}
+}
+
 // TestResolveEffects covers the --effect parsing: ordered resolution,
 // whitespace trimming, and the empty/duplicate/unknown rejections.
 func TestResolveEffects(t *testing.T) {
@@ -1471,8 +1592,17 @@ func TestResolveEffects(t *testing.T) {
 	})
 }
 
-// TestImpliedEffects pins that telemetry-hud implies a trailing telemetry
-// pass, added last and only when telemetry isn't already present.
+// TestImpliedEffects pins where telemetry-hud's implied telemetry pass goes,
+// and that it is only added when telemetry isn't already present.
+//
+// The position is not "immediately behind the hud": it is APPENDED AT THE END,
+// except that a strip-metadata following the hud is stepped in front of. The
+// end is load-bearing -- a telemetry pass placed before a later re-encoder
+// loses its subtitle track to that encode, and one placed before a later
+// effect at all trips validateTelemetrySidecarPlacement. Generalising this to
+// "right behind the hud" silently broke telemetry-hud,rotate and
+// telemetry-hud,gocv-stabilizer once already; the cases below pin both
+// orderings so it cannot happen again unnoticed.
 func TestImpliedEffects(t *testing.T) {
 	get := func(n string) effects.Effect {
 		e, err := effects.Get(n)
@@ -1495,6 +1625,60 @@ func TestImpliedEffects(t *testing.T) {
 		want := []string{"gocv-stabilizer", "telemetry-hud", "telemetry"}
 		if len(got) != 3 || got[2] != "telemetry" {
 			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	// Regression guard for the round-2 fix that generalised the insertion
+	// point: a re-encoder chained after telemetry-hud with no strip-metadata
+	// in the chain must still get telemetry appended at the very end, not
+	// inserted right behind the hud. Inserting it right behind the hud
+	// instead (what a round-2 fix briefly did) reorders these chains,
+	// re-enables the hidden telemetry subtitle in a later stream copy
+	// (rotate), and drops the subtitle entirely before a later re-encode
+	// (gocv-stabilizer) -- neither of which has anything to do with
+	// strip-metadata.
+	t.Run("hud followed by rotate: telemetry still appended at the end", func(t *testing.T) {
+		got := names(impliedEffects([]effects.Effect{get("telemetry-hud"), get("rotate")}))
+		want := []string{"telemetry-hud", "rotate", "telemetry"}
+		if len(got) != len(want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("got %v, want %v", got, want)
+			}
+		}
+	})
+
+	t.Run("hud followed by a re-encoder: telemetry still appended at the end", func(t *testing.T) {
+		got := names(impliedEffects([]effects.Effect{get("telemetry-hud"), get("gocv-stabilizer")}))
+		want := []string{"telemetry-hud", "gocv-stabilizer", "telemetry"}
+		if len(got) != len(want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("got %v, want %v", got, want)
+			}
+		}
+	})
+
+	// The case impliedEffects previously got wrong: the implied
+	// telemetry pass has to land right behind telemetry-hud, not at the
+	// absolute end of the chain, or an effect the user deliberately chained
+	// AFTER telemetry-hud (here, strip-metadata -- the README's recommended
+	// "anonymised clip with telemetry baked in" combination) ends up BEFORE
+	// the telemetry pass it depends on instead of after it.
+	t.Run("inserted right behind the hud, not at the end of the chain", func(t *testing.T) {
+		got := names(impliedEffects([]effects.Effect{get("telemetry-hud"), get("strip-metadata")}))
+		want := []string{"telemetry-hud", "telemetry", "strip-metadata"}
+		if len(got) != len(want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("got %v, want %v", got, want)
+			}
 		}
 	})
 

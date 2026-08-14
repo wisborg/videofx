@@ -201,7 +201,7 @@ func NewRootCmd() *cobra.Command {
 	root.Flags().BoolVar(&telemetryStryd, "telemetry-stryd", false,
 		"telemetry only: include Stryd running-dynamics developer fields in the GPX sidecar and in a --srt-format readable SRT. NOT in --srt-format dji: that layout is the fixed set of tags Telemetry Overlay parses out of a DJI drone's SRT, with no place to put an arbitrary developer field, so this flag does not affect it")
 	root.Flags().BoolVar(&location, "location", true,
-		"telemetry only: write the clip's GPS position into the output's container metadata (the \"location\" tag and Apple's \"com.apple.quicktime.location.ISO6709\"). On by default. Pass --location=false to leave it out: the tag is read by YouTube, Photos, Immich and QuickTime, so a run that starts at your front door otherwise ships your home address in the file. It governs only the tag videofx WRITES: it does not remove telemetry-hud's course map, which is burned into the pixels, nor a position the camera itself recorded, which is carried over with the rest of the source metadata (strip that with ffmpeg -map_metadata -1 or exiftool). Note --effect telemetry-hud implies --effect telemetry, so this applies to a HUD burn as well")
+		"telemetry only: write the clip's GPS position into the output's container metadata (the \"location\" tag and Apple's \"com.apple.quicktime.location.ISO6709\"). On by default. Pass --location=false to leave it out: the tag is read by YouTube, Photos, Immich and QuickTime, so a run that starts at your front door otherwise ships your home address in the file. It governs only the tag videofx WRITES: it does not remove telemetry-hud's course map, which is burned into the pixels, nor a position the camera itself recorded, which is carried over with the rest of the source metadata (strip that with --effect strip-metadata, as the last effect in the chain). Note --effect telemetry-hud implies --effect telemetry, so this applies to a HUD burn as well")
 
 	_ = root.MarkFlagRequired("effect")
 
@@ -245,28 +245,54 @@ func resolveEffects(names []string) ([]effects.Effect, error) {
 }
 
 // impliedEffects adds effects that a selected effect implies. Selecting
-// telemetry-hud implies telemetry: the HUD re-encodes the clip, and appending
-// telemetry AFTER it stream-copies the burned-in result while adding the GPS
-// location tag (and any --srt-format/--gpx the user asked for) and preserving
-// creation_time -- so the HUD video also carries the lossless telemetry
-// metadata. It is appended LAST, not prepended, because a telemetry pass
-// before the overlay re-encode would have its subtitle/Apple-location tag
-// dropped by that encode. A telemetry the user listed explicitly is left as
-// placed (not duplicated), so an explicit "telemetry,telemetry-hud" ordering
-// is respected (and warned about by warnTelemetryNotLast).
+// telemetry-hud implies telemetry: the HUD re-encodes the clip, and inserting
+// telemetry right behind it stream-copies the burned-in result while adding
+// the GPS location tag (and any --srt-format/--gpx the user asked for) and
+// preserving creation_time -- so the HUD video also carries the lossless
+// telemetry metadata.
+//
+// The insertion point is normally the very end of the chain: anything the
+// user chained after telemetry-hud (a re-encoder, a stream copy) is meant to
+// run on the telemetry pass's output, not before it, and appending keeps
+// every such chain unchanged from before strip-metadata existed --
+// gocv-stabilizer, warp-stabilizer and rotate all still land in front of the
+// implied telemetry pass exactly as they did (see
+// TestImpliedEffects/appended_after_a_stabilizer_too).
+//
+// The one exception is a strip-metadata that follows the HUD
+// (--effect telemetry-hud,strip-metadata, the README's recommended way to
+// publish an anonymised clip with telemetry baked in): appending telemetry at
+// the end would put it AFTER strip-metadata, giving
+// [telemetry-hud, strip-metadata, telemetry] -- strip-metadata before
+// telemetry, which requireStripMetadataNotBeforeTelemetry then rejects
+// outright, even though the user put strip-metadata last exactly as told to.
+// So when a strip-metadata follows the HUD, telemetry is inserted right
+// before that strip-metadata instead of at the end; every other chain shape
+// is byte-identical to plain end-of-chain append. A telemetry the user
+// listed explicitly is left as placed (not duplicated), so an explicit
+// "telemetry,telemetry-hud" ordering is respected (and warned about by
+// warnTelemetryNotLast).
 func impliedEffects(effs []effects.Effect) []effects.Effect {
-	var hasHUD, hasTelemetry bool
-	for _, e := range effs {
+	hudIdx := -1
+	hasTelemetry := false
+	for i, e := range effs {
 		switch e.Name() {
 		case "telemetry-hud":
-			hasHUD = true
+			hudIdx = i // resolveEffects rejects a duplicate effect, so at most one
 		case "telemetry":
 			hasTelemetry = true
 		}
 	}
-	if hasHUD && !hasTelemetry {
+	if hudIdx >= 0 && !hasTelemetry {
 		if tel, err := effects.Get("telemetry"); err == nil { // always registered
-			effs = append(effs, tel)
+			insertAt := len(effs)
+			for i := hudIdx + 1; i < len(effs); i++ {
+				if effs[i].Name() == "strip-metadata" {
+					insertAt = i
+					break
+				}
+			}
+			effs = slices.Insert(effs, insertAt, tel)
 		}
 	}
 	return effs
@@ -301,42 +327,73 @@ func requireRotateDegrees(effectNames []string, degrees int) error {
 	return nil
 }
 
+// requireStripMetadataNotBeforeTelemetry rejects a chain where strip-metadata
+// precedes telemetry or telemetry-hud. Both of those hard-fail when their
+// input carries no creation_time (telemetry.go's Apply, telemetryhud.go's),
+// and strip-metadata's whole job is removing creation_time -- see
+// vidio.MetadataStripArgs. Without this check, that failure would surface
+// only after every earlier effect in the chain has already run -- sometimes
+// minutes of gocv-stabilizer/warp-stabilizer work -- for a combination the
+// effect list alone already rules out.
+//
+// Checked against the RESOLVED, ORDERED chain (post impliedEffects), the same
+// input requireRotateDegrees takes: a --effect telemetry-hud run implies a
+// trailing telemetry pass (see impliedEffects), and this has to see where
+// that pass actually lands, not the raw --effect string.
+func requireStripMetadataNotBeforeTelemetry(effectNames []string) error {
+	stripAt := slices.Index(effectNames, "strip-metadata")
+	if stripAt < 0 {
+		return nil
+	}
+	rest := effectNames[stripAt+1:]
+	if slices.Contains(rest, "telemetry") || slices.Contains(rest, "telemetry-hud") {
+		return fmt.Errorf("--effect strip-metadata must not precede telemetry or telemetry-hud: it removes creation_time, which both need to sync against a FIT file, so they would fail only after this and any earlier effect in the chain has already run -- put strip-metadata last")
+	}
+	return nil
+}
+
 // warnTelemetryNotLast warns when a telemetry pass that MUXES A SUBTITLE TRACK
 // is not the last effect in the chain. What happens to that track depends on
-// what follows, so there are two arms and two sentences:
+// what follows, so there are three arms and three sentences:
 //
 //   - A later RE-ENCODER drops it. Such an effect maps a freshly encoded video
 //     stream plus the source's audio, and a subtitle is neither.
-//   - A later STREAM COPY keeps it but RE-ENABLES it. Telemetry clears the tkhd
-//     track_enabled bit after its mux (see effects.hideSubtitleTrack) so the
-//     machine-readable telemetry does not pop up on screen; ffmpeg's mp4 muxer
-//     sets that bit on every track it writes, so any later remux undoes the
-//     hiding. Measured on ffmpeg 8.1.2 with rotate's own argv: the sbtl trak
-//     goes from tkhd flags 000002 to 000003 (ffprobe DISPOSITION:default 0 to
-//     1), and the DJI telemetry then displays in QuickTime.
+//   - A later effect that DROPS NON-A/V TRACKS BY STREAM SELECTION removes it
+//     too, just without re-encoding anything -- strip-metadata's whole job
+//     (see effects.DropsNonAVTracks and stripArgs' "-map 0:V -map 0:a?").
+//   - A later STREAM COPY that keeps every track (neither of the above) keeps
+//     the subtitle but RE-ENABLES it. Telemetry clears the tkhd track_enabled
+//     bit after its mux (see effects.hideSubtitleTrack) so the machine-readable
+//     telemetry does not pop up on screen; ffmpeg's mp4 muxer sets that bit on
+//     every track it writes, so any later remux undoes the hiding. Measured on
+//     ffmpeg 8.1.2 with rotate's own argv: the sbtl trak goes from tkhd flags
+//     000002 to 000003 (ffprobe DISPOSITION:default 0 to 1), and the DJI
+//     telemetry then displays in QuickTime.
 //
 // Either way it stays a warning, not an error -- the ordering is the user's to
 // choose.
 //
 // # Why this is not the position check it replaced, despite the shape
 //
-// The second arm fires for ANY later effect, which is what the original
-// position-based check did. The difference is that it is now measured and its
-// sentence is what was measured. The original asserted RE-ENCODING while
-// testing POSITION, and claimed a loss -- the location tags -- that does not
-// happen at all: the plain "location" tag survives even a full re-encode
-// because -map_metadata carries it, and the Apple ISO6709 key is carried too
-// now that vidio.MetadataCarryArgs pairs the muxer flag with that map.
-// Restoring "warn whenever telemetry is not last" as a rule of thumb would be
-// a revert; warning because a copy re-enables the track is a different claim
-// that happens to have a similar condition.
+// The third arm fires for ANY later effect that is neither of the first two,
+// which is what the original position-based check did for every later effect
+// full stop. The difference is that it is now measured and its sentence is
+// what was measured. The original asserted RE-ENCODING while testing
+// POSITION, and claimed a loss -- the location tags -- that does not happen at
+// all: the plain "location" tag survives even a full re-encode because
+// -map_metadata carries it, and the Apple ISO6709 key is carried too now that
+// vidio.MetadataCarryArgs pairs the muxer flag with that map. Restoring "warn
+// whenever telemetry is not last" as a rule of thumb would be a revert;
+// warning because a copy re-enables the track is a different claim that
+// happens to have a similar condition.
 //
-// Both arms need a muxed track to talk about, so both are gated on
+// All three arms need a muxed track to talk about, so all are gated on
 // Telemetry.EmbedsSubtitle -- with the default --srt-format none there is
-// nothing to lose or reveal. The re-enable arm is additionally gated on
+// nothing to lose or reveal. The third arm is additionally gated on
 // ShowSubtitle: a user who asked for a visible subtitle gets one, which is not
-// news. Both facts are read off the configured effect rather than re-derived
-// from flags here, so the warning cannot disagree with what the effect does.
+// news. All three facts are read off the configured effect rather than
+// re-derived from flags here, so the warning cannot disagree with what the
+// effect does.
 //
 // It deliberately says nothing about the GPX/SRT SIDECARS. Those are not
 // warned about at all -- validateTelemetrySidecarPlacement rejects them
@@ -352,11 +409,36 @@ func warnTelemetryNotLast(log *logging.Logger, effs []effects.Effect) {
 		return
 	}
 
-	// A re-encoder anywhere later wins over the re-enable arm: a track that is
+	// A re-encoder anywhere later wins over the later arms: a track that is
 	// gone cannot be displayed, whatever the effects around it do.
 	for _, e := range later {
 		if _, reencodes := e.(effects.Reencoder); reencodes {
 			log.Warnf("telemetry is followed by %s, which re-encodes the video and so strips the telemetry subtitle track just muxed into it; put telemetry last in --effect to keep it (the location tags and creation_time survive either way)", e.Name())
+			return
+		}
+	}
+
+	// Checked BEFORE the re-enable arm below, which would otherwise warn that
+	// a track videofx hid is about to "display during playback" when an
+	// effect implementing this marker has just removed the track entirely --
+	// a track that does not exist cannot also be re-enabled.
+	for _, e := range later {
+		if _, drops := e.(effects.DropsNonAVTracks); drops {
+			if e.Name() == "strip-metadata" {
+				// "put telemetry last" (the other two arms' advice) is not
+				// actionable here: requireStripMetadataNotBeforeTelemetry
+				// forbids the REVERSE order too (strip-metadata before
+				// telemetry), so there is nowhere in the chain telemetry
+				// could move to and still keep the subtitle alongside a
+				// strip-metadata pass. strip-metadata's whole job is
+				// dropping this track -- and every location/creation_time
+				// tag the telemetry pass just wrote -- as part of
+				// anonymising the output, so this is expected, not an
+				// ordering mistake to fix by reordering.
+				log.Warnf("telemetry is followed by %s, which removes the subtitle track entirely as part of its own job (dropping every non-video/audio track); there is no reordering that keeps both, since strip-metadata must not precede telemetry either -- drop strip-metadata from the chain if the subtitle needs to survive", e.Name())
+				return
+			}
+			log.Warnf("telemetry is followed by %s, which removes the subtitle track entirely; put telemetry last in --effect to keep it", e.Name())
 			return
 		}
 	}
@@ -1194,6 +1276,9 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := requireRotateDegrees(effectCanonicalNames, rotateDeg); err != nil {
+		return err
+	}
+	if err := requireStripMetadataNotBeforeTelemetry(effectCanonicalNames); err != nil {
 		return err
 	}
 	if err := validateSuffix(suffix); err != nil {
