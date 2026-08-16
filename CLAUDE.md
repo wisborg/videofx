@@ -28,6 +28,37 @@ go test ./internal/stabilize/ -run TestSomething
 `ffmpeg` must be on `PATH`. The `warp-stabilizer` effect additionally needs an ffmpeg
 built with libvidstab; point `VIDEOFX_VIDSTAB_FFMPEG` at it if the default one lacks it.
 
+### Prefer `scripts/vfx` for the repeated jobs
+
+`scripts/vfx` wraps the commands above and exports the two variables itself, so the
+env prefix never appears on a command line:
+
+```
+scripts/vfx gates                              # gofmt + vet + test, one status line each
+scripts/vfx test ./internal/hud/ NoPowerLayout # one package, optional -run pattern
+scripts/vfx diff                               # working diff (incl. untracked) -> .scratch/
+scripts/vfx e2e VIDEO FIT [extra flags]        # telemetry-hud over real footage
+scripts/vfx clean                              # empty .scratch/
+```
+
+**Use it rather than composing the equivalent pipeline by hand**, and do this even
+when the ad-hoc version looks shorter. A pipeline typed fresh each time -- a different
+`grep`, a different redirect, an `echo "exit=$?"` in a new spelling -- is a new command
+string every time, and under a permission allowlist each variant costs a fresh
+approval for a job that was already approved in another dress. Every `vfx` subcommand
+ends with one `vfx <command>: ok|FAILED (exit N)` line and exits with the underlying
+status, so **never append your own `echo "$?"`**.
+
+Anything a session writes -- renders, captured diffs, trimmed clips -- goes in the
+gitignored `.scratch/` at the repo root, never in a per-session temp directory. It is
+the same path in every session, so it can be allowlisted once and cleaned out in one
+step. `scripts/vfx clean` empties it but keeps `.scratch/env`, which is where local
+defaults like `VFX_E2E_VIDEO`/`VFX_E2E_FIT` live.
+
+Scripts under `scripts/` ship in the public repo, so they must not embed private
+paths: take the clip and the FIT activity as **arguments** (or read them from
+`.scratch/env`) rather than hardcoding anything under `test_videos/` or `~/Movies`.
+
 ## Layout
 
 - `cmd/` — the CLI (`cmd/root.go`, `cmd/calibrate.go`) plus developer tools that are

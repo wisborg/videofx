@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+#
+# vfx -- one entrypoint for the jobs this repo runs over and over.
+#
+# Why this exists, since a Makefile is right there: every task here is a
+# COMPOUND shell command -- an env prefix, a pipe, a redirect, a grep for the
+# one line that matters. Run ad hoc, each variation is a new command string,
+# which for an agent working under a permission allowlist means a fresh
+# approval for what is really the same job (the allowlist grew nine separate
+# rules for `echo "$?"` alone before this script existed). Everything compound
+# now happens INSIDE here, so a single rule -- Bash(./scripts/vfx *) -- covers
+# every invocation, whatever the arguments.
+#
+# It is also why the exit code is reported the same way every time: this
+# script prints one final status line and exits with the underlying code, so
+# no caller ever has to bolt on its own `echo "exit=$?"`.
+#
+# Nothing here embeds a private path. The clips and FIT activities live in the
+# gitignored test_videos/, so the e2e subcommand takes them as ARGUMENTS (or
+# from .scratch/env, which is also gitignored). That keeps this file publishable
+# while the private data stays out of the repo -- see CLAUDE.md.
+set -uo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root" || exit 1
+
+# GoCV links against OpenCV through cgo/pkg-config, and Homebrew's `opencv`
+# formula is 5.x, which GoCV does not support. Exporting these here is the
+# whole reason a bare `go test` in this repo fails to find opencv4 -- and the
+# reason no caller should ever have to write them on a command line again.
+export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-/opt/homebrew/opt/opencv@4/lib/pkgconfig}"
+export CGO_CXXFLAGS="${CGO_CXXFLAGS:---std=c++11}"
+
+# SCRATCH is the fixed per-repo scratch directory. Fixed, rather than the
+# harness's per-session temp path, so that one allowlist entry covers it in
+# every session and so stale files from an abandoned run are somewhere obvious
+# to delete rather than scattered under a UUID nobody can attribute.
+SCRATCH="$repo_root/.scratch"
+export SCRATCH
+
+# Optional local defaults (VFX_E2E_VIDEO, VFX_E2E_FIT, ...). Gitignored, so a
+# developer can make `vfx e2e` argument-free without their own file paths
+# reaching the repo.
+[ -f "$SCRATCH/env" ] && . "$SCRATCH/env"
+
+usage() {
+	cat <<'EOF'
+usage: scripts/vfx <command> [args]
+
+  gates                 gofmt + go vet + go test over everything (the
+                        pre-commit check); prints one status line per stage
+  test PKG [PATTERN]    test one package, optionally -run PATTERN
+                        e.g. scripts/vfx test ./internal/hud/ NoPowerLayout
+  build                 make build
+  deps                  make check-deps
+  diff [PATH]           write the working diff (tracked + untracked) to
+                        PATH, default .scratch/review.diff -- hand this to a
+                        reviewer instead of having each one re-derive it
+  e2e VIDEO FIT [ARGS]  run telemetry-hud over VIDEO using FIT, into
+                        .scratch/out, and print the lines worth reading.
+                        VIDEO/FIT default to $VFX_E2E_VIDEO/$VFX_E2E_FIT.
+  scratch               print the scratch directory path
+  clean                 empty the scratch directory
+
+Every command exits with the underlying tool's status and prints a final
+"vfx <command>: ok|FAILED (exit N)" line, so callers never add their own.
+EOF
+}
+
+# finish prints the one status line every subcommand ends with and exits with
+# the code it was handed. Having exactly one of these is the point: an agent
+# that knows this line exists never invents its own `echo "exit=$?"` variant.
+finish() {
+	local cmd="$1" code="$2"
+	if [ "$code" -eq 0 ]; then
+		echo "vfx $cmd: ok"
+	else
+		echo "vfx $cmd: FAILED (exit $code)"
+	fi
+	exit "$code"
+}
+
+cmd_gates() {
+	local rc=0 stage_rc=0 fmt
+
+	fmt="$(gofmt -l . 2>&1)"
+	if [ -n "$fmt" ]; then
+		echo "gofmt: these files need formatting:"
+		echo "$fmt"
+		rc=1
+	else
+		echo "gofmt: clean"
+	fi
+
+	if go vet ./... 2>&1; then
+		echo "vet: clean"
+	else
+		stage_rc=$?
+		echo "vet: FAILED"
+		rc=$stage_rc
+	fi
+
+	# Only the failures and the per-package verdicts are interesting; a full
+	# `go test ./...` transcript here is mostly ffmpeg chatter from the
+	# encode-path tests.
+	if go test ./... 2>&1 | grep -v -e "^ok" -e "no test files"; then
+		echo "test: FAILED (output above)"
+		rc=1
+	else
+		echo "test: all packages ok"
+	fi
+
+	finish gates "$rc"
+}
+
+cmd_test() {
+	local pkg="${1:-}" pattern="${2:-}"
+	if [ -z "$pkg" ]; then
+		echo "vfx test: need a package, e.g. ./internal/hud/" >&2
+		finish test 2
+	fi
+	if [ -n "$pattern" ]; then
+		go test "$pkg" -run "$pattern" 2>&1 | grep -v -e "no test files"
+	else
+		go test "$pkg" 2>&1 | grep -v -e "no test files"
+	fi
+	finish test "${PIPESTATUS[0]}"
+}
+
+cmd_build() {
+	make build
+	finish build $?
+}
+
+cmd_deps() {
+	make check-deps
+	finish deps $?
+}
+
+cmd_diff() {
+	local out="${1:-$SCRATCH/review.diff}"
+	mkdir -p "$(dirname "$out")"
+	{
+		git diff HEAD
+		# Untracked files are part of the change under review and git diff
+		# alone will not show them -- a new _test.go is exactly the kind of
+		# file a reviewer must not miss.
+		local f
+		while IFS= read -r f; do
+			[ -n "$f" ] && git diff --no-index /dev/null "$f"
+		done < <(git ls-files --others --exclude-standard)
+	} >"$out" 2>/dev/null
+	echo "wrote $(wc -l <"$out" | tr -d ' ') lines to $out"
+	finish diff 0
+}
+
+cmd_e2e() {
+	local video="${1:-${VFX_E2E_VIDEO:-}}"
+	local fit="${2:-${VFX_E2E_FIT:-}}"
+	[ $# -ge 1 ] && shift
+	[ $# -ge 1 ] && shift
+
+	if [ -z "$video" ] || [ -z "$fit" ]; then
+		echo "vfx e2e: need VIDEO and FIT (or set VFX_E2E_VIDEO/VFX_E2E_FIT in .scratch/env)" >&2
+		finish e2e 2
+	fi
+	if [ ! -x ./videofx ]; then
+		echo "vfx e2e: ./videofx not built -- run scripts/vfx build" >&2
+		finish e2e 2
+	fi
+
+	mkdir -p "$SCRATCH/out"
+	# Keep the interesting lines: what the HUD decided, and anything that
+	# went wrong. The full run is mostly per-file progress.
+	./videofx --effect telemetry-hud --fit "$fit" --output-dir "$SCRATCH/out" "$@" "$video" 2>&1 |
+		grep -i -e "HUD layout" -e "FAILED" -e "ERROR" -e "WARN"
+	finish e2e "${PIPESTATUS[0]}"
+}
+
+cmd_clean() {
+	if [ -d "$SCRATCH" ]; then
+		# Keep env: it is the developer's local config, not an artifact.
+		find "$SCRATCH" -mindepth 1 -maxdepth 1 ! -name env -exec rm -rf {} +
+		echo "emptied $SCRATCH (kept env)"
+	else
+		echo "$SCRATCH does not exist"
+	fi
+	finish clean 0
+}
+
+case "${1:-}" in
+gates) shift; cmd_gates "$@" ;;
+test) shift; cmd_test "$@" ;;
+build) shift; cmd_build "$@" ;;
+deps) shift; cmd_deps "$@" ;;
+diff) shift; cmd_diff "$@" ;;
+e2e) shift; cmd_e2e "$@" ;;
+scratch) echo "$SCRATCH" ;;
+clean) shift; cmd_clean "$@" ;;
+-h | --help | help | "") usage ;;
+*)
+	echo "vfx: unknown command '${1}'" >&2
+	usage >&2
+	exit 2
+	;;
+esac

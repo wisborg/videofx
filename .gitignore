@@ -10,6 +10,14 @@
 # tested against. Far too large for the repo; keep it locally.
 /test_videos/
 
+# Scratch space for renders, captured diffs and anything else a working
+# session produces. One fixed directory per checkout rather than a per-session
+# temp path, so artifacts are always somewhere obvious to inspect and to
+# delete (`scripts/vfx clean`). `.scratch/env` is the one thing meant to
+# persist: local defaults such as VFX_E2E_VIDEO, which point at private
+# footage and so must not reach the repo.
+/.scratch/
+
 # Local agent definitions. Kept out of the repo because they carry the private
 # measurement history, including the comparison against a named commercial
 # stabilizer that was deliberately stripped from the published text.
