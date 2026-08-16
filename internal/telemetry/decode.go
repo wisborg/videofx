@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"time"
 
 	"github.com/muktihari/fit/decoder"
 	"github.com/muktihari/fit/profile/basetype"
@@ -68,6 +69,7 @@ func Decode(path string) (*Track, error) {
 	sport := ""
 	var totalAscent, totalDescent float64
 	var hasElevationTotals bool
+	var timing ActivityTiming
 	if len(act.Sessions) > 0 {
 		ses := act.Sessions[0]
 		if ses.Sport != typedef.SportInvalid {
@@ -83,7 +85,45 @@ func Decode(path string) (*Track, error) {
 			totalDescent = float64(ses.TotalDescent)
 			hasElevationTotals = true
 		}
+
+		// StartTime is trustworthy; Timestamp is NOT the activity's end on
+		// real Garmin files -- probing both files in test_videos/ found it
+		// decodes EQUAL to StartTime -- so BuildTimerModel derives the end
+		// from Start + TotalElapsed instead. See ActivityTiming's doc
+		// comment.
+		if !ses.StartTime.IsZero() {
+			timing.Start = ses.StartTime
+		}
+		elapsed, timer := ses.TotalElapsedTimeScaled(), ses.TotalTimerTimeScaled()
+		if !invalidFloat(elapsed) && !invalidFloat(timer) {
+			timing.TotalElapsed = time.Duration(elapsed * float64(time.Second))
+			timing.TotalTimer = time.Duration(timer * float64(time.Second))
+			timing.HasTotals = true
+		}
 	}
+
+	// `timer` events (event == EventTimer) are the authoritative record of
+	// where the activity paused: EventTypeStart opens a running interval,
+	// and every flavour of stop -- EventTypeStop, StopAll, StopDisable,
+	// StopDisableAll -- closes one the same way, since all four end the
+	// moving clock; nothing else about their meaning matters here. Other
+	// event types (lap, workout, ...) are ignored.
+	for _, e := range act.Events {
+		if e.Event != typedef.EventTimer {
+			continue
+		}
+		switch e.EventType {
+		case typedef.EventTypeStart:
+			timing.Events = append(timing.Events, TimerEvent{Time: e.Timestamp, Start: true})
+		case typedef.EventTypeStop, typedef.EventTypeStopAll,
+			typedef.EventTypeStopDisable, typedef.EventTypeStopDisableAll:
+			timing.Events = append(timing.Events, TimerEvent{Time: e.Timestamp, Start: false})
+		}
+	}
+	// Same rationale as the Samples sort above: nothing guarantees a FIT
+	// file's Events arrive in order, and BuildTimerModel's pause-pairing
+	// walk depends on them being sorted.
+	sort.Slice(timing.Events, func(i, j int) bool { return timing.Events[i].Time.Before(timing.Events[j].Time) })
 
 	return &Track{
 		SourcePath:         path,
@@ -92,6 +132,7 @@ func Decode(path string) (*Track, error) {
 		TotalAscent:        totalAscent,
 		TotalDescent:       totalDescent,
 		HasElevationTotals: hasElevationTotals,
+		Timing:             timing,
 	}, nil
 }
 

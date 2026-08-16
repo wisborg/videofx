@@ -230,6 +230,15 @@ func BuildScopedActivity(track *Track, sync Sync, scope Scope) *ScopedActivity {
 	// it is in view, so they survive scoping. TotalAscent/TotalDescent and
 	// HasElevationTotals deliberately do not -- see the doc comment.
 	//
+	// Timing DOES survive, and for the same reason SourcePath/Sport do: it
+	// describes the FILE, not how much of it a clip shows. Elapsed/active
+	// time (see BuildTimerModel) are measured from the activity's own start
+	// in every scope, exactly like the wall clock -- the telemetry-hud
+	// effect's Scope doc comment already states that "what neither mode
+	// touches is the wall clock"; Timing is what makes that also true for
+	// --hud-time, which reads a duration since that same fixed instant
+	// rather than a clip-relative one.
+	//
 	// This literal enumerates Track's fields rather than copying the struct and
 	// clearing what must not survive, so a field ADDED to Track later is
 	// silently absent from every clip-scoped run and no test here fails.
@@ -241,6 +250,7 @@ func BuildScopedActivity(track *Track, sync Sync, scope Scope) *ScopedActivity {
 		SourcePath: track.SourcePath,
 		Sport:      track.Sport,
 		Samples:    track.Window(sync.Start, sync.End),
+		Timing:     track.Timing,
 	}
 
 	sa := &ScopedActivity{Scope: scope, Track: scoped}

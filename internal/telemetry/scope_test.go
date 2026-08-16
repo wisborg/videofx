@@ -160,6 +160,55 @@ func TestBuildScopedActivity_ClipModesDropTheDeviceElevationTotals(t *testing.T)
 	}
 }
 
+// TestBuildScopedActivity_TimingSurvivesEveryScope pins the one field
+// BuildScopedActivity's enumerated Track literal must carry through
+// UNCHANGED rather than clear: Timing describes the FILE (like SourcePath/
+// Sport), not how much of it a clip shows, and --hud-time reads it to
+// measure elapsed/active time from the activity's own start regardless of
+// --telemetry-scope (see scope.go's comment on the literal).
+//
+// This is the test that catches the field being silently dropped -- e.g. a
+// future edit to the enumerated literal that adds a new Track field above
+// Timing and forgets to carry this one, or a copy-paste that clears it the
+// way HasElevationTotals is deliberately cleared just above it. Without this
+// test, that mistake would make every clip-scoped --hud-time elapsed render
+// silently clip-relative (BuildTimerModel falling back to the scoped track's
+// own first/last sample) with no error and no warning; nothing else in this
+// package or in internal/effects builds a TimerModel from a scoped Track to
+// notice from the other side.
+func TestBuildScopedActivity_TimingSurvivesEveryScope(t *testing.T) {
+	track := scopeTrack(1501, 10)
+	track.Timing = ActivityTiming{
+		Start:        scopeBase,
+		TotalElapsed: 1500 * time.Second,
+		TotalTimer:   1400 * time.Second,
+		HasTotals:    true,
+		Events: []TimerEvent{
+			{Time: scopeBase, Start: true},
+			{Time: scopeBase.Add(1500 * time.Second), Start: false},
+		},
+	}
+
+	for _, scope := range []Scope{ScopeActivity, ScopeClipRebased, ScopeClipAbsolute} {
+		t.Run(scope.String(), func(t *testing.T) {
+			got := BuildScopedActivity(track, scopeSync(1020, 1240), scope)
+
+			if !got.Track.Timing.Start.Equal(track.Timing.Start) {
+				t.Errorf("Timing.Start = %v, want %v", got.Track.Timing.Start, track.Timing.Start)
+			}
+			if got.Track.Timing.TotalElapsed != track.Timing.TotalElapsed ||
+				got.Track.Timing.TotalTimer != track.Timing.TotalTimer ||
+				got.Track.Timing.HasTotals != track.Timing.HasTotals {
+				t.Errorf("Timing totals = %+v, want %+v", got.Track.Timing, track.Timing)
+			}
+			if len(got.Track.Timing.Events) != len(track.Timing.Events) {
+				t.Errorf("Timing.Events has %d entries, want %d -- the clip's timer events must be the WHOLE activity's, not a subset",
+					len(got.Track.Timing.Events), len(track.Timing.Events))
+			}
+		})
+	}
+}
+
 // TestBuildScopedActivity_ClipRebasedStartsDistanceAtZero derives its expected
 // numbers from the fixture, not from the implementation.
 //

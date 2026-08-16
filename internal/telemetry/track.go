@@ -201,6 +201,13 @@ type Track struct {
 	// per-sample sum. See BuildElevationModel.
 	TotalAscent, TotalDescent float64
 	HasElevationTotals        bool
+
+	// Timing is the FIT Session's start time, total-elapsed/timer figures and
+	// timer start/stop events -- a property of the FILE, like SourcePath/
+	// Sport, not of any window a clip cuts out of it. See ActivityTiming and
+	// BuildTimerModel, which resolves this into the numbers --hud-time
+	// reads.
+	Timing ActivityTiming
 }
 
 // Len returns the number of Samples in the Track.

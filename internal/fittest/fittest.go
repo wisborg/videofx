@@ -41,13 +41,32 @@ import (
 // Options controls the generated activity. The zero value is not useful; start
 // from DefaultOptions.
 type Options struct {
-	// Start is the first record's timestamp, and Count the number of records
-	// written at one per second -- so the file's coverage runs from Start to
-	// Start + (Count-1) seconds. One-second records matter: telemetry's
-	// DefaultMaxGap is 3s, and a sparser file would refuse to interpolate and
-	// yield empty sidecars.
+	// Start is the first record's timestamp, and Count the WALL-CLOCK span in
+	// seconds -- the file's coverage runs from Start to Start + (Count-1)
+	// seconds, one record per second, EXCEPT for any second Pauses removes.
+	// len(Samples) after Decode therefore equals Count only when Pauses is
+	// empty; once it is set, len(Samples) < Count. One-second records matter:
+	// telemetry's DefaultMaxGap is 3s, and a sparser file would refuse to
+	// interpolate and yield empty sidecars.
 	Start time.Time
 	Count int
+
+	// Pauses are stop/resume intervals -- offsets from Start -- for a
+	// fixture whose recording device auto-paused partway through, bracketed
+	// inside the baseline `timer` start/stop_all pair every fixture already
+	// carries (see Build). For each Pause, Build writes a `timer` stop event
+	// at Start+p.Start and a `timer` start event at Start+p.End, OMITS every
+	// record that would otherwise land in [Start+p.Start, Start+p.End) -- a
+	// device writes none while it isn't running, which also means
+	// telemetry.Track.At returns no sample there, exercising the
+	// placeholder path -- and reduces the session's TotalTimerTime by the
+	// sum of the pauses' durations (TotalElapsedTime, the wall-clock span,
+	// is unaffected: it counts the pause too).
+	//
+	// Pauses must already be sorted ascending and non-overlapping, and each
+	// must fall within [0, (Count-1)*time.Second) -- Build does not validate
+	// either.
+	Pauses []Pause
 
 	// StartLat, StartLon are where the fabricated course begins, in degrees.
 	StartLat, StartLon float64
@@ -119,6 +138,54 @@ type Options struct {
 	PoweredRecords int
 }
 
+// Pause is one stop/resume interval within a fixture, as offsets from
+// Options.Start; see Options.Pauses.
+type Pause struct {
+	Start, End time.Duration
+}
+
+// inAnyPause reports whether ts falls in [start+p.Start, start+p.End) for any
+// p in pauses.
+func inAnyPause(ts, start time.Time, pauses []Pause) bool {
+	for _, p := range pauses {
+		ps, pe := start.Add(p.Start), start.Add(p.End)
+		if !ts.Before(ps) && ts.Before(pe) {
+			return true
+		}
+	}
+	return false
+}
+
+// buildTimerEvents returns the `timer` events for opts: a start at Start, a
+// stop/start pair bracketing each Pause (in the order Options.Pauses
+// documents them: sorted, non-overlapping), and a closing stop_all at end.
+// This is the exact shape (a bare start...stop_all pair, nothing between)
+// both real files probed for this feature carry when Pauses is empty.
+func buildTimerEvents(opts Options, end time.Time) []*mesgdef.Event {
+	events := make([]*mesgdef.Event, 0, 2+2*len(opts.Pauses))
+	events = append(events, mesgdef.NewEvent(nil).
+		SetTimestamp(opts.Start).
+		SetEvent(typedef.EventTimer).
+		SetEventType(typedef.EventTypeStart))
+	for _, p := range opts.Pauses {
+		events = append(events,
+			mesgdef.NewEvent(nil).
+				SetTimestamp(opts.Start.Add(p.Start)).
+				SetEvent(typedef.EventTimer).
+				SetEventType(typedef.EventTypeStop),
+			mesgdef.NewEvent(nil).
+				SetTimestamp(opts.Start.Add(p.End)).
+				SetEvent(typedef.EventTimer).
+				SetEventType(typedef.EventTypeStart),
+		)
+	}
+	events = append(events, mesgdef.NewEvent(nil).
+		SetTimestamp(end).
+		SetEvent(typedef.EventTimer).
+		SetEventType(typedef.EventTypeStopAll))
+	return events
+}
+
 // DeveloperFieldRaw returns the raw, unscaled value Build writes into record
 // i's developer field. It is exported so a test can state the expected decoded
 // value as raw/scale - offset without duplicating the generator's arithmetic.
@@ -160,6 +227,18 @@ func Build(opts Options) ([]byte, error) {
 
 	end := opts.Start.Add(time.Duration(opts.Count-1) * time.Second)
 
+	// TotalElapsedTime is the wall-clock span (Count-1 seconds, pauses
+	// included); TotalTimerTime is that minus every Pause's duration. Both
+	// are written on EVERY fixture -- matching what the probed real files in
+	// test_videos/ contain -- so the primary --hud-time code path is
+	// exercised by a fixture in the repo, not only by a file that isn't.
+	elapsedSeconds := float64(opts.Count - 1)
+	var pausedSeconds float64
+	for _, p := range opts.Pauses {
+		pausedSeconds += (p.End - p.Start).Seconds()
+	}
+	timerSeconds := elapsedSeconds - pausedSeconds
+
 	act := &filedef.Activity{
 		FileId: *mesgdef.NewFileId(nil).
 			SetType(typedef.FileActivity).
@@ -181,8 +260,16 @@ func Build(opts Options) ([]byte, error) {
 				SetEvent(typedef.EventSession).
 				SetEventType(typedef.EventTypeStop).
 				SetTotalAscent(opts.TotalAscent).
-				SetTotalDescent(opts.TotalDescent),
+				SetTotalDescent(opts.TotalDescent).
+				SetTotalElapsedTimeScaled(elapsedSeconds).
+				SetTotalTimerTimeScaled(timerSeconds),
 		},
+		// `timer` events, straight out of what a Garmin auto-pause writes:
+		// a start opening the session, a stop/start pair bracketing every
+		// Pause, and a closing stop_all -- matching the exact event-type
+		// pattern (start ... stop_all, nothing else when Pauses is empty)
+		// probed against both real files in test_videos/.
+		Events: buildTimerEvents(opts, end),
 	}
 
 	if opts.DeveloperField != "" {
@@ -214,8 +301,18 @@ func Build(opts Options) ([]byte, error) {
 	// north so no longitude convergence correction is needed.
 	const metresPerDegreeLat = 111320.0
 
-	act.Records = make([]*mesgdef.Record, opts.Count)
-	for i := range act.Records {
+	act.Records = make([]*mesgdef.Record, 0, opts.Count)
+	for i := 0; i < opts.Count; i++ {
+		ts := opts.Start.Add(time.Duration(i) * time.Second)
+		if inAnyPause(ts, opts.Start, opts.Pauses) {
+			// A device writes no records while its timer isn't running, so
+			// this second is skipped entirely rather than written with
+			// placeholder/repeated values -- which is also what exercises
+			// telemetry.Track.At's own placeholder path (no sample) for a
+			// caller reading this instant.
+			continue
+		}
+
 		t := float64(i)
 		distance := opts.SpeedMPS * t
 
@@ -226,8 +323,8 @@ func Build(opts Options) ([]byte, error) {
 		elevation := 30 + 20*math.Sin(t/900)
 		cadence := 82 + 3*math.Sin(t/300)
 
-		act.Records[i] = mesgdef.NewRecord(nil).
-			SetTimestamp(opts.Start.Add(time.Duration(i) * time.Second)).
+		rec := mesgdef.NewRecord(nil).
+			SetTimestamp(ts).
 			SetPositionLatDegrees(opts.StartLat + distance/metresPerDegreeLat).
 			SetPositionLongDegrees(opts.StartLon).
 			SetDistanceScaled(distance).
@@ -241,16 +338,18 @@ func Build(opts Options) ([]byte, error) {
 			// zero) field value; leaving the call out entirely is what keeps
 			// Record.Power at FIT's invalid sentinel and Decode's HasPower
 			// false -- see PowerWatts' doc comment.
-			act.Records[i].SetPower(opts.PowerWatts)
+			rec.SetPower(opts.PowerWatts)
 		}
 
 		if opts.DeveloperField != "" {
-			act.Records[i].SetDeveloperFields(proto.DeveloperField{
+			rec.SetDeveloperFields(proto.DeveloperField{
 				DeveloperDataIndex: 0,
 				Num:                devFieldNum,
 				Value:              proto.Uint16(DeveloperFieldRaw(i)),
 			})
 		}
+
+		act.Records = append(act.Records, rec)
 	}
 
 	fit := act.ToFIT(nil)
