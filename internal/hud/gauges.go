@@ -14,20 +14,50 @@ import (
 // tier, since it needs the same smoothing.) It anchors at a bottom corner and
 // stacks upward, so the readout sits above its anchor with the first metric on
 // top -- matching the reference layout.
-type MetricsGauge struct{}
+type MetricsGauge struct {
+	// OmitPower drops the power line from the readout entirely -- not blanked
+	// in place, removed from the composed list -- so the bottom-anchored stack
+	// in Draw closes the gap DOWNWARD on its own (the rows above power's old
+	// slot shift down into it; the rows below are unaffected): see lines and
+	// NoPowerLayout.
+	//
+	// Named for the negative sense DELIBERATELY: the zero value, MetricsGauge{},
+	// must keep drawing the power line, because that is what every layout drew
+	// before this field existed and what a bare struct literal -- including
+	// hud_bench_test.go's -- still gets without being updated.
+	OmitPower bool
+}
 
 func (MetricsGauge) Name() string { return "metrics" }
 
-func (MetricsGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
+// lines composes the readout's rows, top to bottom, before Draw stacks them
+// bottom-anchored. Extracted to its own method so a test can assert the
+// omitted line is exactly the power line dropped out of the same order,
+// rather than a second, hand-restated list that could silently drift from
+// this one.
+//
+// The power line is left OUT of the composition rather than composed and
+// then spliced out by index: a row inserted above it in this function moves
+// with it automatically, where an index-based removal would silently start
+// dropping the wrong row.
+func (g MetricsGauge) lines(f Frame) []string {
 	s := f.Sample
 	lines := []string{
 		optU8(f.HasSample && s.HasHeartRate, s.HeartRate, "bpm"),
 		cadenceLine(f.HasSample && s.HasCadence, s.Cadence),
-		powerLine(f),
+	}
+	if !g.OmitPower {
+		lines = append(lines, powerLine(f))
+	}
+	return append(lines,
 		inclineLine(f),
 		paceLine(f.HasSample && s.HasSpeed, s.Speed),
 		speedLine(f.HasSample && s.HasSpeed, s.Speed),
-	}
+	)
+}
+
+func (g MetricsGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
+	lines := g.lines(f)
 
 	px := r.FontPx(f)
 	lineH := px * 1.35

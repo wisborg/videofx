@@ -481,6 +481,7 @@ func processOne(ctx context.Context, job Job, finalPath string, cfg ProcessorCon
 			OutputPath: out,
 			Strength:   cfg.Strength,
 			Log:        jobLog,
+			RunLog:     cfg.Log,
 			Progress:   cfg.Progress,
 		}); applyErr != nil {
 			// Name the failing effect: in a chain "gocv-stabilizer: ..." is

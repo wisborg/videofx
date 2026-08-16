@@ -22,6 +22,7 @@ import (
 	"videofx/internal/cliutil"
 	"videofx/internal/effects"
 	"videofx/internal/fittest"
+	"videofx/internal/hud"
 	"videofx/internal/logging"
 	"videofx/internal/progress"
 	"videofx/internal/stabilize"
@@ -948,10 +949,13 @@ func TestValidateHUDLayout(t *testing.T) {
 	}{
 		{"auto", false},
 		{"default", false},
+		{"default-no-power", false},
 		{"vertical", false},
 		{"", true},
 		{"portrait", true},
-		{"Vertical", true}, // case-sensitive
+		{"Vertical", true},        // case-sensitive
+		{"default-nopower", true}, // near-miss: missing the hyphen
+		{"no-power", true},        // near-miss: missing the "default-" prefix
 	}
 	for _, c := range cases {
 		t.Run(c.mode, func(t *testing.T) {
@@ -960,6 +964,163 @@ func TestValidateHUDLayout(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHUDLayoutSpellings_EveryLayoutTheHUDShipsIsAValueTheCLIForces binds the
+// two lists that spell the layout names -- hudLayoutModes (the CLI's
+// accepted set) and internal/hud's layout constructors -- in the HUD-TO-CLI
+// direction: every layout internal/hud ships must be a name --hud-layout
+// accepts, and forcing that name through hud.SelectLayout must return exactly
+// that layout rather than silently falling through to "auto". Nothing in the
+// type system holds the two lists together, and drift in THIS direction is
+// invisible any other way it could be caught: a layout added to internal/hud
+// with no matching hudLayoutModes entry simply has no way for a user to ask
+// for it, and nothing errors -- --hud-layout just never offers it.
+//
+// It cannot see the opposite drift (a hudLayoutModes entry with no matching
+// internal/hud layout, which falls through to SelectLayout's "auto" default):
+// this test only ever walks constructors internal/hud actually exports, so an
+// orphaned map entry never appears in its loop at all. That direction is
+// TestHUDLayoutModes_EveryAcceptedValueForcesALayoutOrIsAuto below. Neither
+// test reads the two hand-written PROSE copies of the set (the rejection
+// message, the flag help) at all; those are
+// TestHUDLayoutModes_TheRejectionMessageAndFlagHelpListTheSameSet's job.
+//
+// The check that carries the weight here is the second half, below: forcing a
+// layout by name must return THAT layout on all four orientation/omitPower
+// combinations. A forced mode that only happens to match on one combination
+// -- which is all a fall-through to "auto" needs to look right -- fails on
+// the other three. TestValidateHUDLayout above is a different axis again: it
+// pins that near-miss spellings are rejected rather than quietly accepted.
+func TestHUDLayoutSpellings_EveryLayoutTheHUDShipsIsAValueTheCLIForces(t *testing.T) {
+	const landscapeW, landscapeH = 3840, 2160
+	const portraitW, portraitH = 2160, 3840
+
+	// Every layout internal/hud ships. A new one added there without being
+	// added here is out of this test's reach -- but a new one added there and
+	// forgotten in validateHUDLayout, or in SelectLayout's switch, is exactly
+	// what it catches once the constructor is listed.
+	for _, l := range []hud.Layout{hud.DefaultLayout(), hud.VerticalLayout(), hud.NoPowerLayout()} {
+		t.Run(l.Name, func(t *testing.T) {
+			if l.Name == "" {
+				t.Fatal("a shipped layout has an empty Name; --hud-layout could not name it and the telemetry-hud log line would report nothing")
+			}
+			if err := validateHUDLayout(l.Name); err != nil {
+				t.Errorf("--hud-layout %q is rejected by the CLI, but internal/hud ships a layout by that name: %v", l.Name, err)
+			}
+			for _, dim := range []struct {
+				name          string
+				width, height int
+			}{
+				{"landscape", landscapeW, landscapeH},
+				{"portrait", portraitW, portraitH},
+			} {
+				for _, omitPower := range []bool{false, true} {
+					got := hud.SelectLayout(l.Name, dim.width, dim.height, omitPower)
+					if got.Name != l.Name {
+						t.Errorf("hud.SelectLayout(%q, %s, omitPower=%v) returned %q -- an explicitly named layout must win over orientation and data; a name with no case in SelectLayout falls through to auto and silently ignores the flag",
+							l.Name, dim.name, omitPower, got.Name)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestHUDLayoutModes_EveryAcceptedValueForcesALayoutOrIsAuto is the other
+// direction from TestHUDLayoutSpellings_EveryLayoutTheHUDShipsIsAValueTheCLIForces
+// above: that test walks internal/hud's layouts and checks the CLI accepts
+// each one's name; this one walks hudLayoutModes -- the CLI's own accepted
+// set -- and checks hud.SelectLayout actually has a case for each one, rather
+// than silently falling through to its "auto" default. "auto" itself is
+// exempted from the per-name check: it does not force a single layout by
+// name (TestSelectLayout_ThePowerAxisOnlyRefinesTheLandscapeBranch already
+// covers what it resolves to on each axis), so it is only required to be a
+// member of hudLayoutModes, which the map literal itself guarantees.
+func TestHUDLayoutModes_EveryAcceptedValueForcesALayoutOrIsAuto(t *testing.T) {
+	const landscapeW, landscapeH = 3840, 2160
+
+	for mode := range hudLayoutModes {
+		if mode == "auto" {
+			continue
+		}
+		t.Run(mode, func(t *testing.T) {
+			if got := hud.SelectLayout(mode, landscapeW, landscapeH, false); got.Name != mode {
+				t.Errorf("hud.SelectLayout(%q, ...).Name = %q -- --hud-layout accepts %q but SelectLayout has "+
+					"no case for it, so it silently fell through to the auto default", mode, got.Name, mode)
+			}
+		})
+	}
+}
+
+// TestHUDLayoutModes_TheRejectionMessageAndFlagHelpListTheSameSet closes the
+// vocabulary's remaining unbound copies. hudLayoutModes is the accepted set,
+// and the two tests above bind it to internal/hud in both directions -- but
+// the two places that SPELL that set out for a user are hand-written prose
+// neither of them reads:
+//
+//   - validateHUDLayout's error message, which lists the valid values in a
+//     fixed order precisely because ranging over a map would randomize it;
+//   - the --hud-layout flag's own help text.
+//
+// Adding a value to the map and forgetting either was verified to leave the
+// cmd package green: dropping "default-no-power" from the message alone
+// breaks no existing test, and the user who mistypes the flag is then told
+// the mode they wanted does not exist. Neither copy can be derived from the
+// map without giving up the fixed order (the message) or the per-value prose
+// (the help), so they are bound by test instead.
+//
+// The set is compared as a SET, not by substring: "default" is a prefix of
+// "default-no-power", so a containment check would report the shorter one as
+// present whenever the longer one is, which is exactly the drift most likely
+// to happen here.
+func TestHUDLayoutModes_TheRejectionMessageAndFlagHelpListTheSameSet(t *testing.T) {
+	t.Run("the rejection message", func(t *testing.T) {
+		err := validateHUDLayout("no-such-layout")
+		if err == nil {
+			t.Fatal("validateHUDLayout accepted an unknown mode")
+		}
+		msg := err.Error()
+		_, list, ok := strings.Cut(msg, "; use ")
+		if !ok {
+			t.Fatalf("the message %q does not have the \"...; use <values>\" shape this test parses; "+
+				"if the wording changed on purpose, update the parse here", msg)
+		}
+		// "auto, default, default-no-power, or vertical" -> the four words.
+		listed := map[string]bool{}
+		for _, f := range strings.Split(list, ",") {
+			listed[strings.TrimPrefix(strings.TrimSpace(f), "or ")] = true
+		}
+
+		for mode := range hudLayoutModes {
+			if !listed[mode] {
+				t.Errorf("--hud-layout accepts %q but the rejection message does not list it (%q); "+
+					"a user who mistypes the flag is told a valid mode does not exist", mode, msg)
+			}
+		}
+		for mode := range listed {
+			if _, ok := hudLayoutModes[mode]; !ok {
+				t.Errorf("the rejection message offers %q but validateHUDLayout rejects it (%q); "+
+					"the message names a value the flag does not accept", mode, msg)
+			}
+		}
+	})
+
+	t.Run("the flag help", func(t *testing.T) {
+		f := NewRootCmd().Flags().Lookup("hud-layout")
+		if f == nil {
+			t.Fatal("there is no --hud-layout flag")
+		}
+		// The help quotes each mode ("auto", "default-no-power", ...), and
+		// the quotes are what make this check immune to the prefix problem:
+		// `"default"` does not appear inside `"default-no-power"`.
+		for mode := range hudLayoutModes {
+			if !strings.Contains(f.Usage, `"`+mode+`"`) {
+				t.Errorf("--hud-layout accepts %q but the flag's help never names it as %[2]q; help text:\n%s",
+					mode, `"`+mode+`"`, f.Usage)
+			}
+		}
+	})
 }
 
 // genClipAt writes a short clip carrying a specific creation_time, so an
@@ -1300,6 +1461,54 @@ func TestValidatePowerSource(t *testing.T) {
 				t.Errorf("validatePowerSource(%q) = %v, wantErr %v", c.mode, err, c.wantErr)
 			}
 		})
+	}
+}
+
+// TestPowerSourceModes_RoundTripsEveryPowerSourceSpelling binds the two
+// tables that spell "auto"/"stryd"/"native": powerSourceModes here, and
+// telemetry.PowerSource.String() in the other package -- exactly as
+// TestTelemetryScopeModes_RoundTripsEveryScopeSpelling binds Scope's two
+// tables, and for the same reason: nothing in the type system connects them,
+// so renaming a value in one leaves the other -- the flag the user types, or
+// the telemetry-hud log line naming the layout decision -- saying the old
+// word, with every existing test still green.
+//
+// See that test's doc comment for what the scan does and does not catch (a
+// value missing from BOTH tables is invisible to it and shows up instead as
+// "unknown" in a log line).
+func TestPowerSourceModes_RoundTripsEveryPowerSourceSpelling(t *testing.T) {
+	// 32 is arbitrary but far past any plausible count; PowerSource is a
+	// small hand-written enum, not a namespace.
+	const scan = 32
+
+	named := 0
+	for i := range scan {
+		s := telemetry.PowerSource(i)
+		name := s.String()
+		if name == "unknown" {
+			continue // not a defined power source
+		}
+		named++
+		got, ok := powerSourceModes[name]
+		if !ok {
+			t.Errorf("telemetry.PowerSource(%d) spells itself %q, but --power-source does not accept that value; add it to powerSourceModes and to the flag's help text", i, name)
+			continue
+		}
+		if got != s {
+			t.Errorf("powerSourceModes[%q] = PowerSource(%d), want PowerSource(%d): the CLI maps that word to a different source than the one that spells itself with it", name, got, s)
+		}
+	}
+	if named != len(powerSourceModes) {
+		t.Errorf("telemetry defines %d named power sources but --power-source accepts %d values; the two vocabularies have drifted apart", named, len(powerSourceModes))
+	}
+
+	// The other direction, which the count alone does not prove: an accepted
+	// value must be spelled back identically, or a log line reporting the
+	// source would name something the user cannot type.
+	for name, s := range powerSourceModes {
+		if s.String() != name {
+			t.Errorf("--power-source %q selects a source that spells itself %q; a log line would name a value the flag does not accept", name, s)
+		}
 	}
 }
 

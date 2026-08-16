@@ -2,19 +2,21 @@
 // RGBA overlays, to be composited onto a video (see internal/vidio's
 // OverlayEncoder and the telemetry-hud effect).
 //
-// The design is built for future customization, though only two fixed
-// arrangements ship today (DefaultLayout and VerticalLayout, chosen by
-// --hud-layout or by clip orientation): every gauge is a self-drawing Gauge
-// placed by a Placement (an Anchor + a fractional offset + an Enabled flag) in
-// a Layout. Moving a gauge to another corner, or switching it off, is then
-// just editing its Placement -- no gauge or renderer change.
+// The design is built for future customization, though only three fixed
+// arrangements ship today (DefaultLayout, VerticalLayout, and NoPowerLayout --
+// DefaultLayout with its power line dropped -- chosen by --hud-layout or by
+// clip orientation/data): every gauge is a self-drawing Gauge placed by a
+// Placement (an Anchor + a fractional offset + an Enabled flag) in a Layout.
+// Moving a gauge to another corner, or switching it off, is then just editing
+// its Placement -- no gauge or renderer change.
 //
 // Nothing in the CLI reaches an individual Placement: --hud-layout selects
-// between the two whole layouts and nothing finer, so a user cannot turn one
-// gauge off. Both layouts include the course map, which draws the whole route,
-// and the default one includes heart rate -- worth keeping in mind when
-// changing this package, because those are burned into the pixels and cannot
-// be removed downstream the way a metadata tag can.
+// between whole layouts and nothing finer, so a user cannot turn one gauge off
+// (NoPowerLayout drops one LINE of one gauge's readout, not a gauge). All three
+// layouts include the course map, which draws the whole route, and both
+// landscape layouts include heart rate -- worth keeping in mind when changing
+// this package, because those are burned into the pixels and cannot be removed
+// downstream the way a metadata tag can.
 package hud
 
 import (
@@ -176,6 +178,17 @@ type Placement struct {
 
 // Layout is the full HUD arrangement.
 type Layout struct {
+	// Name identifies the layout for diagnostics (the telemetry-hud effect
+	// logs it, since a layout chosen from data -- --hud-layout auto reading
+	// whether the FIT carries power -- must announce itself or a wrong
+	// --power-source silently reshapes the HUD and exits 0). It is set by the
+	// constructor that built the layout and never by a caller -- which means
+	// a Layout built directly as a struct literal, bypassing DefaultLayout/
+	// VerticalLayout/NoPowerLayout, carries no Name. That is reachable only
+	// from a programmatic caller (TelemetryHUD.Layout; --hud-layout cannot
+	// produce one), and Apply's log line falls back to "custom" for it rather
+	// than printing an empty string.
+	Name string
 	// Margin insets every anchor from the frame edge, as a fraction of the
 	// smaller frame dimension.
 	Margin float64
@@ -186,11 +199,14 @@ type Layout struct {
 }
 
 // DefaultLayout is the landscape arrangement: all seven gauges, with the
-// metric readout lower-left and the time/date upper-right. It is the fuller of
-// the two layouts and the one that includes heart rate; VerticalLayout is the
-// portrait alternative.
+// metric readout lower-left and the time/date upper-right. It is the fuller
+// of this and VerticalLayout, the portrait alternative, and the one that
+// includes heart rate. (NoPowerLayout is not a third point on this axis: it
+// is this same seven-gauge layout with one line of one gauge dropped, not a
+// third distinct arrangement -- see NoPowerLayout.)
 func DefaultLayout() Layout {
 	return Layout{
+		Name:      "default",
 		Margin:    0.02,
 		FontScale: 0.030,
 		Placements: []Placement{
@@ -214,6 +230,7 @@ func DefaultLayout() Layout {
 // the narrow width.
 func VerticalLayout() Layout {
 	return Layout{
+		Name:      "vertical",
 		Margin:    0.02,
 		FontScale: 0.045,
 		Placements: []Placement{
@@ -224,19 +241,76 @@ func VerticalLayout() Layout {
 	}
 }
 
-// SelectLayout returns the HUD layout for mode and the frame's dimensions:
-// "vertical" and "default" force those layouts; "auto" (the default) picks the
-// vertical layout for portrait frames (height > width) and the default layout
-// otherwise. An unknown mode is treated as "auto".
-func SelectLayout(mode string, width, height int) Layout {
+// NoPowerLayout is DefaultLayout with the metrics readout's power line
+// dropped, for an activity recorded without a power sensor. It is DERIVED
+// from DefaultLayout rather than restated, so any future change to the
+// landscape arrangement -- a moved anchor, an added gauge -- carries into
+// this layout automatically instead of needing a second, driftable edit.
+//
+// Only the metrics placement's Gauge changes (to a MetricsGauge with
+// OmitPower set); the placement's Anchor/DX/DY/Enabled, and everything about
+// the other six placements, are untouched. The gap above the dropped line
+// closes because MetricsGauge.Draw's stack is bottom-anchored, not because
+// anything here repositions it -- see that Draw's doc comment.
+func NoPowerLayout() Layout {
+	l := DefaultLayout()
+	l.Name = "default-no-power"
+	for i, p := range l.Placements {
+		if mg, ok := p.Gauge.(MetricsGauge); ok {
+			mg.OmitPower = true
+			l.Placements[i].Gauge = mg
+		}
+	}
+	return l
+}
+
+// HasMetricsReadout reports whether l draws the metrics block at all -- the
+// stacked heart-rate/cadence/power/incline/pace/speed readout, the only place
+// a power reading ever appears on screen.
+//
+// It answers a question that looks like it should be about OmitPower and is
+// not: VerticalLayout carries no MetricsGauge whatsoever, so for a portrait
+// clip there is no power line to keep OR to drop, and --power-source changes
+// nothing about what renders. The telemetry-hud effect uses this to decide
+// whether naming the power source alongside the layout tells the reader
+// something true; announcing "power source: stryd" next to a layout that
+// cannot display power would be noise pointing at a setting with no effect.
+func (l Layout) HasMetricsReadout() bool {
+	for _, p := range l.Placements {
+		if _, ok := p.Gauge.(MetricsGauge); ok && p.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
+// SelectLayout returns the HUD layout for mode, the frame's dimensions, and
+// whether the activity carries no power reading for the caller's chosen
+// --power-source: "vertical" and "default" force those layouts, "default-no-
+// power" forces NoPowerLayout on any orientation (mirroring how "default"
+// forces the landscape layout onto a portrait frame), and "auto" (the
+// default) picks the vertical layout for portrait frames (height > width),
+// else the default layout or -- when omitPower says the FIT has nothing to
+// show there -- NoPowerLayout. An unknown mode is treated as "auto".
+//
+// omitPower is consulted ONLY in the auto branch, and only after the
+// portrait test: an explicit "default"/"vertical"/"default-no-power" always
+// wins over what the data says, the same way an explicit mode already wins
+// over the frame's aspect.
+func SelectLayout(mode string, width, height int, omitPower bool) Layout {
 	switch mode {
 	case "vertical":
 		return VerticalLayout()
 	case "default":
 		return DefaultLayout()
+	case "default-no-power":
+		return NoPowerLayout()
 	default: // "auto" (and anything unexpected)
-		if height > width {
+		if IsPortrait(width, height) {
 			return VerticalLayout()
+		}
+		if omitPower {
+			return NoPowerLayout()
 		}
 		return DefaultLayout()
 	}
@@ -294,7 +368,16 @@ func (r *Renderer) FontPx(f Frame) float64 {
 }
 
 // isPortrait reports whether f is taller than it is wide (a vertical video).
-func isPortrait(f Frame) bool { return f.Height > f.Width }
+// IsPortrait reports whether a frame of these dimensions is vertical. It is
+// the ONE definition of that rule: SelectLayout's auto branch, the frame-level
+// isPortrait below, and the telemetry-hud effect's log line all read it, so a
+// clip cannot be portrait for the layout choice and landscape for the message
+// describing that choice. Square counts as landscape, which is what the
+// original `height > width` test did and what the default layout's wider
+// arrangement suits.
+func IsPortrait(width, height int) bool { return height > width }
+
+func isPortrait(f Frame) bool { return IsPortrait(f.Width, f.Height) }
 
 // orient returns portrait when f is a vertical frame, else landscape -- used
 // by the width-sensitive gauges to take up more of the narrow width on a

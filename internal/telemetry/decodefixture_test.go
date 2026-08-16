@@ -217,6 +217,66 @@ func TestDecode_ReadsSessionMetadata(t *testing.T) {
 	}
 }
 
+// TestDecode_ResolvesNativePowerFromPowerWatts covers the OTHER half of the
+// power picture from TestDecode_ResolvesDeveloperFieldsByName: the standard
+// FIT Record.power field, via fittest.Options.PowerWatts, as opposed to a
+// Stryd developer field.
+//
+// The second half pins the assumption telemetry-hud's --hud-layout auto (and
+// this fixture's own doc comment) depends on: a fixture built from
+// DefaultOptions -- no PowerWatts, no DeveloperField -- decodes to samples
+// with HasPower false under every PowerSource, i.e. Decode does not invent a
+// power reading where the fixture wrote none. Without this half,
+// TestTrackHasPower_FollowsTheSameResolutionTheGaugeDoes's unit-level
+// guarantee would rest on an untested assumption about what the generator
+// and the decoder agree an "unpowered" fixture looks like.
+func TestDecode_ResolvesNativePowerFromPowerWatts(t *testing.T) {
+	t.Run("PowerWatts set", func(t *testing.T) {
+		const watts = 215
+		opts := fixtureOptions()
+		opts.PowerWatts = watts
+
+		track, err := Decode(buildFixture(t, opts))
+		if err != nil {
+			t.Fatalf("Decode: %v", err)
+		}
+		if track.Len() != opts.Count {
+			t.Fatalf("Len() = %d, want %d", track.Len(), opts.Count)
+		}
+		for i, s := range track.Samples {
+			if !s.HasPower {
+				t.Fatalf("Samples[%d].HasPower = false, want true", i)
+			}
+			if s.Power != watts {
+				t.Errorf("Samples[%d].Power = %d, want %d", i, s.Power, watts)
+			}
+		}
+		if !track.HasPower(PowerNative) {
+			t.Error("Track.HasPower(PowerNative) = false, want true")
+		}
+	})
+
+	t.Run("DefaultOptions carries no power under any source", func(t *testing.T) {
+		track, err := Decode(buildFixture(t, fixtureOptions()))
+		if err != nil {
+			t.Fatalf("Decode: %v", err)
+		}
+		for i, s := range track.Samples {
+			if s.HasPower {
+				t.Fatalf("Samples[%d].HasPower = true, want false -- the unpowered fixture must not decode a power reading", i)
+			}
+			if _, ok := s.DevFields[StrydPowerField]; ok {
+				t.Fatalf("Samples[%d].DevFields carries %q, want it absent from the unpowered fixture", i, StrydPowerField)
+			}
+		}
+		for _, src := range []PowerSource{PowerAuto, PowerStryd, PowerNative} {
+			if track.HasPower(src) {
+				t.Errorf("Track.HasPower(%v) = true, want false for a fixture with no PowerWatts and no DeveloperField", src)
+			}
+		}
+	})
+}
+
 // TestDecode_RejectsAFileItCannotRead covers all three error exits. Each is a
 // different failure and they are not interchangeable: a missing path fails at
 // the open, a non-FIT file fails inside the decoder, and a well-formed FIT file

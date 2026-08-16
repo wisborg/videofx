@@ -37,6 +37,19 @@ type Input struct {
 	// zero Input still logs somewhere sane, so tests that don't care can leave
 	// it unset and tests that do can set logging.New(&buf, ...).
 	Log *logging.Logger
+	// RunLog is Log WITHOUT the "file" field: the same sink and level, but
+	// for a message about the whole invocation rather than about this clip.
+	// It exists because a batch shares one effect instance, so a fact that is
+	// a property of the run -- which HUD layout the chosen FIT resolves to,
+	// say -- would otherwise be repeated once per file, each copy tagged with
+	// a filename that had nothing to do with it.
+	//
+	// An effect using this must dedupe for itself: Apply still runs once per
+	// job, concurrently at --concurrency > 1, so "log this once" means
+	// guarding it with state on the effect (see TelemetryHUD.logLayoutOnce).
+	// nil falls back to Log, which keeps the zero Input and every existing
+	// test working -- the message still appears, just carrying a "file".
+	RunLog *logging.Logger
 	// Progress is POLICY ONLY -- the interval and the clock a progress line
 	// should follow -- not a sink. nil means no progress reporting. An effect
 	// that wants to report progress builds its own *progress.Reporter from it

@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -70,14 +73,30 @@ func TestTelemetryHUD_ValidateStrength_AcceptsAnything(t *testing.T) {
 // (the shared generateSyntheticSource is 64x48, below what the gauges assume)
 // and stamps it with a creation_time inside the synthetic FIT's window. Audio
 // is included because the overlay is expected to stream-copy it through.
+// hudSourceCreation is the fixed creation_time generateHUDSource stamps its
+// clip with -- inside the synthetic FIT fixtures' coverage window (see
+// testFITPath), and what every test that doesn't care what instant it is
+// relies on.
+var hudSourceCreation = time.Date(2026, 7, 4, 21, 0, 0, 0, time.UTC)
+
 func generateHUDSource(t *testing.T, dir string) string {
+	t.Helper()
+	return generateHUDSourceAt(t, dir, hudSourceCreation)
+}
+
+// generateHUDSourceAt is generateHUDSource with the creation_time exposed,
+// for a test that needs to place the clip at a SPECIFIC instant relative to
+// a fixture it built itself (e.g. landing it inside or outside a window of
+// power data) rather than the fixed instant every other fixture syncs
+// against.
+func generateHUDSourceAt(t *testing.T, dir string, creation time.Time) string {
 	t.Helper()
 	path := filepath.Join(dir, "hudsrc.mp4")
 	out, err := exec.Command("ffmpeg",
 		"-hide_banner", "-loglevel", "error",
 		"-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=2",
 		"-f", "lavfi", "-i", "sine=frequency=440:duration=2",
-		"-metadata", "creation_time=2026-07-04T21:00:00.000000Z",
+		"-metadata", "creation_time="+creation.Format("2006-01-02T15:04:05.000000Z"),
 		"-c:v", "libx264", "-pix_fmt", "yuv420p",
 		"-c:a", "aac", "-shortest",
 		"-y", path,
@@ -173,7 +192,7 @@ func TestTelemetryHUD_Apply_OutputMatchesTheSourceFrameForFrame(t *testing.T) {
 	src := generateHUDSource(t, dir)
 	out := filepath.Join(dir, "out.mp4")
 
-	e := &TelemetryHUD{FitPath: testFITPath(t)}
+	e := &TelemetryHUD{FitPath: testFITPath(t), LayoutMode: "default"}
 	if err := e.Apply(context.Background(), Input{SourcePath: src, OutputPath: out}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -269,7 +288,7 @@ func TestTelemetryHUD_Apply_OverATrimmedClipRendersOnlyTheFramesThatDecode(t *te
 	}
 
 	out := filepath.Join(dir, "out.mp4")
-	e := &TelemetryHUD{FitPath: testFITPath(t)}
+	e := &TelemetryHUD{FitPath: testFITPath(t), LayoutMode: "default"}
 	if err := e.Apply(ctx, Input{SourcePath: trimmed, OutputPath: out}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -326,7 +345,7 @@ func TestTelemetryHUD_Apply_SizesTheRenderFromTheDurationWhenNoFrameCountIsStore
 	}
 
 	out := filepath.Join(dir, "out.mp4")
-	e := &TelemetryHUD{FitPath: testFITPath(t)}
+	e := &TelemetryHUD{FitPath: testFITPath(t), LayoutMode: "default"}
 	if err := e.Apply(ctx, Input{SourcePath: src, OutputPath: out}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -371,7 +390,7 @@ func TestTelemetryHUD_Apply_ActuallyBurnsSomethingIn(t *testing.T) {
 	src := generateBlackHUDSource(t, dir)
 
 	out := filepath.Join(dir, "out.mp4")
-	e := &TelemetryHUD{FitPath: testFITPath(t)}
+	e := &TelemetryHUD{FitPath: testFITPath(t), LayoutMode: "default"}
 	if err := e.Apply(context.Background(), Input{SourcePath: src, OutputPath: out}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -674,7 +693,7 @@ func TestTelemetryHUD_Apply_ClipScopeReachesTheRender(t *testing.T) {
 		t.Run(c.scope.String(), func(t *testing.T) {
 			dir := t.TempDir()
 			var buf bytes.Buffer
-			e := &TelemetryHUD{FitPath: testFITPath(t), Scope: c.scope}
+			e := &TelemetryHUD{FitPath: testFITPath(t), Scope: c.scope, LayoutMode: "default"}
 			err := e.Apply(context.Background(), Input{
 				SourcePath: generateHUDSource(t, dir),
 				OutputPath: filepath.Join(dir, "out.mp4"),
@@ -700,7 +719,7 @@ func TestTelemetryHUD_Apply_TheDefaultScopeSaysNothingAndScopesNothing(t *testin
 
 	dir := t.TempDir()
 	var buf bytes.Buffer
-	e := &TelemetryHUD{FitPath: testFITPath(t)}
+	e := &TelemetryHUD{FitPath: testFITPath(t), LayoutMode: "default"}
 	err := e.Apply(context.Background(), Input{
 		SourcePath: generateHUDSource(t, dir),
 		OutputPath: filepath.Join(dir, "out.mp4"),
@@ -711,6 +730,534 @@ func TestTelemetryHUD_Apply_TheDefaultScopeSaysNothingAndScopesNothing(t *testin
 	}
 	if got := buf.String(); strings.Contains(got, "clip scope") {
 		t.Errorf("an unscoped run announced a clip scope:\n%s", got)
+	}
+}
+
+// hudPowerFixturePath writes a FIT built from fittest.DefaultOptions (mutated
+// by mutate, if given) and returns its path. Count is cut down from the
+// default's ~4.5h to 1700 records -- enough to still bracket the synthetic
+// HUD sources' stamped creation_time (2026-07-04T21:00:00Z is 1624s into the
+// default window) without paying to encode 16404 of them per subtest.
+func hudPowerFixturePath(t *testing.T, mutate func(*fittest.Options)) string {
+	t.Helper()
+	opts := fittest.DefaultOptions()
+	opts.Count = 1700
+	if mutate != nil {
+		mutate(&opts)
+	}
+	data, err := fittest.Build(opts)
+	if err != nil {
+		t.Fatalf("building the FIT fixture: %v", err)
+	}
+	return writeFITFixture(t, data, "activity.fit")
+}
+
+// hudLayoutLogged reports whether got contains a "HUD layout: <name>" line
+// naming EXACTLY name, not merely containing it as a prefix -- which matters
+// here specifically because "default" is a prefix of "default-no-power", and
+// a plain substring check (or a check anchored on \b, which a hyphen also
+// satisfies) would pass on either given the other. The line is followed by
+// the logger's own "fit=..." field rather than a newline, so what actually
+// follows the name is checked to be whitespace or the end of the log.
+func hudLayoutLogged(got, name string) bool {
+	return regexp.MustCompile(`HUD layout: ` + regexp.QuoteMeta(name) + `(\s|$)`).MatchString(got)
+}
+
+// TestTelemetryHUD_Apply_SelectsTheLayoutFromTheFITsOwnPowerData drives the
+// --hud-layout auto decision (LayoutMode left unset) from real FIT fixtures
+// end to end, asserting on the log line SelectLayout's caller writes -- the
+// only place the decision is externally visible, since the pixel difference
+// between the two layouts is a single dropped line.
+//
+// The Stryd-only pair is the one this test exists for and the unit-level
+// TestSelectLayout_ThePowerAxisOnlyRefinesTheLandscapeBranch cannot reach on
+// its own: a single Stryd-only fixture (DeveloperField: StrydPowerField, no
+// PowerWatts) decided two different ways purely by --power-source, proving
+// PowerSource actually reaches Track.HasPower rather than the decision always
+// reading PowerAuto regardless of what the flag requested.
+//
+// The two forced-layoutMode cases at the end prove the same thing for the
+// OTHER argument SelectLayout takes from the effect: that t.LayoutMode
+// reaches it. Nothing else in the suite did. cmd's configureEffect test
+// checks --hud-layout lands in TelemetryHUD.LayoutMode, and
+// TestSelectLayout_... checks SelectLayout honours a mode it is handed, but
+// the join between them was open: substituting a literal "auto" for
+// t.LayoutMode at the call site was verified to leave every test in this
+// package green, while breaking exactly the promise --hud-layout's help text
+// makes -- "pass \"default\" to keep the placeholder line" on a FIT with no
+// power sensor, which is the one case where an unhonoured mode changes what
+// the user sees. "vertical" is the second value, so a call site that
+// special-cased only "default" would still fail.
+func TestTelemetryHUD_Apply_SelectsTheLayoutFromTheFITsOwnPowerData(t *testing.T) {
+	requireFFmpeg(t)
+
+	// wantNoPowerSource marks the one case whose layout carries no metrics
+	// readout at all. VerticalLayout has no MetricsGauge, so --power-source
+	// selects between two readings that nothing will draw, and the line
+	// deliberately omits it rather than pointing the reader at a setting with
+	// no effect on their output. Every other row must still name it.
+	for _, c := range []struct {
+		name              string
+		mutate            func(*fittest.Options)
+		powerSource       telemetry.PowerSource
+		layoutMode        string
+		want              string
+		wantNoPowerSource bool
+	}{
+		{
+			name:   "no power at all -> default-no-power",
+			mutate: nil,
+			want:   "default-no-power",
+		},
+		{
+			// The same unpowered fixture as the first case, decided the
+			// other way purely by --hud-layout.
+			name:       `no power, but --hud-layout "default" forced -> default`,
+			mutate:     nil,
+			layoutMode: "default",
+			want:       "default",
+		},
+		{
+			name:              `--hud-layout "vertical" forced on a landscape clip -> vertical`,
+			mutate:            nil,
+			layoutMode:        "vertical",
+			want:              "vertical",
+			wantNoPowerSource: true,
+		},
+		{
+			name:   "native PowerWatts -> default",
+			mutate: func(o *fittest.Options) { o.PowerWatts = 210 },
+			want:   "default",
+		},
+		{
+			name: "Stryd-only fixture, PowerNative requested -> default-no-power",
+			mutate: func(o *fittest.Options) {
+				o.DeveloperField = telemetry.StrydPowerField
+			},
+			powerSource: telemetry.PowerNative,
+			want:        "default-no-power",
+		},
+		{
+			name: "the SAME Stryd-only fixture, PowerAuto -> default",
+			mutate: func(o *fittest.Options) {
+				o.DeveloperField = telemetry.StrydPowerField
+			},
+			powerSource: telemetry.PowerAuto,
+			want:        "default",
+		},
+		{
+			// The mirror image of the Stryd-only pair above, and the only
+			// case that drives PowerStryd through Apply at all: a file that
+			// carries native power and nothing else must still drop the line
+			// when the user forced --power-source stryd, because
+			// ResolvedPower refuses to substitute the other sensor. Without
+			// this row, an Apply that passed a hardcoded PowerAuto (or
+			// PowerNative) down to HasPower would satisfy every other row.
+			name:        "native-only fixture, PowerStryd requested -> default-no-power",
+			mutate:      func(o *fittest.Options) { o.PowerWatts = 210 },
+			powerSource: telemetry.PowerStryd,
+			want:        "default-no-power",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var buf bytes.Buffer
+			e := &TelemetryHUD{
+				FitPath:     hudPowerFixturePath(t, c.mutate),
+				PowerSource: c.powerSource,
+				LayoutMode:  c.layoutMode,
+			}
+			err := e.Apply(context.Background(), Input{
+				SourcePath: generateHUDSource(t, dir),
+				OutputPath: filepath.Join(dir, "out.mp4"),
+				Log:        logging.New(&buf, logging.LevelInfo),
+			})
+			if err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+			got := buf.String()
+			if !hudLayoutLogged(got, c.want) {
+				t.Errorf("the run's log does not report %q as the HUD layout:\n%s", c.want, got)
+			}
+			// The line must also name the source the decision was MADE with,
+			// which is the half of its self-containedness the layout name
+			// cannot supply: "default-no-power" alone does not say which
+			// reading came up empty, and the whole point of naming it is that
+			// a user who mistyped --power-source can see it. Logging a
+			// constant here (`telemetry.PowerAuto` instead of
+			// `t.PowerSource`, a one-token slip) was verified to pass every
+			// other assertion in this file.
+			wantSrc := "power source: " + c.powerSource.String() + ")"
+			switch {
+			case c.wantNoPowerSource && strings.Contains(got, "power source"):
+				t.Errorf("the run's log names a power source next to %q, a layout with no metrics readout to display one:\n%s", c.want, got)
+			case !c.wantNoPowerSource && !strings.Contains(got, wantSrc):
+				t.Errorf("the run's log does not name %q as the power source the layout was chosen from:\n%s", wantSrc, got)
+			}
+		})
+	}
+}
+
+// generateHUDSourceSized is generateHUDSource with the frame size and file
+// name exposed, for the one test that needs several clips -- and clips of
+// DIFFERENT ORIENTATION -- inside a single run. Everything else about it
+// (creation_time, rate, duration) matches, so these clips sync against the
+// same synthetic FIT window as every other fixture here.
+func generateHUDSourceSized(t *testing.T, dir, name string, w, h int) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	out, err := exec.Command("ffmpeg",
+		"-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", fmt.Sprintf("testsrc=size=%dx%d:rate=10:duration=2", w, h),
+		"-metadata", "creation_time="+hudSourceCreation.Format("2006-01-02T15:04:05.000000Z"),
+		"-c:v", "libx264", "-pix_fmt", "yuv420p",
+		"-y", path,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("generating a %dx%d HUD source: %v\n%s", w, h, err, out)
+	}
+	return path
+}
+
+// countHUDLayoutLines counts the "HUD layout:" lines in a captured log.
+func countHUDLayoutLines(got string) int {
+	return strings.Count(got, "HUD layout:")
+}
+
+// TestTelemetryHUD_ReportsEachLayoutOncePerRunNotOncePerFile pins the dedupe
+// on the layout line. One videofx invocation reads ONE FIT and shares ONE
+// effect instance across every job in the batch, so a line naming the layout
+// that FIT resolved to is a fact about the run; emitted from Apply, which runs
+// per job, it was being repeated once per file with a "file" field attached
+// that had nothing to do with the decision.
+//
+// The two subtests are the two halves of the contract, and neither alone is
+// enough: dropping the line entirely satisfies "at most once", and logging
+// unconditionally satisfies "reports what actually happened".
+//
+// Apply is called CONCURRENTLY here, which is how the processor calls it at
+// --concurrency > 1. That is what makes this a test of the lock and not just
+// of the map: the exact-count assertion holds deterministically only because
+// the check and the insert happen under one hold. Run with -race to also see
+// the unguarded map write itself.
+func TestTelemetryHUD_ReportsEachLayoutOncePerRunNotOncePerFile(t *testing.T) {
+	requireFFmpeg(t)
+
+	// applyAll runs one effect instance over every clip concurrently, against
+	// a single shared log, and returns what was logged.
+	applyAll := func(t *testing.T, e *TelemetryHUD, dir string, clips []string) string {
+		t.Helper()
+		var mu sync.Mutex
+		var buf bytes.Buffer
+		log := logging.New(&syncWriter{mu: &mu, w: &buf}, logging.LevelInfo)
+
+		var wg sync.WaitGroup
+		errs := make([]error, len(clips))
+		for i, clip := range clips {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				errs[i] = e.Apply(context.Background(), Input{
+					SourcePath: clip,
+					OutputPath: filepath.Join(dir, fmt.Sprintf("out%d.mp4", i)),
+					Log:        log,
+				})
+			}()
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("Apply on clip %d: %v", i, err)
+			}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.String()
+	}
+
+	t.Run("a batch that resolves one layout says it once", func(t *testing.T) {
+		dir := t.TempDir()
+		clips := []string{
+			generateHUDSourceSized(t, dir, "a.mp4", 320, 240),
+			generateHUDSourceSized(t, dir, "b.mp4", 320, 240),
+			generateHUDSourceSized(t, dir, "c.mp4", 640, 480),
+		}
+		// Three landscape clips, one unpowered FIT: every job resolves
+		// default-no-power, including the one at a different resolution --
+		// the layout, not the frame size, is what the line reports.
+		got := applyAll(t, &TelemetryHUD{FitPath: hudPowerFixturePath(t, nil)}, dir, clips)
+
+		if n := countHUDLayoutLines(got); n != 1 {
+			t.Errorf("the batch logged %d layout lines, want exactly 1:\n%s", n, got)
+		}
+		if !hudLayoutLogged(got, "default-no-power") {
+			t.Errorf("the one line does not name default-no-power:\n%s", got)
+		}
+		// The line is about the run, so it must NOT be tagged with whichever
+		// clip happened to reach the log first -- that filename is exactly
+		// the noise this dedupe exists to remove. (A nil RunLog falls back to
+		// the per-clip logger, which is why this asserts on the shape of the
+		// message rather than on the absence of a field the fallback would
+		// legitimately carry.)
+		if !strings.Contains(got, "(landscape clips") {
+			t.Errorf("the line does not say which clips it applies to:\n%s", got)
+		}
+	})
+
+	t.Run("a batch that resolves two layouts reports both", func(t *testing.T) {
+		dir := t.TempDir()
+		clips := []string{
+			generateHUDSourceSized(t, dir, "wide1.mp4", 320, 240),
+			generateHUDSourceSized(t, dir, "wide2.mp4", 320, 240),
+			generateHUDSourceSized(t, dir, "tall.mp4", 240, 320),
+		}
+		// Same FIT, same effect, but one clip is portrait: --hud-layout auto
+		// resolves vertical for it and default-no-power for the other two.
+		// Collapsing that to a single line -- a sync.Once, or a dedupe keyed
+		// on nothing but the run -- would report whichever job won the race
+		// and silently hide the other layout.
+		got := applyAll(t, &TelemetryHUD{FitPath: hudPowerFixturePath(t, nil)}, dir, clips)
+
+		if n := countHUDLayoutLines(got); n != 2 {
+			t.Errorf("the mixed batch logged %d layout lines, want exactly 2:\n%s", n, got)
+		}
+		if !hudLayoutLogged(got, "default-no-power") || !strings.Contains(got, "(landscape clips") {
+			t.Errorf("the mixed batch does not report default-no-power for its landscape clips:\n%s", got)
+		}
+		if !hudLayoutLogged(got, "vertical") || !strings.Contains(got, "(portrait clips") {
+			t.Errorf("the mixed batch does not report vertical for its portrait clip:\n%s", got)
+		}
+	})
+
+	t.Run("one layout used for both orientations is reported for each", func(t *testing.T) {
+		dir := t.TempDir()
+		clips := []string{
+			generateHUDSourceSized(t, dir, "wide.mp4", 320, 240),
+			generateHUDSourceSized(t, dir, "tall.mp4", 240, 320),
+		}
+		// --hud-layout default forces ONE layout onto both orientations, so
+		// the two lines differ only in which clips they describe. This is the
+		// case that decides what the dedupe is keyed on, and it is why the key
+		// is the whole rendered line rather than the layout name: keyed on the
+		// name, this batch would print a single "default (landscape clips)"
+		// while that same layout was also drawn on a portrait clip -- a line
+		// whose parenthetical is then simply false. Keying on the message
+		// keeps every line true at the cost of a second one.
+		e := &TelemetryHUD{FitPath: hudPowerFixturePath(t, nil), LayoutMode: "default"}
+		got := applyAll(t, e, dir, clips)
+
+		if n := countHUDLayoutLines(got); n != 2 {
+			t.Errorf("the forced-layout batch logged %d layout lines, want exactly 2:\n%s", n, got)
+		}
+		for _, want := range []string{"(landscape clips", "(portrait clips"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("the forced-layout batch never reports %q:\n%s", want, got)
+			}
+		}
+		if strings.Contains(got, "default-no-power") || strings.Contains(got, "vertical") {
+			t.Errorf("--hud-layout default was not honoured for every clip:\n%s", got)
+		}
+	})
+}
+
+// syncWriter serializes writes from the concurrent Apply calls above; a
+// bytes.Buffer written from several goroutines is a data race in its own
+// right, and this test is about the effect's dedupe, not the buffer's.
+type syncWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
+// TestTelemetryHUD_TheLayoutDecisionReadsTheSCOPEDTrack catches the layout
+// decision being wired to the wrong track -- the same class of defect
+// TestTelemetryHUD_Apply_TheProgressFillTracksTheClipsOwnDistance exists to
+// catch for the per-frame samples, and by the same mechanism: a fixture whose
+// power reading exists ONLY outside the clip's window.
+//
+// The activity runs 20 minutes at 1 Hz with native power written for the
+// FIRST HALF only; the synthetic HUD clip is stamped to land in the second
+// half, where the activity's own samples carry no power. Under
+// ScopeActivity -- which is what `track.HasPower` would still see if the
+// decision read the unscoped Track (a plausible reordering: run it before the
+// `track = scoped.Track` rebind, or read the pre-scoping `track` variable
+// instead of the rebound one) -- the whole activity DOES carry power, so a
+// misplaced call would report "default". Reading the correctly scoped track
+// reports "default-no-power" instead, because the clip's own window has none.
+func TestTelemetryHUD_TheLayoutDecisionReadsTheSCOPEDTrack(t *testing.T) {
+	requireFFmpeg(t)
+
+	start := time.Date(2026, 7, 4, 20, 30, 0, 0, time.UTC)
+	const totalRecords = 1200 // 20 minutes at 1 Hz
+	const poweredRecords = totalRecords / 2
+
+	// The FIRST HALF carries native power; the clip below is stamped into the
+	// SECOND half, where the activity's own samples have none. PoweredRecords
+	// is fittest.Options' knob for exactly this -- power that stops partway
+	// through an activity, rather than being present or absent for the whole
+	// file -- alongside OutOfOrder, which exists for one internal/telemetry
+	// decode test the same way.
+	opts := fittest.DefaultOptions()
+	opts.Start = start
+	opts.Count = totalRecords
+	opts.PowerWatts = 200
+	opts.PoweredRecords = poweredRecords
+	data, err := fittest.Build(opts)
+	if err != nil {
+		t.Fatalf("building the half-powered FIT fixture: %v", err)
+	}
+	fitPath := writeFITFixture(t, data, "half-powered.fit")
+
+	dir := t.TempDir()
+	clipCreation := start.Add(totalRecords * 3 / 4 * time.Second) // well into the unpowered second half
+	src := generateHUDSourceAt(t, dir, clipCreation)
+
+	run := func(scope telemetry.Scope) string {
+		var buf bytes.Buffer
+		e := &TelemetryHUD{FitPath: fitPath, Scope: scope}
+		out := filepath.Join(t.TempDir(), "out.mp4")
+		if err := e.Apply(context.Background(), Input{
+			SourcePath: src,
+			OutputPath: out,
+			Log:        logging.New(&buf, logging.LevelInfo),
+		}); err != nil {
+			t.Fatalf("Apply (scope %v): %v", scope, err)
+		}
+		return buf.String()
+	}
+
+	if got := run(telemetry.ScopeActivity); !hudLayoutLogged(got, "default") {
+		t.Errorf("ScopeActivity: log does not report the default layout (the whole activity has power in its first half):\n%s", got)
+	}
+	if got := run(telemetry.ScopeClipRebased); !hudLayoutLogged(got, "default-no-power") {
+		t.Errorf("ScopeClipRebased: log does not report default-no-power -- "+
+			"the clip's own window has no power even though the unscoped activity does, "+
+			"which means the layout decision read the wrong track:\n%s", got)
+	}
+}
+
+// maxYAVGInBox decodes path, crops every frame to box (an ffmpeg
+// "w:h:x:y" crop expression) and returns the brightest frame's average luma
+// in that box. Over the black source, a box nothing drew into reads exactly
+// 16.0 -- limited range's black level -- and anything the HUD painted lifts
+// it, which is the same measurement (and the same 17 threshold)
+// TestTelemetryHUD_Apply_ActuallyBurnsSomethingIn stands on. metadata=print
+// writes to file=- rather than the log for the reason given there.
+func maxYAVGInBox(t *testing.T, path, box string) float64 {
+	t.Helper()
+	stats, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-i", path, "-vf", "crop="+box+",signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-",
+		"-f", "null", "-").Output()
+	if err != nil {
+		t.Fatalf("measuring %s in box %s: %v\n%s", path, box, err, stats)
+	}
+	maxY := 0.0
+	for _, line := range strings.Split(string(stats), "\n") {
+		i := strings.Index(line, "YAVG=")
+		if i < 0 {
+			continue
+		}
+		if v, err := strconv.ParseFloat(strings.TrimSpace(line[i+len("YAVG="):]), 64); err == nil && v > maxY {
+			maxY = v
+		}
+	}
+	return maxY
+}
+
+// TestTelemetryHUD_ACallerSuppliedLayoutBeatsTheAutoChoiceAndLogsAsCustom
+// covers the escape hatch TelemetryHUD.Layout is: a programmatic caller hands
+// in an explicit hud.Layout and Apply must render THAT, not whatever
+// hud.SelectLayout would have picked from the clip's shape and the FIT's
+// power data.
+//
+// Nothing in the repository sets that field -- it exists for callers outside
+// it -- so before this test it was entirely unexercised, and the restructuring
+// that moved the override from a plain post-assignment into an if/else with
+// SelectLayout in the other arm left it that way. Deleting the override
+// outright (`if false` in place of `if t.Layout != nil`) was verified to leave
+// every test in this package green.
+//
+// The assertions are deliberately of two different kinds, because neither
+// alone is enough:
+//
+//   - PIXELS, both directions. The custom layout below places exactly one
+//     gauge, the metrics readout, at BottomLeft. So the bottom-left box must
+//     carry ink (proving the supplied layout reached the renderer, and ruling
+//     out a degenerate implementation that quietly substituted an empty
+//     Layout), and the top-right box must be untouched black (proving
+//     SelectLayout's choice did NOT render, since all three shipped layouts
+//     that could have been chosen here put a gauge in one of those corners --
+//     the clock at TopRight for the two landscape ones, and the course map at
+//     MiddleRight is nowhere near the top band). An override that silently
+//     did nothing shows the clock; a no-op renderer shows neither.
+//   - THE LOG LINE. The pixels cannot distinguish "used the custom layout and
+//     named it right" from "used the custom layout and logged something
+//     else", and a Layout built as a struct literal has no Name, so the line
+//     falls back to "custom". Dropping that fallback (logging layout.Name
+//     directly) prints "HUD layout:  (power source: auto)" -- a line that
+//     trails off mid-sentence, and one no other test in this package reads.
+//
+// The FIT fixture carries no power, so SelectLayout's choice here would be
+// "default-no-power"; the log assertion therefore also fails if the override
+// is skipped, independently of the pixels.
+func TestTelemetryHUD_ACallerSuppliedLayoutBeatsTheAutoChoiceAndLogsAsCustom(t *testing.T) {
+	requireFFmpeg(t)
+
+	// A bare struct literal, exactly as an outside caller composing its own
+	// arrangement would write it: no Name, and one gauge at the anchor that
+	// gauge is designed for. Margin/FontScale match DefaultLayout's so the
+	// readout lands where the geometry below expects.
+	custom := hud.Layout{
+		Margin:    0.02,
+		FontScale: 0.030,
+		Placements: []hud.Placement{
+			{Gauge: hud.MetricsGauge{}, Anchor: hud.BottomLeft, Enabled: true},
+		},
+	}
+
+	dir := t.TempDir()
+	src := generateBlackHUDSource(t, dir)
+	out := filepath.Join(dir, "out.mp4")
+
+	var buf bytes.Buffer
+	e := &TelemetryHUD{FitPath: testFITPath(t), Layout: &custom}
+	if err := e.Apply(context.Background(), Input{
+		SourcePath: src,
+		OutputPath: out,
+		Log:        logging.New(&buf, logging.LevelInfo),
+	}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	// The metrics readout's own box on this 320x240 frame: the stack is six
+	// lines of FontScale*min(w,h)*1.35 = 0.03*240*1.35 = 9.72 px, bottom-
+	// anchored 0.02*240 = 4.8 px above the frame's bottom edge, so it spans
+	// roughly y 177..235 starting at x 4.8. A box of the left quarter by the
+	// bottom 64 rows contains all of it.
+	const metricsBoxH = 64
+	metricsBox := fmt.Sprintf("%d:%d:0:%d", blackHUDSourceW/4, metricsBoxH, blackHUDSourceH-metricsBoxH)
+	// The top-right corner: the right quarter by the top fifth. The clock the
+	// landscape layouts anchor at TopRight lands inside it; the progress bar
+	// at TopCenter is half the frame wide and so stops at x = 3w/4, short of
+	// this box's left edge.
+	clockBox := fmt.Sprintf("%d:%d:%d:0", blackHUDSourceW/4, blackHUDSourceH/5, blackHUDSourceW*3/4)
+
+	if got := maxYAVGInBox(t, out, metricsBox); got <= 17 {
+		t.Errorf("the metrics box averages YAVG=%.2f (black is 16.0) -- the caller-supplied layout's one gauge drew nothing", got)
+	}
+	if got := maxYAVGInBox(t, out, clockBox); got > 17 {
+		t.Errorf("the top-right corner averages YAVG=%.2f over a black source (black is 16.0) -- something drew there, "+
+			"but the caller-supplied layout places nothing in that corner; SelectLayout's own choice must have rendered instead", got)
+	}
+
+	if got := buf.String(); !hudLayoutLogged(got, "custom") {
+		t.Errorf("the run's log does not report %q as the HUD layout -- a Layout built as a struct literal has no Name, "+
+			"and the line must name something rather than trailing off after \"HUD layout: \":\n%s", "custom", got)
 	}
 }
 
@@ -806,7 +1353,7 @@ func TestTelemetryHUD_Apply_TheProgressFillTracksTheClipsOwnDistance(t *testing.
 		t.Run(c.scope.String(), func(t *testing.T) {
 			dir := t.TempDir()
 			out := filepath.Join(dir, "out.mp4")
-			e := &TelemetryHUD{FitPath: testFITPath(t), Scope: c.scope}
+			e := &TelemetryHUD{FitPath: testFITPath(t), Scope: c.scope, LayoutMode: "default"}
 			if err := e.Apply(context.Background(), Input{
 				SourcePath: generateBlackHUDSource(t, dir),
 				OutputPath: out,
@@ -892,7 +1439,7 @@ func TestTelemetryHUD_Apply_EmitsProgressForOverlayPhase(t *testing.T) {
 			var buf bytes.Buffer
 			log := logging.New(&buf, logging.LevelInfo).WithField("file", src)
 
-			e := &TelemetryHUD{FitPath: testFITPath(t)}
+			e := &TelemetryHUD{FitPath: testFITPath(t), LayoutMode: "default"}
 			if err := e.Apply(context.Background(), Input{
 				SourcePath: src,
 				OutputPath: out,
@@ -955,7 +1502,7 @@ func TestTelemetryHUD_Apply_ReportsEveryFrameAndEndsAtTheLastOne(t *testing.T) {
 	var buf bytes.Buffer
 	log := logging.New(&buf, logging.LevelInfo).WithField("file", src)
 
-	e := &TelemetryHUD{FitPath: testFITPath(t)}
+	e := &TelemetryHUD{FitPath: testFITPath(t), LayoutMode: "default"}
 	if err := e.Apply(context.Background(), Input{
 		SourcePath: src,
 		OutputPath: out,

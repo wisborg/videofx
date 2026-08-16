@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"image"
 	"math"
+	"sync"
 	"time"
 
 	"videofx/internal/hud"
+	"videofx/internal/logging"
 	"videofx/internal/progress"
 	"videofx/internal/telemetry"
 	"videofx/internal/vidio"
@@ -56,12 +58,18 @@ type TelemetryHUD struct {
 	// back to native). Wired from --power-source.
 	PowerSource telemetry.PowerSource
 	// LayoutMode selects the gauge arrangement by name: "auto" (the default)
-	// picks the vertical layout for portrait clips and the default otherwise,
-	// or "default"/"vertical" to force one. Wired from --hud-layout; ignored
+	// picks the vertical layout for portrait clips, else the default layout --
+	// or, when the FIT carries no power reading for PowerSource, the default
+	// layout with its power line dropped ("default-no-power") -- or
+	// "default"/"vertical"/"default-no-power" to force one regardless of the
+	// clip's orientation or the FIT's data. Wired from --hud-layout; ignored
 	// when Layout is set.
 	LayoutMode string
 	// Layout, when non-nil, overrides LayoutMode with an explicit arrangement
-	// (for programmatic callers/tests).
+	// (for programmatic callers/tests). A caller building one as a struct
+	// literal rather than through hud.DefaultLayout/VerticalLayout/
+	// NoPowerLayout leaves Name empty; Apply's log line then reports it as
+	// "custom" rather than an empty string.
 	Layout *hud.Layout
 	// Scope selects how much of the activity the gauges describe. Wired from
 	// --telemetry-scope. The ZERO VALUE is telemetry.ScopeActivity -- the whole
@@ -103,6 +111,88 @@ type TelemetryHUD struct {
 	// split are keyed on -- because that is what the FIT sync itself is built
 	// on.
 	Scope telemetry.Scope
+
+	// layoutMu guards loggedLayouts, the set of layout lines this effect has
+	// already emitted, so a batch reports each one once instead of once per
+	// file. One videofx invocation reads one FIT and shares one effect
+	// instance across every job, so the layout a clip resolves to is very
+	// nearly a property of the run -- but only very nearly, which is why this
+	// is a SET rather than a sync.Once: orientation is per-clip, and under a
+	// clip-windowed --telemetry-scope so is the power question, so a mixed
+	// batch can honestly resolve to two different layouts. Recording the
+	// distinct lines reports what actually happened either way -- one line for
+	// the ordinary batch, two when they genuinely differ -- where a Once would
+	// report whichever job won the race and hide the other.
+	//
+	// Jobs run concurrently at --concurrency > 1, hence the mutex. These two
+	// fields are also why a TelemetryHUD must not be copied by value; nothing
+	// does, and `go vet`'s copylocks check now holds that.
+	layoutMu      sync.Mutex
+	loggedLayouts map[string]struct{}
+}
+
+// logLayoutOnce reports which HUD layout a clip resolved to, at most once per
+// distinct answer for the whole invocation.
+//
+// The line is deduped on its own rendered text, which is what makes "once per
+// run" and "tell the truth" the same thing here. A batch of landscape clips
+// off one unpowered FIT resolves identically every time and says so once; a
+// batch mixing orientations, or one whose clip-windowed scope straddles the
+// start of a power meter's data, resolves two ways and says both. Dedupe on
+// the layout NAME alone would collapse that second case into a half-truth,
+// and a sync.Once would report whichever job won the race.
+//
+// It writes to runLog -- the run's logger without the per-file "file" field --
+// because the message is about the invocation, not about whichever clip
+// happened to reach here first. It keeps "fit", which is genuinely run-wide:
+// one videofx invocation reads one FIT. clipLog is the fallback for a caller
+// that supplied no RunLog (the zero Input, and every test predating it), where
+// the line still appears, merely tagged with a file.
+//
+// The power source is named only when the layout actually has a metrics
+// readout. VerticalLayout has no MetricsGauge at all, so for a portrait clip
+// --power-source selects between two readings that nothing will display;
+// printing it there would point the reader at a setting with no effect on
+// what they are looking at.
+func (t *TelemetryHUD) logLayoutOnce(runLog, clipLog *logging.Logger, layout hud.Layout, width, height int) {
+	// Falls back to "custom" for a caller-supplied Layout with an empty Name:
+	// unreachable from the CLI (only a programmatic caller builds a Layout
+	// literal directly, bypassing the constructors that set it), but the line
+	// must name something rather than trailing off after "HUD layout: ".
+	name := layout.Name
+	if name == "" {
+		name = "custom"
+	}
+	orientation := "landscape"
+	if hud.IsPortrait(width, height) {
+		orientation = "portrait"
+	}
+
+	msg := fmt.Sprintf("HUD layout: %s (%s clips", name, orientation)
+	if layout.HasMetricsReadout() {
+		msg += fmt.Sprintf(", power source: %s", t.PowerSource)
+	}
+	msg += ")"
+
+	// The write stays inside the lock rather than being hoisted out after a
+	// released check: two workers resolving the same layout at once would
+	// otherwise both see an empty set and both print it, which is the exact
+	// duplicate this function exists to remove.
+	t.layoutMu.Lock()
+	defer t.layoutMu.Unlock()
+	if _, seen := t.loggedLayouts[msg]; seen {
+		return
+	}
+	if t.loggedLayouts == nil {
+		t.loggedLayouts = make(map[string]struct{})
+	}
+	t.loggedLayouts[msg] = struct{}{}
+
+	out := clipLog
+	if runLog != nil {
+		out = runLog.Named(t.Name()).WithField("fit", t.FitPath)
+	}
+	out.Infof("%s", msg)
 }
 
 // trackTotalDistance is the activity's final cumulative distance (m) -- the
@@ -312,10 +402,32 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		TargetLoss: t.ElevationLoss,
 	})
 
-	layout := hud.SelectLayout(t.LayoutMode, dw, dh)
+	var layout hud.Layout
 	if t.Layout != nil {
+		// A caller-supplied layout is used exactly as given -- nothing here
+		// chose it from the clip's power data, so there is no omitPower to
+		// compute, and skipping it avoids scanning every scoped sample for a
+		// question this branch has no use for the answer to.
 		layout = *t.Layout
+	} else {
+		// omitPower asks the SCOPED track (not the whole-activity one Decode
+		// returned above) whether it carries power under the chosen source
+		// at all -- distinct from any one frame's ResolvedPower coming up
+		// empty. It must run after the `track = scoped.Track` rebind above:
+		// reading the unscoped track here would answer "does the whole
+		// activity have power" while every other course-driven gauge already
+		// answers "does the clip".
+		omitPower := !track.HasPower(t.PowerSource)
+		layout = hud.SelectLayout(t.LayoutMode, dw, dh, omitPower)
 	}
+
+	// A layout picked from data (auto + omitPower) has to announce itself,
+	// or a wrong --power-source reshapes the HUD silently and exits 0. This
+	// says something on EVERY run, unlike logClipScope, which deliberately
+	// stays quiet for the (very common) unscoped default -- there is no
+	// "nothing happened" case for a layout decision, since some layout
+	// always renders.
+	t.logLayoutOnce(in.RunLog, log, layout, dw, dh)
 	renderer := hud.NewRenderer(layout)
 
 	enc, err := vidio.OpenOverlay(ctx, vidio.OverlayConfig{

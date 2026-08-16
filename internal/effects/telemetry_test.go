@@ -44,6 +44,13 @@ var (
 // t.Fatal, not t.Skip: there is no environment where this can legitimately be
 // unavailable, so failing to build it is a bug, not a reason to quietly do
 // less work.
+//
+// This fixture carries no power reading (fittest.DefaultOptions sets neither
+// PowerWatts nor DeveloperField), so under --hud-layout auto it selects
+// hud.NoPowerLayout rather than the ordinary default. Every TelemetryHUD test
+// in this package whose subject is NOT the layout pins LayoutMode: "default"
+// explicitly, so it keeps exercising the pre-existing HUD instead of silently
+// switching layouts underneath an unrelated assertion.
 func testFITPath(t *testing.T) string {
 	t.Helper()
 	fitFixtureOnce.Do(func() {
@@ -52,9 +59,27 @@ func testFITPath(t *testing.T) string {
 	if fitFixtureErr != nil {
 		t.Fatalf("building the synthetic FIT fixture: %v", fitFixtureErr)
 	}
-	path := filepath.Join(t.TempDir(), "activity.fit")
-	if err := os.WriteFile(path, fitFixtureBytes, 0o644); err != nil {
-		t.Fatalf("writing the synthetic FIT fixture: %v", err)
+	return writeFITFixture(t, fitFixtureBytes, "activity.fit")
+}
+
+// writeFITFixture writes data (an already-encoded FIT file) to name inside a
+// fresh t.TempDir() and returns the path -- the "write these bytes out, or
+// t.Fatal" tail every FIT fixture builder in this package (this function's
+// caller above, hudPowerFixturePath, buildHalfPoweredFIT in
+// telemetryhud_test.go) ends with.
+//
+// It is deliberately only this much. The three builders differ in what they
+// build and how -- a cached whole-activity fixture reused across tests, one
+// driven by arbitrary fittest.Options, and one hand-built directly against
+// mesgdef/filedef for a shape fittest.Options cannot express (power on only
+// part of the activity) -- and unifying THAT would hide real differences
+// behind a false shared abstraction. Only the part that is genuinely
+// identical across all three is shared here.
+func writeFITFixture(t *testing.T, data []byte, name string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("writing %s: %v", name, err)
 	}
 	return path
 }

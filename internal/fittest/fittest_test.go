@@ -106,6 +106,72 @@ func TestDefaultOptionsCoverage(t *testing.T) {
 	}
 }
 
+// TestBuildRoundTrips_PowerWatts is TestBuildRoundTrips' assertion for the
+// native power field, kept separate rather than folded into that test's loop
+// because it is the one field this package deliberately writes to two
+// different fixtures (present vs absent) and needs both checked.
+//
+// Like TestBuildRoundTrips, this decodes through the raw github.com/muktihari/fit
+// library rather than internal/telemetry: that package is one of the things
+// this fixture exists to test.
+//
+// The DefaultOptions() half is the one later code depends on: fittest's own
+// package comment and telemetry-hud's --hud-layout auto both assume a fixture
+// built without PowerWatts (or a DeveloperField) carries no power reading at
+// all, and that assumption is otherwise untested at this layer.
+func TestBuildRoundTrips_PowerWatts(t *testing.T) {
+	t.Run("PowerWatts set", func(t *testing.T) {
+		opts := DefaultOptions()
+		opts.Count = 5
+		const watts = 215
+		opts.PowerWatts = watts
+
+		data, err := Build(opts)
+		if err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		path := filepath.Join(t.TempDir(), "power.fit")
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatalf("writing fixture: %v", err)
+		}
+		act := decodeActivity(t, path)
+		if len(act.Records) != opts.Count {
+			t.Fatalf("decoded %d records, want %d", len(act.Records), opts.Count)
+		}
+		for i, rec := range act.Records {
+			if rec.Power != watts {
+				t.Errorf("record %d: Power = %d, want %d", i, rec.Power, watts)
+			}
+		}
+	})
+
+	t.Run("DefaultOptions (PowerWatts unset) writes no power field", func(t *testing.T) {
+		opts := DefaultOptions()
+		opts.Count = 5
+
+		data, err := Build(opts)
+		if err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		path := filepath.Join(t.TempDir(), "nopower.fit")
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatalf("writing fixture: %v", err)
+		}
+		act := decodeActivity(t, path)
+		if len(act.Records) != opts.Count {
+			t.Fatalf("decoded %d records, want %d", len(act.Records), opts.Count)
+		}
+		for i, rec := range act.Records {
+			// basetype.Uint16Invalid (0xFFFF) is what an un-set Power field
+			// decodes to; asserting against the literal rather than importing
+			// basetype keeps this test's only import list unchanged.
+			if rec.Power != 0xFFFF {
+				t.Errorf("record %d: Power = %d, want the FIT invalid sentinel 0xFFFF (no field written)", i, rec.Power)
+			}
+		}
+	})
+}
+
 func TestBuildRejectsUnusableOptions(t *testing.T) {
 	if _, err := Build(Options{Start: time.Now(), Count: 0}); err == nil {
 		t.Error("Count of 0 must be rejected")

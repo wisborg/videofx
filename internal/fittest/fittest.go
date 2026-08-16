@@ -94,6 +94,29 @@ type Options struct {
 	// sentinel is written instead), meaning "already in final units".
 	DeveloperFieldScale  uint8
 	DeveloperFieldOffset int8
+
+	// PowerWatts, when non-zero, writes the standard FIT Record.power field on
+	// every record at this constant value -- the NATIVE power reading, a
+	// distinct data source from the Stryd developer field above (see
+	// telemetry.Sample's HasPower/Power vs DevFields). internal/telemetry's
+	// StrydPowerField constant is "Power", so DeveloperField: "Power" already
+	// produces a Stryd-power fixture with no change here; this field exists
+	// only to add the OTHER source.
+	//
+	// 0, the default, writes no native power field at all -- not a
+	// zero-valued one -- so DefaultOptions' fixture decodes to samples with
+	// neither power source, the "activity recorded without a power sensor"
+	// case telemetry-hud's --hud-layout auto detects.
+	PowerWatts uint16
+
+	// PoweredRecords caps PowerWatts to the leading N records instead of the
+	// whole activity, for a fixture whose power reading STOPS partway through
+	// rather than being present or absent for the entire file -- e.g. a clip
+	// scoped to a stretch after the cutoff, to prove a layout/HasPower
+	// decision reads the clip's own window rather than the whole activity's.
+	// 0, the default, leaves PowerWatts on every record, exactly as before
+	// this field existed. Ignored when PowerWatts is 0.
+	PoweredRecords int
 }
 
 // DeveloperFieldRaw returns the raw, unscaled value Build writes into record
@@ -212,6 +235,14 @@ func Build(opts Options) ([]byte, error) {
 			SetEnhancedAltitudeScaled(elevation).
 			SetHeartRate(uint8(math.Round(heartRate))).
 			SetCadence(uint8(math.Round(cadence)))
+
+		if opts.PowerWatts != 0 && (opts.PoweredRecords <= 0 || i < opts.PoweredRecords) {
+			// Calling SetPower at all, even with 0, would write a real (if
+			// zero) field value; leaving the call out entirely is what keeps
+			// Record.Power at FIT's invalid sentinel and Decode's HasPower
+			// false -- see PowerWatts' doc comment.
+			act.Records[i].SetPower(opts.PowerWatts)
+		}
 
 		if opts.DeveloperField != "" {
 			act.Records[i].SetDeveloperFields(proto.DeveloperField{

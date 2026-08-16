@@ -51,6 +51,149 @@ func TestCadenceLine(t *testing.T) {
 	}
 }
 
+// TestMetricsLines_ComposesTheReferenceRowOrder pins the readout's row order,
+// top to bottom, against values worked out by hand from each formatter's
+// documented unit conversion -- NOT captured from a run.
+//
+// The order is the gauge's whole contract with the viewer: MetricsGauge.Draw
+// paints lines[i] at top+i*lineH, so the slice's order IS the on-screen order,
+// and swapping two rows moves a number under the wrong reader's eye while
+// every pixel-count, line-count and "the power line was dropped" assertion in
+// this file still passes. That was verified: appending the power line after
+// the incline line instead of before it leaves the whole hud package green,
+// because TestMetricsLines_OmitPowerDropsExactlyThePowerLine finds the power
+// row by value (so it has no opinion on where that row is) and
+// TestRender_NoPowerLayoutClosesTheGapDownward only measures the block's
+// extent, which a permutation does not change.
+//
+// The six expected strings, each derived from its formatter's stated
+// semantics rather than observed:
+//
+//   - heart rate: optU8 prints the raw value and the unit -- 144 -> "144 bpm".
+//   - cadence: FIT reports run cadence per leg, so cadenceLine doubles it --
+//     86 rpm -> 172 -> "172 spm".
+//   - power: PowerSource's zero value is telemetry.PowerAuto, which prefers
+//     Stryd and falls back to native; with no DevFields the native 250 is
+//     what resolves -> "250 W".
+//   - incline: Frame.Course is nil here, so inclineLine has no elevation
+//     model and renders its placeholder -> "-- %".
+//   - pace: 1000 m / 3.0 m/s = 333.33 s/km = 5 min 33.33 s, truncated to the
+//     second -> "5:33/km".
+//   - speed: 3.0 m/s * 3.6 = 10.8 km/h, rounded to whole -> "11 km/h".
+//
+// The sample is chosen so all six strings are distinct, which is what makes
+// an element-wise comparison catch any permutation of them.
+func TestMetricsLines_ComposesTheReferenceRowOrder(t *testing.T) {
+	f := Frame{
+		HasSample: true,
+		Sample: telemetry.Sample{
+			HasHeartRate: true, HeartRate: 144,
+			HasCadence: true, Cadence: 86,
+			HasPower: true, Power: 250,
+			HasSpeed: true, Speed: 3.0,
+		},
+	}
+
+	for _, c := range []struct {
+		name  string
+		gauge MetricsGauge
+		want  []string
+	}{
+		{
+			name:  "the full readout",
+			gauge: MetricsGauge{},
+			want:  []string{"144 bpm", "172 spm", "250 W", "-- %", "5:33/km", "11 km/h"},
+		},
+		{
+			// The same order with the power row gone -- the rows above it
+			// (heart rate, cadence) keep their places, and the rows below it
+			// (incline, pace, speed) each move up one, which is what makes
+			// Draw's bottom-anchored stack close the gap downward.
+			name:  "OmitPower",
+			gauge: MetricsGauge{OmitPower: true},
+			want:  []string{"144 bpm", "172 spm", "-- %", "5:33/km", "11 km/h"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := c.gauge.lines(f)
+			if len(got) != len(c.want) {
+				t.Fatalf("lines() = %q (%d rows), want %q (%d rows)", got, len(got), c.want, len(c.want))
+			}
+			for i := range c.want {
+				if got[i] != c.want[i] {
+					t.Errorf("row %d (top to bottom) = %q, want %q -- the readout's rows are in the wrong order or the wrong metric is on that row; whole readout: %q",
+						i, got[i], c.want[i], got)
+				}
+			}
+		})
+	}
+}
+
+// TestMetricsLines_OmitPowerDropsExactlyThePowerLine pins what OmitPower does
+// to the composed readout: the default result is exactly 6 lines, and
+// OmitPower's result is that SAME slice with the power row removed and every
+// other row's order preserved -- derived from the default result, not
+// restated, so a no-op implementation (which still returns 6 lines) fails on
+// length and a reordering implementation fails on the element-wise
+// comparison.
+//
+// The power row is located by its OWN VALUE (powerLine(f)) rather than a
+// hardcoded index: a hardcoded index is a second, independent claim about
+// where power sits in the composition, free to go stale the moment a row is
+// added above it in lines -- and when it does, the resulting failure message
+// blames "the fixture's assumed order", pointing the reader at the test
+// rather than at the production code that actually moved the row. Finding
+// the row by value has no index to go stale, and it doubles as the
+// "the omitted line really is the power one" check the index version needed
+// a second assertion for.
+func TestMetricsLines_OmitPowerDropsExactlyThePowerLine(t *testing.T) {
+	f := Frame{
+		HasSample: true,
+		Sample: telemetry.Sample{
+			HasHeartRate: true, HeartRate: 144,
+			HasCadence: true, Cadence: 86,
+			HasPower: true, Power: 250,
+			HasSpeed: true, Speed: 3.0,
+		},
+	}
+
+	full := MetricsGauge{}.lines(f)
+	if len(full) != 6 {
+		t.Fatalf("MetricsGauge{}.lines() = %v (%d lines), want 6", full, len(full))
+	}
+
+	want := powerLine(f)
+	idx := -1
+	for i, line := range full {
+		if line == want {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		t.Fatalf("the full readout %v does not contain powerLine's %q at all", full, want)
+	}
+	wantOmitted := append(append([]string{}, full[:idx]...), full[idx+1:]...)
+
+	got := MetricsGauge{OmitPower: true}.lines(f)
+	if len(got) != len(wantOmitted) {
+		t.Fatalf("MetricsGauge{OmitPower: true}.lines() = %v (%d lines), want %v (%d lines)",
+			got, len(got), wantOmitted, len(wantOmitted))
+	}
+	for i := range got {
+		if got[i] != wantOmitted[i] {
+			t.Errorf("MetricsGauge{OmitPower: true}.lines()[%d] = %q, want %q (full = %v)",
+				i, got[i], wantOmitted[i], full)
+		}
+	}
+
+	// MetricsGauge{} -- a bare struct literal, as hud_bench_test.go writes --
+	// must keep the power line: OmitPower's zero value is "show power".
+	if bare := (MetricsGauge{}).lines(f); len(bare) != 6 {
+		t.Errorf("a bare MetricsGauge{} composed %d lines, want 6 (OmitPower's zero value must not hide power)", len(bare))
+	}
+}
+
 // TestResolveBox pins the anchor geometry: each corner resolves to the
 // expected inset pixel, and a fractional nudge shifts it.
 func TestResolveBox(t *testing.T) {
@@ -424,31 +567,45 @@ func gaugeNames(l Layout) map[string]bool {
 	return names
 }
 
-// TestSelectLayout pins the layout selection: explicit modes force their
-// layout regardless of dimensions, and "auto" (plus any unknown mode) picks by
-// aspect -- vertical for a portrait frame, default for a landscape one.
-func TestSelectLayout(t *testing.T) {
+// TestSelectLayout_ThePowerAxisOnlyRefinesTheLandscapeBranch pins layout
+// selection along both axes it now depends on: an explicit mode
+// ("vertical"/"default"/"default-no-power") always forces its layout
+// regardless of dimensions AND regardless of omitPower -- a caller that named
+// "default" explicitly gets it even over a FIT with no power, and
+// "default-no-power" forces itself even onto a portrait frame and even when
+// the FIT DOES carry power, mirroring how "default" already forced itself
+// onto a portrait frame before this. Only "auto" (and any unknown mode, which
+// behaves like it) consults omitPower at all, and only AFTER the portrait
+// test -- a portrait frame gets VerticalLayout regardless of omitPower,
+// because that layout has no power line to drop in the first place.
+func TestSelectLayout_ThePowerAxisOnlyRefinesTheLandscapeBranch(t *testing.T) {
 	const landscapeW, landscapeH = 3840, 2160
 	const portraitW, portraitH = 2160, 3840
 
-	// "vertical" forces the 3-gauge vertical layout even on a landscape frame.
-	if got := len(SelectLayout("vertical", landscapeW, landscapeH).Placements); got != 3 {
-		t.Errorf("vertical mode on landscape: %d gauges, want 3", got)
-	}
-	// "default" forces the full layout even on a portrait frame.
-	if got := len(SelectLayout("default", portraitW, portraitH).Placements); got != len(DefaultLayout().Placements) {
-		t.Errorf("default mode on portrait: %d gauges, want %d", got, len(DefaultLayout().Placements))
-	}
-	// "auto" picks by aspect.
-	if got := len(SelectLayout("auto", portraitW, portraitH).Placements); got != 3 {
-		t.Errorf("auto on portrait: %d gauges, want the vertical layout's 3", got)
-	}
-	if got := len(SelectLayout("auto", landscapeW, landscapeH).Placements); got != len(DefaultLayout().Placements) {
-		t.Errorf("auto on landscape: %d gauges, want the default layout", got)
-	}
-	// An unknown mode behaves like "auto".
-	if got := len(SelectLayout("bogus", portraitW, portraitH).Placements); got != 3 {
-		t.Errorf("unknown mode on portrait: %d gauges, want vertical's 3 (auto fallback)", got)
+	for _, c := range []struct {
+		name          string
+		mode          string
+		width, height int
+		omitPower     bool
+		want          string
+	}{
+		{"landscape auto omit -> no-power", "auto", landscapeW, landscapeH, true, "default-no-power"},
+		{"landscape auto has-power -> default", "auto", landscapeW, landscapeH, false, "default"},
+		{"portrait auto omit -> vertical (no power line to drop)", "auto", portraitW, portraitH, true, "vertical"},
+		{"portrait auto has-power -> vertical", "auto", portraitW, portraitH, false, "vertical"},
+		{`explicit "default" beats detection even when power is missing`, "default", landscapeW, landscapeH, true, "default"},
+		{`explicit "default-no-power" wins on a portrait frame with real power`, "default-no-power", portraitW, portraitH, false, "default-no-power"},
+		{`explicit "vertical" forces itself on a landscape frame`, "vertical", landscapeW, landscapeH, false, "vertical"},
+		{"an unknown mode behaves like auto, landscape, omit", "bogus", landscapeW, landscapeH, true, "default-no-power"},
+		{"an unknown mode behaves like auto, portrait, has-power", "bogus", portraitW, portraitH, false, "vertical"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := SelectLayout(c.mode, c.width, c.height, c.omitPower)
+			if got.Name != c.want {
+				t.Errorf("SelectLayout(%q, %dx%d, omitPower=%v).Name = %q, want %q",
+					c.mode, c.width, c.height, c.omitPower, got.Name, c.want)
+			}
+		})
 	}
 }
 
@@ -499,7 +656,7 @@ func TestRender_VerticalLayout(t *testing.T) {
 
 	// A portrait frame.
 	const w, h = 540, 960
-	r := NewRenderer(SelectLayout("auto", w, h))
+	r := NewRenderer(SelectLayout("auto", w, h, false))
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	r.Render(img, Frame{
 		Width: w, Height: h,
@@ -528,6 +685,163 @@ func TestRender_VerticalLayout(t *testing.T) {
 	}
 	if ink(0, h*4/5, w, h) == 0 {
 		t.Error("bottom elevation profile drew nothing")
+	}
+}
+
+// TestNoPowerLayout_IsTheDefaultLayoutMinusThePowerLine pins that NoPowerLayout
+// really is a DERIVATIVE of DefaultLayout -- everything about the arrangement
+// unchanged except the metrics gauge's OmitPower bit -- rather than a second,
+// independently maintained copy free to drift from it.
+//
+// The last pair of assertions (OmitPower false on the default, true on the
+// no-power layout) is the one that matters: without it, `func NoPowerLayout()
+// Layout { return DefaultLayout() }` would satisfy every other assertion here.
+func TestNoPowerLayout_IsTheDefaultLayoutMinusThePowerLine(t *testing.T) {
+	def := DefaultLayout()
+	np := NoPowerLayout()
+
+	if np.Margin != def.Margin {
+		t.Errorf("Margin = %v, want the default layout's %v", np.Margin, def.Margin)
+	}
+	if np.FontScale != def.FontScale {
+		t.Errorf("FontScale = %v, want the default layout's %v", np.FontScale, def.FontScale)
+	}
+	if len(np.Placements) != len(def.Placements) {
+		t.Fatalf("%d placements, want the default layout's %d", len(np.Placements), len(def.Placements))
+	}
+
+	sawMetrics := false
+	for i := range def.Placements {
+		dp, np2 := def.Placements[i], np.Placements[i]
+		if dp.Gauge.Name() != np2.Gauge.Name() {
+			t.Errorf("placement %d: gauge %q, want the default layout's %q (in the same order)",
+				i, np2.Gauge.Name(), dp.Gauge.Name())
+		}
+		if dp.Anchor != np2.Anchor || dp.DX != np2.DX || dp.DY != np2.DY || dp.Enabled != np2.Enabled {
+			t.Errorf("placement %d (%s): Anchor/DX/DY/Enabled = %v/%v/%v/%v, want the default layout's %v/%v/%v/%v",
+				i, dp.Gauge.Name(), np2.Anchor, np2.DX, np2.DY, np2.Enabled, dp.Anchor, dp.DX, dp.DY, dp.Enabled)
+		}
+		if mg, ok := dp.Gauge.(MetricsGauge); ok {
+			sawMetrics = true
+			if mg.OmitPower {
+				t.Error("DefaultLayout()'s metrics placement has OmitPower true; the default layout must still show power")
+			}
+			npMG, ok := np2.Gauge.(MetricsGauge)
+			if !ok {
+				t.Fatalf("placement %d: NoPowerLayout's gauge is %T, want a MetricsGauge", i, np2.Gauge)
+			}
+			if !npMG.OmitPower {
+				t.Error("NoPowerLayout's metrics placement has OmitPower false -- it would draw the power line it exists to drop")
+			}
+		}
+	}
+	if !sawMetrics {
+		t.Fatal("neither layout carries a MetricsGauge placement -- this test's central assertion never ran")
+	}
+
+	if np.Name != "default-no-power" {
+		t.Errorf("NoPowerLayout().Name = %q, want %q", np.Name, "default-no-power")
+	}
+	if def.Name != "default" {
+		t.Errorf("DefaultLayout().Name = %q, want %q", def.Name, "default")
+	}
+}
+
+// TestRender_NoPowerLayoutClosesTheGapDownward is the pixel half of the
+// mechanism claim: dropping the power line from MetricsGauge's composed list
+// makes the bottom-anchored stack close the gap DOWNWARD on its own (the rows
+// above the dropped line -- heart rate, cadence -- move down into it; the
+// rows below -- incline, pace, speed -- were already below the gap and do not
+// move), with no Placement/anchor change.
+//
+// It renders the default and no-power layouts onto the same frame and sample
+// and checks three things in the lower-left quadrant, where the metrics
+// readout lives and nothing else in the default layout draws:
+//
+//   - the BOTTOM ink row is unchanged (the block stayed pinned to its anchor
+//     -- a shift in the wrong direction, or of the whole block, would still
+//     pass a naive "something moved" check);
+//   - the TOP ink row moved down by one lineH, computed from the renderer
+//     (FontPx(f)*1.35, the same formula MetricsGauge.Draw uses) rather than
+//     hardcoded, so this cannot silently desync from the code it measures --
+//     and rules out an implementation that blanks the power line IN PLACE
+//     (leaving "-- W" or empty space where it was) rather than removing it,
+//     which would leave the top unchanged;
+//   - total ink strictly decreased (rules out a no-op that only reshuffled
+//     spacing without actually dropping anything).
+func TestRender_NoPowerLayoutClosesTheGapDownward(t *testing.T) {
+	const w, h = 1280, 720
+	f := Frame{
+		Width: w, Height: h,
+		HasSample: true,
+		Sample: telemetry.Sample{
+			HasHeartRate: true, HeartRate: 144,
+			HasCadence: true, Cadence: 86,
+			HasPower: true, Power: 250,
+			HasSpeed: true, Speed: 3.0,
+		},
+	}
+
+	// The lower-left quadrant: wide/tall enough to hold the whole metrics
+	// block under either layout, and (per TestRender_DrawsGauges) the only
+	// place the default layout draws anything at all on this frame.
+	x0, x1 := 0, w/2
+	y0, y1 := h/2, h
+
+	inkRows := func(layout Layout) (top, bottom, total int) {
+		r := NewRenderer(layout)
+		img := image.NewRGBA(image.Rect(0, 0, w, h))
+		r.Render(img, f)
+		top, bottom = -1, -1
+		for y := y0; y < y1; y++ {
+			rowInked := false
+			for x := x0; x < x1; x++ {
+				if img.Pix[y*img.Stride+x*4+3] != 0 {
+					rowInked = true
+					total++
+				}
+			}
+			if rowInked {
+				if top < 0 {
+					top = y
+				}
+				bottom = y
+			}
+		}
+		return top, bottom, total
+	}
+
+	defTop, defBottom, defInk := inkRows(DefaultLayout())
+	npTop, npBottom, npInk := inkRows(NoPowerLayout())
+
+	if defTop < 0 {
+		t.Fatal("the default layout drew no ink in the lower-left quadrant")
+	}
+	if npTop < 0 {
+		t.Fatal("the no-power layout drew no ink in the lower-left quadrant")
+	}
+
+	// (a) pinned: the bottom row is the anchor end and must not move.
+	if defBottom != npBottom {
+		t.Errorf("bottom ink row moved (default %d, no-power %d) -- the block must stay pinned to its anchor, "+
+			"only its TOP should move", defBottom, npBottom)
+	}
+
+	// (b) the top moved down by one lineH -- computed from the renderer, not
+	// a literal, so a font-scale change can't desync this from the code.
+	r := NewRenderer(DefaultLayout())
+	lineH := r.FontPx(f) * 1.35
+	gotShift := float64(npTop - defTop)
+	if math.Abs(gotShift-lineH) > 1.5 { // sub-pixel rounding of a non-integer shift
+		t.Errorf("top ink row shifted %v px (default row %d -> no-power row %d), want ~%v px (one lineH) -- "+
+			"a line blanked IN PLACE rather than removed would leave this at ~0", gotShift, defTop, npTop, lineH)
+	}
+
+	// (c) strictly less ink: a no-op, or a reshuffle that didn't actually
+	// drop anything, would not lose any.
+	if npInk >= defInk {
+		t.Errorf("no-power ink (%d px) is not less than the default's (%d px) -- the power line was not actually removed",
+			npInk, defInk)
 	}
 }
 

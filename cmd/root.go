@@ -189,7 +189,7 @@ func NewRootCmd() *cobra.Command {
 	root.Flags().StringVar(&hudTimeZone, "hud-timezone", "",
 		"telemetry-hud only: timezone the on-screen clock displays in -- an IANA name (e.g. \"Australia/Brisbane\") or a fixed offset (e.g. \"+10:00\"). Default: UTC. Only affects the clock gauge; telemetry sync is always UTC")
 	root.Flags().StringVar(&hudLayout, "hud-layout", "auto",
-		"telemetry-hud only: gauge arrangement -- \"auto\" (default: picks a vertical layout for portrait clips, the full layout otherwise), \"default\" (the full landscape set), or \"vertical\" (distance/map/elevation only, for portrait videos)")
+		"telemetry-hud only: gauge arrangement -- \"auto\" (default: picks a vertical layout for portrait clips, the full layout otherwise -- auto also picks \"default-no-power\" when the FIT carries no power reading for the selected --power-source; pass \"default\" to keep the placeholder line), \"default\" (the full landscape set), \"default-no-power\" (the full landscape set with the power line removed and the lines above it closed down into the gap, for a workout recorded without a power sensor), or \"vertical\" (distance/map/elevation only, for portrait videos)")
 	root.Flags().StringVar(&powerSource, "power-source", "auto",
 		"telemetry-hud only: which power reading the metrics gauge shows when the FIT carries both a footpod (Stryd) developer field and the standard FIT power field -- \"auto\" (default: prefer Stryd, fall back to native), \"stryd\" (force the footpod's developer field), or \"native\" (force the standard FIT power field). The two can disagree since they are different sensors")
 	root.Flags().Float64Var(&elevSmoothing, "elevation-smoothing", 0,
@@ -576,15 +576,38 @@ func resolveLogLevel(level string, debug bool) (logging.Level, error) {
 	return parsed, nil
 }
 
-// validateHUDLayout rejects an unknown --hud-layout up front (the accepted set
-// mirrors hud.SelectLayout).
+// hudLayoutModes is the accepted set of --hud-layout values, and the single
+// source of truth for validateHUDLayout. It is a map (not a switch) so that
+// set is ENUMERABLE: TestHUDLayoutModes_EveryAcceptedValueForcesALayoutOrIsAuto
+// iterates it to check every value the CLI accepts is one hud.SelectLayout
+// actually has a case for, rather than a hand-restated copy of the list that
+// could drift from SelectLayout's own switch without either test noticing.
+// See hud.SelectLayout's doc comment for why that direction of drift is
+// dangerous: an accepted value with no matching case falls through to
+// SelectLayout's "auto" default silently, so `--hud-layout <newmode>` exits 0
+// having ignored the flag.
+//
+// This does not carry a parsed value the way powerSourceModes/
+// telemetryScopeModes do (mapping their flag's spelling to a telemetry enum):
+// --hud-layout has no such enum, its raw string is threaded straight through
+// to TelemetryHUD.LayoutMode and on into hud.SelectLayout, so a set is all
+// this needs.
+var hudLayoutModes = map[string]struct{}{
+	"auto":             {},
+	"default":          {},
+	"default-no-power": {},
+	"vertical":         {},
+}
+
+// validateHUDLayout rejects an unknown --hud-layout up front. The message
+// below lists the accepted values in a fixed, hand-written order rather than
+// ranging over hudLayoutModes, because map iteration order is randomized and
+// the message must read the same on every run.
 func validateHUDLayout(mode string) error {
-	switch mode {
-	case "auto", "default", "vertical":
-		return nil
-	default:
-		return fmt.Errorf("--hud-layout %q is invalid; use auto, default, or vertical", mode)
+	if _, ok := hudLayoutModes[mode]; !ok {
+		return fmt.Errorf("--hud-layout %q is invalid; use auto, default, default-no-power, or vertical", mode)
 	}
+	return nil
 }
 
 // powerSourceModes maps the --power-source flag values to their telemetry

@@ -106,6 +106,23 @@ const (
 	PowerNative
 )
 
+// String renders s the way the CLI spells it (`auto`, `stryd`, `native`), for
+// log lines and diagnostics -- the same role telemetry.Scope.String plays for
+// --telemetry-scope, and bound to the CLI's own vocabulary the same way (see
+// cmd's TestPowerSourceModes_RoundTripsEveryPowerSourceSpelling).
+func (s PowerSource) String() string {
+	switch s {
+	case PowerAuto:
+		return "auto"
+	case PowerStryd:
+		return "stryd"
+	case PowerNative:
+		return "native"
+	default:
+		return "unknown"
+	}
+}
+
 // ResolvedPower returns the watts to display for the given source preference,
 // and whether a value is present. The forced modes (PowerStryd, PowerNative)
 // are strict -- they return present=false rather than silently substituting
@@ -134,6 +151,27 @@ func (s Sample) ResolvedPower(src PowerSource) (float64, bool) {
 		}
 		return 0, false
 	}
+}
+
+// HasPower reports whether ANY Sample in t resolves a power reading under
+// src -- i.e. whether the activity carries this source's power at all, as
+// distinct from any single frame's ResolvedPower coming up empty because the
+// clip briefly passed through a dropout. It exists for a caller (the HUD's
+// layout selection) that must decide BEFORE rendering a single frame whether
+// there is a power line worth drawing.
+//
+// This calls Sample.ResolvedPower rather than re-testing HasPower/DevFields
+// itself, so there is exactly one rule for "does this sample have power" --
+// the same one powerLine reads. A second, independently written check here
+// would be free to disagree with it, and the disagreement would surface as a
+// HUD whose log line names one layout while the pixels show another.
+func (t *Track) HasPower(src PowerSource) bool {
+	for _, s := range t.Samples {
+		if _, ok := s.ResolvedPower(src); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // Track is a decoded FIT activity file: metadata about its source plus
