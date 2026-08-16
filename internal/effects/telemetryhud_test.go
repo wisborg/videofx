@@ -16,6 +16,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/muktihari/fit/encoder"
+	"github.com/muktihari/fit/profile/filedef"
+	"github.com/muktihari/fit/profile/mesgdef"
+	"github.com/muktihari/fit/profile/typedef"
+
 	"videofx/internal/fittest"
 	"videofx/internal/hud"
 	"videofx/internal/logging"
@@ -924,6 +929,73 @@ func countHUDLayoutLines(got string) int {
 	return strings.Count(got, "HUD layout:")
 }
 
+// TestTelemetryHUD_Apply_LayoutLineNamesTheTimeModeOnlyWhereItShows pins the
+// ", time: <mode>" clause logLayoutOnce adds for --hud-time, under the same
+// rule it already applies to --power-source: name a setting only where it
+// reaches the pixels.
+//
+// Both halves are needed and neither alone is enough. Logging the mode
+// unconditionally satisfies "says which mode"; omitting the clause entirely
+// satisfies "doesn't name it on a layout that can't show it". The vertical
+// row is the one that separates them -- VerticalLayout carries no
+// TimeDateGauge at all, so a --hud-time there selects between two numbers
+// nothing will draw, and a line naming one would point the reader at a
+// setting with no effect on what they are looking at.
+//
+// This is the join cmd's flag test cannot reach: that one proves --hud-time
+// lands in TelemetryHUD.TimeMode, while this proves the value Apply actually
+// rendered with is the one it reports. Substituting a literal
+// telemetry.TimeElapsed for t.TimeMode in the log call -- a one-token slip of
+// exactly the kind this file's power-source assertion was written for -- is
+// caught here by the "active" row and by nothing else in the package.
+func TestTelemetryHUD_Apply_LayoutLineNamesTheTimeModeOnlyWhereItShows(t *testing.T) {
+	requireFFmpeg(t)
+
+	for _, c := range []struct {
+		name       string
+		mode       telemetry.TimeMode
+		layoutMode string
+		// want is the clause the line must carry; empty means it must carry
+		// no "time:" clause at all.
+		want string
+	}{
+		{name: "clock is the default and says nothing", mode: telemetry.TimeClock, layoutMode: "default"},
+		{name: "elapsed names itself", mode: telemetry.TimeElapsed, layoutMode: "default", want: "time: elapsed"},
+		{name: "active names itself", mode: telemetry.TimeActive, layoutMode: "default", want: "time: active"},
+		{
+			name:       "vertical has no clock to show it on, so the line stays quiet",
+			mode:       telemetry.TimeElapsed,
+			layoutMode: "vertical",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var buf bytes.Buffer
+			e := &TelemetryHUD{
+				FitPath:    hudTimerFixturePath(t),
+				TimeMode:   c.mode,
+				LayoutMode: c.layoutMode,
+			}
+			err := e.Apply(context.Background(), Input{
+				SourcePath: generateHUDSource(t, dir),
+				OutputPath: filepath.Join(dir, "out.mp4"),
+				Log:        logging.New(&buf, logging.LevelInfo),
+			})
+			if err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+			got := buf.String()
+			switch {
+			case c.want == "" && strings.Contains(got, "time: "):
+				t.Errorf("the layout line names a time mode where none should be named (%s, %s):\n%s",
+					c.mode, c.layoutMode, got)
+			case c.want != "" && !strings.Contains(got, c.want):
+				t.Errorf("the layout line does not name %q as the time mode it rendered with:\n%s", c.want, got)
+			}
+		})
+	}
+}
+
 // TestTelemetryHUD_ReportsEachLayoutOncePerRunNotOncePerFile pins the dedupe
 // on the layout line. One videofx invocation reads ONE FIT and shares ONE
 // effect instance across every job in the batch, so a line naming the layout
@@ -1382,6 +1454,259 @@ func TestTelemetryHUD_Apply_TheProgressFillTracksTheClipsOwnDistance(t *testing.
 					advance, edges[0], len(edges)-1, last, c.minAdvance, c.maxAdvance, c.explanation, edges)
 			}
 		})
+	}
+}
+
+// hudTimerFixturePath builds a FIT activity whose Start is 60s before
+// hudSourceCreation -- the fixed creation_time generateHUDSource and
+// generateBlackHUDSource both stamp their clips with -- and carries one
+// 30-second pause from t=10s to t=40s. A clip opening at hudSourceCreation
+// therefore sits 60s into the activity's ELAPSED time but only 30s into its
+// ACTIVE time: a 30s gap, chosen to be far too large for --hud-time elapsed
+// and --hud-time active to coincidentally render the same digits.
+func hudTimerFixturePath(t *testing.T) string {
+	t.Helper()
+	opts := fittest.DefaultOptions()
+	opts.Start = hudSourceCreation.Add(-60 * time.Second)
+	opts.Count = 120
+	opts.Pauses = []fittest.Pause{{Start: 10 * time.Second, End: 40 * time.Second}}
+
+	data, err := fittest.Build(opts)
+	if err != nil {
+		t.Fatalf("building the timer FIT fixture: %v", err)
+	}
+	return writeFITFixture(t, data, "timer-activity.fit")
+}
+
+// hudClockBox is the top-right corner of a blackHUDSourceW x blackHUDSourceH
+// frame -- the same box TestTelemetryHUD_ACallerSuppliedLayoutBeatsTheAutoChoiceAndLogsAsCustom
+// uses to isolate the landscape layout's TimeDateGauge (anchored TopRight)
+// from everything else the default layout draws.
+var hudClockBox = fmt.Sprintf("%d:%d:%d:0", blackHUDSourceW/4, blackHUDSourceH/5, blackHUDSourceW*3/4)
+
+// rawRGBInBox decodes path's video to raw RGB24, cropped to box (an ffmpeg
+// crop=w:h:x:y spec), and returns the concatenated per-frame bytes.
+func rawRGBInBox(t *testing.T, path, box string) []byte {
+	t.Helper()
+	raw, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-i", path, "-vf", "crop="+box, "-f", "rawvideo", "-pix_fmt", "rgb24", "-").Output()
+	if err != nil {
+		t.Fatalf("decoding %s cropped to %s: %v", path, box, err)
+	}
+	if len(raw) == 0 {
+		t.Fatalf("decoding %s cropped to %s produced no bytes", path, box)
+	}
+	return raw
+}
+
+// meanAbsDiff is the average absolute per-byte difference between a and b --
+// for comparing two INDEPENDENT hevc_videotoolbox re-encodes of nominally
+// the same content, where a bit-exact bytes.Equal is too strict (quantization
+// noise differs slightly even for identical input across two separate
+// encoder passes) but genuinely different on-screen text is not a rounding
+// difference: it moves whole runs of pixels from black to white or back, far
+// more than re-encode noise ever does. See its two callers for the
+// thresholds each direction actually measured.
+func meanAbsDiff(t *testing.T, a, b []byte) float64 {
+	t.Helper()
+	if len(a) != len(b) {
+		t.Fatalf("byte streams differ in length: %d vs %d", len(a), len(b))
+	}
+	var sum int64
+	for i := range a {
+		d := int(a[i]) - int(b[i])
+		if d < 0 {
+			d = -d
+		}
+		sum += int64(d)
+	}
+	return float64(sum) / float64(len(a))
+}
+
+// TestTelemetryHUD_Apply_ElapsedAndActiveRenderDifferentPixels is the pixel
+// half of --hud-time over a REAL Apply pipeline (not just the hud package's
+// own render, which only proves ShowElapsed changes a rendered Frame -- this
+// proves TimeMode actually reaches that Frame from the effect's frame loop
+// and TimerModel). The two renders share everything -- same source, same
+// FIT, same layout -- except TimeMode, and hudTimerFixturePath's 30-second
+// pause guarantees the two clocks cannot coincidentally agree.
+func TestTelemetryHUD_Apply_ElapsedAndActiveRenderDifferentPixels(t *testing.T) {
+	requireFFmpeg(t)
+
+	dir := t.TempDir()
+	src := generateBlackHUDSource(t, dir)
+	fit := hudTimerFixturePath(t)
+
+	render := func(mode telemetry.TimeMode) []byte {
+		out := filepath.Join(dir, mode.String()+".mp4")
+		e := &TelemetryHUD{FitPath: fit, LayoutMode: "default", TimeMode: mode}
+		if err := e.Apply(context.Background(), Input{SourcePath: src, OutputPath: out}); err != nil {
+			t.Fatalf("Apply(TimeMode=%s): %v", mode, err)
+		}
+		return rawRGBInBox(t, out, hudClockBox)
+	}
+
+	elapsed, active := render(telemetry.TimeElapsed), render(telemetry.TimeActive)
+	diff := meanAbsDiff(t, elapsed, active)
+	if diff < 1.0 { // measured 1.90 for genuinely different digits, ~0.3 for identical ones (see the scope test below)
+		t.Errorf("elapsed and active TimeMode rendered near-identical clock pixels (mean abs diff %.3f) -- "+
+			"the fixture's 30s pause should make them draw different digits", diff)
+	}
+}
+
+// TestTelemetryHUD_Apply_ElapsedStaysActivityRelativeUnderClipRebasedScope is
+// the one --telemetry-scope this feature must NOT respond to: Scope narrows
+// distance, splits and the progress bar to the clip's own window, but
+// elapsed/active time is measured from the WHOLE activity's start in every
+// scope (see TelemetryHUD.TimeMode's doc comment and
+// telemetry.BuildScopedActivity's comment on why Timing survives every scope
+// unchanged). A build that ever moved telemetry.BuildTimerModel to read the
+// SCOPED track instead of the one Decode returned would make the clock reset
+// to 0 at the clip's own opening frame under clip-rebased -- this is the test
+// that would catch it.
+func TestTelemetryHUD_Apply_ElapsedStaysActivityRelativeUnderClipRebasedScope(t *testing.T) {
+	requireFFmpeg(t)
+
+	dir := t.TempDir()
+	src := generateBlackHUDSource(t, dir)
+	fit := hudTimerFixturePath(t)
+
+	render := func(scope telemetry.Scope) []byte {
+		out := filepath.Join(dir, scope.String()+".mp4")
+		e := &TelemetryHUD{FitPath: fit, LayoutMode: "default", TimeMode: telemetry.TimeElapsed, Scope: scope}
+		if err := e.Apply(context.Background(), Input{SourcePath: src, OutputPath: out}); err != nil {
+			t.Fatalf("Apply(Scope=%s): %v", scope, err)
+		}
+		return rawRGBInBox(t, out, hudClockBox)
+	}
+
+	full, rebased := render(telemetry.ScopeActivity), render(telemetry.ScopeClipRebased)
+	diff := meanAbsDiff(t, full, rebased)
+	if diff > 1.0 { // measured 0.31 for identical digits (two independent encodes' quantization noise); ~1.9 when the digits genuinely differ (see the pause test above)
+		t.Errorf("--hud-time elapsed rendered different clock pixels under full vs clip-rebased scope (mean abs diff %.3f) -- "+
+			"elapsed time must not be reset at the clip's opening frame", diff)
+	}
+}
+
+// buildUnlocatablePauseFITPath hand-builds (bypassing internal/fittest,
+// which always writes a `timer` start/stop_all pair -- see
+// fittest.buildTimerEvents -- so nothing built through it can ever leave
+// TimerModel.HasTimerEvents false) a FIT Activity file whose Session totals
+// say 20s of the activity was paused, but which carries NO `timer` events at
+// all to say WHERE. This is exactly the shape TimerModel.Active's doc
+// comment describes as indistinguishable from "genuinely no pauses" without
+// HasTimerEvents, and the one the effect's Warnf below exists to announce.
+func buildUnlocatablePauseFITPath(t *testing.T) string {
+	t.Helper()
+	start := hudSourceCreation.Add(-30 * time.Second)
+	last := hudSourceCreation.Add(10 * time.Second)
+	const pausedSeconds = 20.0
+	totalElapsed := last.Sub(start).Seconds()
+
+	act := &filedef.Activity{
+		FileId: *mesgdef.NewFileId(nil).
+			SetType(typedef.FileActivity).
+			SetManufacturer(typedef.ManufacturerGarmin).
+			SetProduct(0).
+			SetSerialNumber(0).
+			SetTimeCreated(start),
+		Activity: mesgdef.NewActivity(nil).
+			SetTimestamp(last).
+			SetNumSessions(1).
+			SetType(typedef.ActivityManual).
+			SetEvent(typedef.EventActivity).
+			SetEventType(typedef.EventTypeStop),
+		Sessions: []*mesgdef.Session{
+			mesgdef.NewSession(nil).
+				SetTimestamp(last).
+				SetStartTime(start).
+				SetSport(typedef.SportRunning).
+				SetEvent(typedef.EventSession).
+				SetEventType(typedef.EventTypeStop).
+				SetTotalElapsedTimeScaled(totalElapsed).
+				SetTotalTimerTimeScaled(totalElapsed - pausedSeconds),
+		},
+		Records: []*mesgdef.Record{
+			mesgdef.NewRecord(nil).SetTimestamp(start),
+			mesgdef.NewRecord(nil).SetTimestamp(last),
+		},
+		// Events deliberately omitted: no `timer` events at all.
+	}
+
+	fit := act.ToFIT(nil)
+	var buf bytes.Buffer
+	if err := encoder.New(&buf).Encode(&fit); err != nil {
+		t.Fatalf("encoding the unlocatable-pause fixture: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "unlocatable-pause.fit")
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestTelemetryHUD_Apply_WarnsWhenActiveCannotLocateItsPauses covers the
+// fallback branch --hud-time active is designed around: a file whose Session
+// totals say the activity paused, but which carries no `timer` events to say
+// WHERE, so Active silently tracks Elapsed's number instead of the moving
+// time the flag promised (TestTimerModel_NoTimerEventsMeansActiveEqualsElapsed
+// and TestDecode_SessionWithNoTimerEventsLeavesHasTimerEventsFalse already
+// prove the "silently tracks" half of that at the telemetry package's own
+// level). This is the other half, and the one nothing else in this file
+// covers: proving the EFFECT actually warns about it on a real Apply run,
+// which would otherwise exit 0 with the viewer's only evidence being their
+// own watch's summary disagreeing with the on-screen clock. Before this test
+// the condition computing unlocatablePause (Apply, telemetryhud.go) could
+// have its comparison inverted or its threshold moved and every other test
+// in this package would stay green.
+func TestTelemetryHUD_Apply_WarnsWhenActiveCannotLocateItsPauses(t *testing.T) {
+	requireFFmpeg(t)
+
+	dir := t.TempDir()
+	var buf bytes.Buffer
+	e := &TelemetryHUD{FitPath: buildUnlocatablePauseFITPath(t), LayoutMode: "default", TimeMode: telemetry.TimeActive}
+	err := e.Apply(context.Background(), Input{
+		SourcePath: generateBlackHUDSource(t, dir),
+		OutputPath: filepath.Join(dir, "out.mp4"),
+		Log:        logging.New(&buf, logging.LevelInfo),
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "carries no timer events to locate its pauses in") {
+		t.Errorf("the log does not warn that --hud-time active cannot locate its pauses:\n%s", got)
+	}
+	if !strings.Contains(got, "20s") {
+		t.Errorf("the warning does not name the FIT's own paused-time figure (20s):\n%s", got)
+	}
+}
+
+// TestTelemetryHUD_Apply_WarnsWhenTheLayoutHasNoTimeDateGaugeToShowItOn
+// covers the OTHER fallback: --hud-time asked for on a layout with no clock
+// at all (VerticalLayout). hud.WithElapsedTime silently leaves such a layout
+// unchanged and unrenamed (see its own tests in internal/hud); this is what
+// proves the EFFECT notices that no-op and says so in the run's log, rather
+// than the flag just doing nothing with no trace anywhere -- the same
+// "guard must fire, not just exist" property the FIT-totals warning above
+// covers for the other fallback.
+func TestTelemetryHUD_Apply_WarnsWhenTheLayoutHasNoTimeDateGaugeToShowItOn(t *testing.T) {
+	requireFFmpeg(t)
+
+	dir := t.TempDir()
+	var buf bytes.Buffer
+	e := &TelemetryHUD{FitPath: testFITPath(t), LayoutMode: "vertical", TimeMode: telemetry.TimeElapsed}
+	err := e.Apply(context.Background(), Input{
+		SourcePath: generateHUDSource(t, dir),
+		OutputPath: filepath.Join(dir, "out.mp4"),
+		Log:        logging.New(&buf, logging.LevelInfo),
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "--hud-time elapsed was requested, but the vertical layout has no time/date gauge") {
+		t.Errorf("the log does not warn that --hud-time has no effect on the vertical layout:\n%s", got)
 	}
 }
 

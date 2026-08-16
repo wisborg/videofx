@@ -74,6 +74,7 @@ var (
 	telemetryStryd bool
 	location       bool
 	hudTimeZone    string
+	hudTime        string
 	hudLayout      string
 	powerSource    string
 	telemetryScope string
@@ -188,6 +189,8 @@ func NewRootCmd() *cobra.Command {
 		"telemetry only: also write a GPX sidecar next to the output (off by default). Like --srt-sidecar it requires telemetry to be the LAST effect in --effect, since the sidecar is written next to the effect's own output")
 	root.Flags().StringVar(&hudTimeZone, "hud-timezone", "",
 		"telemetry-hud only: timezone the on-screen clock displays in -- an IANA name (e.g. \"Australia/Brisbane\") or a fixed offset (e.g. \"+10:00\"). Default: UTC. Only affects the clock gauge; telemetry sync is always UTC")
+	root.Flags().StringVar(&hudTime, "hud-time", "clock",
+		"telemetry-hud only: what the upper-right time/date gauge shows -- \"clock\" (default: the wall clock, in --hud-timezone), \"elapsed\" (time since the FIT activity's start, INCLUDING any pauses -- Garmin/Strava's \"elapsed time\"), or \"active\" (the same, EXCLUDING paused stretches -- Garmin's \"time\", Stryd/Strava's \"moving time\"). Video before the activity's start reads 0:00:00; video after its end reads the final total. Measured from the WHOLE activity's own start regardless of --telemetry-scope. The date line is unchanged in every mode")
 	root.Flags().StringVar(&hudLayout, "hud-layout", "auto",
 		"telemetry-hud only: gauge arrangement -- \"auto\" (default: picks a vertical layout for portrait clips, the full layout otherwise -- auto also picks \"default-no-power\" when the FIT carries no power reading for the selected --power-source; pass \"default\" to keep the placeholder line), \"default\" (the full landscape set), \"default-no-power\" (the full landscape set with the power line removed and the lines above it closed down into the gap, for a workout recorded without a power sensor), or \"vertical\" (distance/map/elevation only, for portrait videos)")
 	root.Flags().StringVar(&powerSource, "power-source", "auto",
@@ -630,6 +633,32 @@ func validatePowerSource(mode string) error {
 // (already rejected by validatePowerSource) falls back to PowerAuto.
 func parsePowerSource(mode string) telemetry.PowerSource {
 	return powerSourceModes[mode] // zero value is PowerAuto
+}
+
+// hudTimeModes maps the --hud-time flag values to their telemetry enum; like
+// powerSourceModes it is the single source of truth for both validation and
+// parsing, and is bound to telemetry.TimeMode.String() by
+// TestHUDTimeModes_RoundTripsEveryTimeModeSpelling for the same reason
+// TestPowerSourceModes_RoundTripsEveryPowerSourceSpelling binds
+// powerSourceModes.
+var hudTimeModes = map[string]telemetry.TimeMode{
+	"clock":   telemetry.TimeClock,
+	"elapsed": telemetry.TimeElapsed,
+	"active":  telemetry.TimeActive,
+}
+
+// validateHUDTime rejects an unknown --hud-time up front.
+func validateHUDTime(mode string) error {
+	if _, ok := hudTimeModes[mode]; !ok {
+		return fmt.Errorf("--hud-time %q is invalid; use clock, elapsed, or active", mode)
+	}
+	return nil
+}
+
+// parseHUDTime maps a --hud-time value to its enum; an unknown value
+// (already rejected by validateHUDTime) falls back to TimeClock.
+func parseHUDTime(mode string) telemetry.TimeMode {
+	return hudTimeModes[mode] // zero value is TimeClock
 }
 
 // telemetryScopeModes maps the --telemetry-scope flag values to their telemetry
@@ -1164,6 +1193,7 @@ func configureEffect(effect effects.Effect, flags *pflag.FlagSet) error {
 		h.ElevationLoss = elevLoss
 		h.LayoutMode = hudLayout
 		h.PowerSource = parsePowerSource(powerSource)
+		h.TimeMode = parseHUDTime(hudTime)
 		// Set on BOTH telemetry effects, here and in configureTelemetry:
 		// selecting telemetry-hud appends a telemetry pass (see
 		// impliedEffects), and a scope that reached only the HUD would leave
@@ -1331,6 +1361,9 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := validatePowerSource(powerSource); err != nil {
+		return err
+	}
+	if err := validateHUDTime(hudTime); err != nil {
 		return err
 	}
 	if err := validateTelemetryScope(telemetryScope); err != nil {

@@ -112,6 +112,19 @@ type TelemetryHUD struct {
 	// on.
 	Scope telemetry.Scope
 
+	// TimeMode selects what the upper-right time/date gauge displays in
+	// place of the wall clock: elapsed time since the FIT activity's start
+	// (including or excluding pauses -- see telemetry.TimeMode) instead of
+	// the current time. The ZERO VALUE is telemetry.TimeClock -- today's
+	// wall-clock HUD -- so a caller that never sets this gets unchanged
+	// behaviour. Wired from --hud-time.
+	//
+	// Unlike Scope, this is measured from the WHOLE activity's own start
+	// regardless of --telemetry-scope: telemetry.BuildScopedActivity carries
+	// Timing through every scope unchanged for exactly this reason (see that
+	// function's doc comment).
+	TimeMode telemetry.TimeMode
+
 	// layoutMu guards loggedLayouts, the set of layout lines this effect has
 	// already emitted, so a batch reports each one once instead of once per
 	// file. One videofx invocation reads one FIT and shares one effect
@@ -154,6 +167,14 @@ type TelemetryHUD struct {
 // --power-source selects between two readings that nothing will display;
 // printing it there would point the reader at a setting with no effect on
 // what they are looking at.
+//
+// The time mode is named under the identical rule, gated on
+// layout.HasTimeDateGauge rather than t.TimeMode != TimeClock alone: a
+// portrait clip's VerticalLayout carries no clock gauge either, and Apply
+// separately Warnf's in that case (see the TimeMode != TimeClock check
+// there) -- this line staying silent about it is not a second bug, it is
+// the same "don't name a setting with no effect on the pixels" rule this
+// function already applies to power source.
 func (t *TelemetryHUD) logLayoutOnce(runLog, clipLog *logging.Logger, layout hud.Layout, width, height int) {
 	// Falls back to "custom" for a caller-supplied Layout with an empty Name:
 	// unreachable from the CLI (only a programmatic caller builds a Layout
@@ -171,6 +192,9 @@ func (t *TelemetryHUD) logLayoutOnce(runLog, clipLog *logging.Logger, layout hud
 	msg := fmt.Sprintf("HUD layout: %s (%s clips", name, orientation)
 	if layout.HasMetricsReadout() {
 		msg += fmt.Sprintf(", power source: %s", t.PowerSource)
+	}
+	if t.TimeMode != telemetry.TimeClock && layout.HasTimeDateGauge() {
+		msg += fmt.Sprintf(", time: %s", t.TimeMode)
 	}
 	msg += ")"
 
@@ -299,6 +323,34 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		return err
 	}
 
+	// Built from the UNSCOPED track, before any --telemetry-scope narrowing
+	// below: elapsed/active time is always measured from the WHOLE
+	// activity's own start (see TimeMode's doc comment and
+	// telemetry.BuildScopedActivity's comment on why Timing survives every
+	// scope unchanged), so there is nothing here for scoping to affect.
+	timer := telemetry.BuildTimerModel(track)
+
+	// unlocatablePause is how much paused time the FIT's own session totals
+	// claim that the file carries no `timer` events to LOCATE -- the case
+	// where TimeActive silently reports TimeElapsed's number instead of the
+	// moving time the flag promised. Zero when the file has events, has no
+	// totals, or genuinely never paused.
+	//
+	// It is measured HERE, against the freshly decoded whole-activity track,
+	// and not at the warning below: by then `track` has been rebound to the
+	// scoped one, and while Timing does survive scoping unchanged (see
+	// BuildScopedActivity), a reader would have to know that to trust the
+	// figure. The warning itself has to wait for the layout, which is not
+	// resolved until much further down -- there is no point telling anyone
+	// which number a gauge will show before knowing whether that gauge is on
+	// screen at all.
+	var unlocatablePause time.Duration
+	if !timer.HasTimerEvents() && track.Timing.HasTotals {
+		if d := track.Timing.TotalElapsed - track.Timing.TotalTimer; d > time.Second {
+			unlocatablePause = d
+		}
+	}
+
 	info, err := vidio.Probe(ctx, in.SourcePath)
 	if err != nil {
 		return fmt.Errorf("probing %s: %w", in.SourcePath, err)
@@ -421,6 +473,32 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		layout = hud.SelectLayout(t.LayoutMode, dw, dh, omitPower)
 	}
 
+	// Applied to BOTH branches above rather than duplicated inside each:
+	// --hud-time swaps what the time/date gauge prints, not which layout is
+	// chosen, so it belongs after the layout is settled regardless of how it
+	// was settled. hud.WithElapsedTime itself is the no-op-and-don't-rename
+	// path for a layout with no clock (VerticalLayout); the Warnf below is
+	// what tells the caller that no-op happened, since the layout's own name
+	// staying "vertical" gives no such signal on its own.
+	if t.TimeMode != telemetry.TimeClock {
+		layout = hud.WithElapsedTime(layout)
+		// Both --hud-time caveats land here, and the order is the point: a
+		// layout with no clock displays NEITHER number, so telling the reader
+		// which of the two it would have shown is noise pointing at a gauge
+		// that is not on screen. This is the same rule logLayoutOnce follows
+		// for --power-source and for the time mode itself -- name a setting
+		// only where it reaches the pixels.
+		switch {
+		case !layout.HasTimeDateGauge():
+			log.Warnf("--hud-time %s was requested, but the %s layout has no time/date gauge to display it on -- the flag has no effect",
+				t.TimeMode, layout.Name)
+		case t.TimeMode == telemetry.TimeActive && unlocatablePause > 0:
+			log.Warnf("--hud-time active was requested, but this activity carries no timer events to locate its pauses in -- "+
+				"the FIT's own totals show %s of paused time the gauge cannot find, so it will read total elapsed time instead",
+				unlocatablePause.Round(time.Second))
+		}
+	}
+
 	// A layout picked from data (auto + omitPower) has to announce itself,
 	// or a wrong --power-source reshapes the HUD silently and exits 0. This
 	// says something on EVERY run, unlike logClipScope, which deliberately
@@ -494,11 +572,36 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 			display = at.In(t.TimeZone)
 		}
 
+		// Elapsed/Active are read off `at`, the FIT-clock instant, rather
+		// than `display`. Passing `display` here would compute the SAME
+		// numbers, and an earlier draft of this comment claimed otherwise:
+		// time.Time.In changes a time's LOCATION, not the instant it names,
+		// and TimerModel's arithmetic is time.Time.Sub, which is instant
+		// arithmetic. --hud-timezone therefore cannot shift an elapsed
+		// reading no matter which of the two is passed. (Verified directly;
+		// the swap leaves every pixel identical.)
+		//
+		// `at` is still the right one to pass, for a reason that outlives
+		// that: `display` is a PRESENTATION value, and the only thing
+		// keeping it interchangeable with `at` is that today it is built by
+		// a zone conversion alone. A future --hud-timezone that re-based
+		// rather than re-zoned -- or any other presentation-side offset
+		// added above -- would make it a different instant, and a duration
+		// computed from it would then be wrong with nothing to see in a log.
+		var elapsed time.Duration
+		switch t.TimeMode {
+		case telemetry.TimeElapsed:
+			elapsed = timer.Elapsed(at)
+		case telemetry.TimeActive:
+			elapsed = timer.Active(at)
+		}
+
 		copy(img.Pix, staticBase.Pix) // composite over the cached static layer
 		renderer.RenderDynamic(img, hud.Frame{
 			Width: dw, Height: dh,
 			Index: i, Total: frameCount,
 			Time:        display,
+			Elapsed:     elapsed,
 			Sample:      sample,
 			HasSample:   ok,
 			PowerSource: t.PowerSource,

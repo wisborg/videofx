@@ -51,6 +51,34 @@ func TestCadenceLine(t *testing.T) {
 	}
 }
 
+// TestFormatElapsed pins H:MM:SS with hours UNPADDED, derived independently
+// of formatElapsed's own arithmetic: e.g. 26h10m4s is 26*3600+10*60+4 =
+// 94204 seconds, which is what the ">= 26h" case below is built from.
+func TestFormatElapsed(t *testing.T) {
+	cases := []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{"zero", 0, "0:00:00"},
+		{"sub-hour", 4*time.Minute + 12*time.Second, "0:04:12"},
+		{"just under an hour", 59*time.Minute + 59*time.Second, "0:59:59"},
+		{"a few hours", 2*time.Hour + 5*time.Minute + 9*time.Second, "2:05:09"},
+		{"double-digit hours", 12*time.Hour + 34*time.Minute + 56*time.Second, "12:34:56"},
+		// 26h does NOT wrap to 2h -- the trap a time.Time-based formatter
+		// would fall into (see formatElapsed's doc comment).
+		{"26 hour ultra", 94204 * time.Second, "26:10:04"},
+		{"negative clamps to zero", -5 * time.Second, "0:00:00"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := formatElapsed(c.d); got != c.want {
+				t.Errorf("formatElapsed(%v) = %q, want %q", c.d, got, c.want)
+			}
+		})
+	}
+}
+
 // TestMetricsLines_ComposesTheReferenceRowOrder pins the readout's row order,
 // top to bottom, against values worked out by hand from each formatter's
 // documented unit conversion -- NOT captured from a run.
@@ -842,6 +870,100 @@ func TestRender_NoPowerLayoutClosesTheGapDownward(t *testing.T) {
 	if npInk >= defInk {
 		t.Errorf("no-power ink (%d px) is not less than the default's (%d px) -- the power line was not actually removed",
 			npInk, defInk)
+	}
+}
+
+// TestWithElapsedTime_SetsShowElapsedAndRenamesOnlyWhenThereIsAClockToRelabel
+// pins the two structural claims WithElapsedTime's doc comment makes: it
+// sets ShowElapsed on every TimeDateGauge placement and suffixes Name on a
+// layout that has one, and returns a layout with NEITHER touched when it has
+// none (VerticalLayout) -- so a portrait render's layout name stays
+// "vertical", not a lie like "vertical+elapsed" describing a clock that was
+// never drawn.
+func TestWithElapsedTime_SetsShowElapsedAndRenamesOnlyWhenThereIsAClockToRelabel(t *testing.T) {
+	def := WithElapsedTime(DefaultLayout())
+	if def.Name != "default+elapsed" {
+		t.Errorf("Name = %q, want %q", def.Name, "default+elapsed")
+	}
+	sawClock := false
+	for _, p := range def.Placements {
+		if td, ok := p.Gauge.(TimeDateGauge); ok {
+			sawClock = true
+			if !td.ShowElapsed {
+				t.Error("TimeDateGauge placement has ShowElapsed false after WithElapsedTime")
+			}
+		}
+	}
+	if !sawClock {
+		t.Fatal("DefaultLayout carries no TimeDateGauge placement -- this test's central assertion never ran")
+	}
+
+	vert := VerticalLayout()
+	got := WithElapsedTime(vert)
+	if got.Name != vert.Name {
+		t.Errorf("VerticalLayout's Name changed to %q, want unchanged %q -- it has no clock to relabel", got.Name, vert.Name)
+	}
+	for _, p := range got.Placements {
+		if _, ok := p.Gauge.(TimeDateGauge); ok {
+			t.Fatal("VerticalLayout unexpectedly carries a TimeDateGauge placement -- this test's premise is wrong")
+		}
+	}
+}
+
+// TestWithElapsedTime_DoesNotMutateTheCallersOriginalLayout pins the aliasing
+// hazard WithElapsedTime's own doc comment names: l Layout is passed BY
+// VALUE, but Layout carries a SLICE, so without cloning it first, writing
+// through l.Placements[i].Gauge also writes through the caller's own backing
+// array. The doc comment spells out the real consequence -- the
+// telemetry-hud effect calls this on a caller-supplied *hud.Layout it
+// dereferenced (TelemetryHUD.Layout, for a programmatic caller), so a caller
+// reusing one hud.Layout across two renders would get elapsed time burned
+// into the SECOND render even after asking for TimeClock, with nothing in
+// any log line to explain it. This test proves the clone actually happens,
+// not just that the doc comment says it should.
+func TestWithElapsedTime_DoesNotMutateTheCallersOriginalLayout(t *testing.T) {
+	orig := DefaultLayout()
+	_ = WithElapsedTime(orig)
+
+	for _, p := range orig.Placements {
+		if td, ok := p.Gauge.(TimeDateGauge); ok && td.ShowElapsed {
+			t.Fatal("WithElapsedTime mutated the caller's original Layout's Placements in place -- " +
+				"a caller that reuses one hud.Layout across two renders (e.g. a programmatic caller " +
+				"setting TelemetryHUD.Layout) would get elapsed time on a later render that asked for TimeClock")
+		}
+	}
+}
+
+// TestRender_ShowElapsedChangesThePixelsTheClockDraws is the pixel half of
+// --hud-time: rendering the SAME Frame (same Time, same Elapsed) through the
+// wall-clock and elapsed-time gauges must produce visibly different ink,
+// or the flag could be silently reaching TimeDateGauge and drawing the same
+// thing anyway. Time and Elapsed are deliberately set so their formatted
+// strings cannot coincide (a wall clock never reads "1:02:03" the way
+// formatElapsed does with unpadded hours), which is what makes "differs"
+// mean the flag actually took effect rather than differing by luck.
+func TestRender_ShowElapsedChangesThePixelsTheClockDraws(t *testing.T) {
+	const w, h = 1280, 720
+	f := Frame{
+		Width: w, Height: h,
+		Time:    time.Date(2026, 3, 1, 9, 30, 0, 0, time.UTC),
+		Elapsed: time.Hour + 2*time.Minute + 3*time.Second,
+	}
+
+	clock := Layout{Name: "clock", Margin: 0.02, FontScale: 0.03,
+		Placements: []Placement{{Gauge: TimeDateGauge{}, Anchor: TopRight, Enabled: true}}}
+	elapsed := Layout{Name: "elapsed", Margin: 0.02, FontScale: 0.03,
+		Placements: []Placement{{Gauge: TimeDateGauge{ShowElapsed: true}, Anchor: TopRight, Enabled: true}}}
+
+	render := func(l Layout) []byte {
+		img := image.NewRGBA(image.Rect(0, 0, w, h))
+		NewRenderer(l).Render(img, f)
+		return img.Pix
+	}
+
+	clockPix, elapsedPix := render(clock), render(elapsed)
+	if bytes.Equal(clockPix, elapsedPix) {
+		t.Fatal("ShowElapsed=true rendered pixel-identical output to the wall clock -- --hud-time changed nothing")
 	}
 }
 

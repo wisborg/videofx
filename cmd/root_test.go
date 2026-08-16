@@ -1512,6 +1512,97 @@ func TestPowerSourceModes_RoundTripsEveryPowerSourceSpelling(t *testing.T) {
 	}
 }
 
+func TestValidateHUDTime(t *testing.T) {
+	cases := []struct {
+		mode    string
+		wantErr bool
+	}{
+		{"clock", false},
+		{"elapsed", false},
+		{"active", false},
+		{"", true},
+		{"moving", true},
+		{"Elapsed", true}, // case-sensitive
+	}
+	for _, c := range cases {
+		t.Run(c.mode, func(t *testing.T) {
+			if err := validateHUDTime(c.mode); (err != nil) != c.wantErr {
+				t.Errorf("validateHUDTime(%q) = %v, wantErr %v", c.mode, err, c.wantErr)
+			}
+		})
+	}
+}
+
+// TestHUDTimeModes_RoundTripsEveryTimeModeSpelling binds the two tables that
+// spell "clock"/"elapsed"/"active": hudTimeModes here, and
+// telemetry.TimeMode.String() in the other package -- exactly as
+// TestPowerSourceModes_RoundTripsEveryPowerSourceSpelling binds
+// PowerSource's two tables, and for the same reason: nothing in the type
+// system connects them, so renaming a value in one leaves the other -- the
+// flag the user types, or the telemetry-hud log line naming the time mode --
+// saying the old word, with every existing test still green.
+func TestHUDTimeModes_RoundTripsEveryTimeModeSpelling(t *testing.T) {
+	// 32 is arbitrary but far past any plausible count; TimeMode is a small
+	// hand-written enum, not a namespace.
+	const scan = 32
+
+	named := 0
+	for i := range scan {
+		m := telemetry.TimeMode(i)
+		name := m.String()
+		if name == "unknown" {
+			continue
+		}
+		named++
+		got, ok := hudTimeModes[name]
+		if !ok {
+			t.Errorf("telemetry.TimeMode(%d) spells itself %q, but --hud-time does not accept that value; add it to hudTimeModes and to the flag's help text", i, name)
+			continue
+		}
+		if got != m {
+			t.Errorf("hudTimeModes[%q] = TimeMode(%d), want TimeMode(%d): the CLI maps that word to a different mode than the one that spells itself with it", name, got, m)
+		}
+	}
+	if named != len(hudTimeModes) {
+		t.Errorf("telemetry defines %d named time modes but --hud-time accepts %d values; the two vocabularies have drifted apart", named, len(hudTimeModes))
+	}
+
+	for name, m := range hudTimeModes {
+		if m.String() != name {
+			t.Errorf("--hud-time %q selects a mode that spells itself %q; a log line would name a value the flag does not accept", name, m)
+		}
+	}
+}
+
+// TestConfigureEffect_HUDTimeFlagStringReachesTheEffect proves the "--hud-time"
+// flag NAME ITSELF -- not just the package-level hudTime variable a test can
+// assign directly -- reaches TelemetryHUD.TimeMode. Every other assertion on
+// TimeMode's wiring (TestConfigureEffect_TelemetryHUDAllFields) sets hudTime
+// by hand and never parses the flag, so a typo'd flag string in NewRootCmd
+// (e.g. "--hud_time" or "--time-mode"), or a StringVar accidentally bound to
+// a different variable, would pass every one of those tests and only surface
+// at runtime as "unknown flag --hud-time" or a value that silently never
+// changes -- exactly the shape TestWarnTelemetryNotLast_TheImpliedTelemetryPassNeverWarns
+// and TestConfigureEffect_TelemetryScopeReachesTheImpliedTelemetryEffect
+// already guard against for --srt-format and --telemetry-scope.
+func TestConfigureEffect_HUDTimeFlagStringReachesTheEffect(t *testing.T) {
+	origHUDTime := hudTime
+	t.Cleanup(func() { hudTime = origHUDTime })
+
+	root := NewRootCmd()
+	if err := root.Flags().Parse([]string{"--hud-time", "active"}); err != nil {
+		t.Fatalf("parsing flags: %v", err)
+	}
+
+	h := &effects.TelemetryHUD{}
+	if err := configureEffect(h, root.Flags()); err != nil {
+		t.Fatalf("configureEffect: %v", err)
+	}
+	if h.TimeMode != telemetry.TimeActive {
+		t.Errorf("TimeMode = %v, want TimeActive -- the --hud-time flag string did not reach the effect", h.TimeMode)
+	}
+}
+
 func TestValidateWarpModel(t *testing.T) {
 	cases := []struct {
 		model   string
@@ -2850,13 +2941,15 @@ func TestConfigureEffect_TelemetryHUDAllFields(t *testing.T) {
 		elevLoss                float64
 		hudLayout, powerSource  string
 		telemetryScope          string
-	}{fitPath, offsetSeconds, quality, hudTimeZone, elevSmoothing, elevGain, elevLoss, hudLayout, powerSource, telemetryScope}
+		hudTime                 string
+	}{fitPath, offsetSeconds, quality, hudTimeZone, elevSmoothing, elevGain, elevLoss, hudLayout, powerSource, telemetryScope, hudTime}
 	t.Cleanup(func() {
 		fitPath, offsetSeconds, quality = origs.fitPath, origs.offsetSeconds, origs.quality
 		hudTimeZone = origs.hudTimeZone
 		elevSmoothing, elevGain, elevLoss = origs.elevSmoothing, origs.elevGain, origs.elevLoss
 		hudLayout, powerSource = origs.hudLayout, origs.powerSource
 		telemetryScope = origs.telemetryScope
+		hudTime = origs.hudTime
 	})
 
 	fitPath = "run.fit"
@@ -2882,12 +2975,14 @@ func TestConfigureEffect_TelemetryHUDAllFields(t *testing.T) {
 			LayoutMode:         "POISON",
 			PowerSource:        telemetry.PowerStryd,
 			Scope:              telemetry.ScopeClipAbsolute,
+			TimeMode:           telemetry.TimeActive,
 		}
 	}
 
 	t.Run("every field", func(t *testing.T) {
 		powerSource = "native"
 		telemetryScope = "clip-rebased"
+		hudTime = "elapsed"
 		h := poisoned()
 		if err := configureEffect(h, pflag.NewFlagSet("test", pflag.ContinueOnError)); err != nil {
 			t.Fatalf("configureEffect: %v", err)
@@ -2916,6 +3011,9 @@ func TestConfigureEffect_TelemetryHUDAllFields(t *testing.T) {
 		if h.Scope != telemetry.ScopeClipRebased {
 			t.Errorf("Scope = %v, want clip-rebased -- --telemetry-scope did not reach the effect", h.Scope)
 		}
+		if h.TimeMode != telemetry.TimeElapsed {
+			t.Errorf("TimeMode = %v, want TimeElapsed -- --hud-time did not reach the effect", h.TimeMode)
+		}
 	})
 
 	t.Run("power-source auto, whose expected value is the zero value", func(t *testing.T) {
@@ -2926,6 +3024,21 @@ func TestConfigureEffect_TelemetryHUDAllFields(t *testing.T) {
 		}
 		if h.PowerSource != telemetry.PowerAuto {
 			t.Errorf("PowerSource = %v, want PowerAuto", h.PowerSource)
+		}
+	})
+
+	// The same zero-value hazard as --power-source auto: "clock" maps to
+	// TimeClock, the field's zero value, so starting from TimeActive (see
+	// poisoned) is what makes reaching TimeClock evidence of an assignment
+	// rather than an untouched field.
+	t.Run("hud-time clock, whose expected value is the zero value", func(t *testing.T) {
+		hudTime = "clock"
+		h := poisoned()
+		if err := configureEffect(h, pflag.NewFlagSet("test", pflag.ContinueOnError)); err != nil {
+			t.Fatalf("configureEffect: %v", err)
+		}
+		if h.TimeMode != telemetry.TimeClock {
+			t.Errorf("TimeMode = %v, want TimeClock", h.TimeMode)
 		}
 	})
 

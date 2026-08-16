@@ -162,6 +162,7 @@ Flags:
 
   **The wall clock is never rebased, in any mode** — the on-screen clock, the GPX `<time>` and the SRT datetime stay on real time, because Telemetry Overlay (and anything else matching on `creation_time`) depends on that. With `--start`/`--end`, the overlapping stretch is measured against the **trimmed** clip. For the `telemetry` effect the clip modes move only the SRT's cumulative distance column — its GPX/SRT already cover just the clip window — so `full` and `clip-absolute` there normally produce identical output (they can differ where a recording gap straddles a clip boundary); it is `telemetry-hud` where this flag visibly changes what you get.
 - `--hud-timezone` — telemetry-hud only: the timezone the on-screen clock displays in — an IANA name (e.g. `Australia/Brisbane`) or a fixed offset (e.g. `+10:00`). Default: **UTC**. Only the clock gauge is affected; telemetry sync is always UTC.
+- `--hud-time` — telemetry-hud only: what the upper-right time/date gauge shows in place of the on-screen time. `clock` (**default**) is the wall clock (in `--hud-timezone`, unchanged from before this flag existed). `elapsed` is the time since the FIT activity's own start, **including** any paused stretches — Garmin/Strava's "elapsed time". `active` is the same but **excluding** them — Garmin's "time", Stryd/Strava's "moving time". Video before the activity's start reads `0:00:00`; video after its end reads the final total. This is measured from the **whole activity's own start** regardless of `--telemetry-scope` — a clip-rebased clip's distances restart at zero, but its clock does not. The date line underneath is unchanged in every mode. `vertical` carries no time/date gauge at all, so `--hud-time elapsed`/`active` has no effect there (videofx warns).
 - `--elevation-gain` / `--elevation-loss` — telemetry-hud only: the known total elevation gain / loss for the activity in **meters** (e.g. an official course figure). The elevation smoothing is auto-tuned so the computed totals match — GPS/barometric elevation overcounts, so a known figure is the most reliable target. Default `0` = use the FIT device's own totals.
 - `--elevation-smoothing` — telemetry-hud only: an explicit Gaussian smoothing width (in FIT samples, ≈ seconds) for the elevation series, instead of the gain/loss auto-tuning. Default `0` = auto.
 - `--power-source` — telemetry-hud only: which power reading the lower-left metrics gauge shows when the FIT carries **both** a footpod (Stryd) developer-field power **and** the standard FIT `power` field — the two are different sensors and can disagree substantially. `auto` (default) prefers the Stryd developer field and falls back to the native field; `stryd` forces the footpod field (shows `-- W` if absent); `native` forces the standard FIT field. Only affects the on-screen HUD number — what the `telemetry` effect writes to its SRT/GPX is unchanged by this flag.
@@ -415,7 +416,9 @@ its embedded subtitle/location dropped by that encode.
 - Lower-left metric readout: heart rate, cadence, power, **incline**, pace, speed.
   When the FIT has both a footpod (Stryd) and native power, `--power-source` chooses
   which the power line shows (default `auto` = prefer Stryd).
-- Upper-right clock: time + date (in `--hud-timezone`).
+- Upper-right clock: time + date (in `--hud-timezone`). `--hud-time` swaps the time line
+  for elapsed/active time since the FIT activity's start instead (see above); the date
+  line is unaffected.
 - Upper-left **kilometre splits**: recent laps with the fastest highlighted, and the
   in-progress lap's live timer.
 - Top-center **distance progress bar**: a full-width line, red from the start to the

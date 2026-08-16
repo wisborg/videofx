@@ -22,6 +22,7 @@ package hud
 import (
 	"image"
 	"math"
+	"slices"
 	"sync"
 	"time"
 
@@ -59,6 +60,17 @@ type Frame struct {
 	// Time is the wall-clock instant to display, already converted to the
 	// desired display timezone by the caller.
 	Time time.Time
+	// Elapsed is the time since the FIT activity's own start, as either
+	// telemetry.TimerModel.Elapsed or .Active depending on --hud-time,
+	// supplied by the caller (the telemetry-hud effect). It is activity-
+	// relative, computed from the FIT-clock instant, and is NEVER derivable
+	// from Time alone -- Time is a wall-clock instant that has already been
+	// shifted into the caller's chosen display timezone (see --hud-timezone),
+	// so subtracting anything from it here would mix a timezone-shifted
+	// instant with an activity-relative one. TimeDateGauge is the only reader
+	// today; it is on Frame rather than computed inside that gauge because
+	// gauges have no access to the telemetry.TimerModel that produces it.
+	Elapsed time.Duration
 	// Sample is the telemetry interpolated to this instant; HasSample is
 	// false when the clip is outside the FIT's coverage (gauges then show
 	// placeholders rather than stale/zero data).
@@ -264,6 +276,52 @@ func NoPowerLayout() Layout {
 	return l
 }
 
+// WithElapsedTime is a derived-layout transform, in exactly the shape
+// NoPowerLayout already uses: it sets ShowElapsed on every TimeDateGauge
+// placement in l and suffixes Name with "+elapsed", rather than existing as
+// a fourth layout name -- see the --hud-time design note (a Layout is an
+// ARRANGEMENT, which gauge sits in which corner; this changes what one gauge
+// prints, not where anything sits, so multiplying the layout enum by three
+// display choices would be the wrong axis to add it on).
+//
+// l is returned UNCHANGED AND UNRENAMED when it carries no TimeDateGauge at
+// all (VerticalLayout): applying "+elapsed" to a layout with no clock to
+// relabel would rename it for a change that did nothing, and
+// VerticalLayout must keep reporting itself as "vertical" so a log line
+// naming the layout stays honest about what's on screen. The telemetry-hud
+// effect is what warns the caller separately that --hud-time had no effect
+// there; this function's job is only to leave the layout truthfully named.
+//
+// # It copies Placements, and NoPowerLayout's shape is why it must
+//
+// NoPowerLayout mutates l.Placements[i] in place, and is safe doing so ONLY
+// because it built l from DefaultLayout() one line earlier: a fresh backing
+// array nobody else holds. This function has no such guarantee. Layout is a
+// struct with a SLICE in it, so the `l Layout` parameter copies the header and
+// not the array behind it -- and the telemetry-hud effect calls this on a
+// caller-supplied *hud.Layout it dereferenced (TelemetryHUD.Layout, documented
+// for programmatic callers), where writing through that shared array would set
+// ShowElapsed on the CALLER's own layout, permanently. A caller reusing one
+// hud.Layout across two renders would get elapsed time on the second even
+// having asked for TimeClock, with nothing to see in any log line.
+//
+// Cloning the slice here rather than at the call site keeps that impossible for
+// every future caller, not just the one that exists today.
+func WithElapsedTime(l Layout) Layout {
+	if !l.HasTimeDateGauge() {
+		return l
+	}
+	l.Name += "+elapsed"
+	l.Placements = slices.Clone(l.Placements)
+	for i, p := range l.Placements {
+		if td, ok := p.Gauge.(TimeDateGauge); ok {
+			td.ShowElapsed = true
+			l.Placements[i].Gauge = td
+		}
+	}
+	return l
+}
+
 // HasMetricsReadout reports whether l draws the metrics block at all -- the
 // stacked heart-rate/cadence/power/incline/pace/speed readout, the only place
 // a power reading ever appears on screen.
@@ -278,6 +336,21 @@ func NoPowerLayout() Layout {
 func (l Layout) HasMetricsReadout() bool {
 	for _, p := range l.Placements {
 		if _, ok := p.Gauge.(MetricsGauge); ok && p.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
+// HasTimeDateGauge reports whether l draws the time/date gauge at all,
+// mirroring HasMetricsReadout. VerticalLayout carries no TimeDateGauge, so a
+// portrait clip has no clock to swap for elapsed/active time -- the
+// telemetry-hud effect uses this both to decide whether naming --hud-time in
+// its layout log line tells the reader something true, and to warn when
+// --hud-time was asked for on a layout that cannot display it at all.
+func (l Layout) HasTimeDateGauge() bool {
+	for _, p := range l.Placements {
+		if _, ok := p.Gauge.(TimeDateGauge); ok && p.Enabled {
 			return true
 		}
 	}

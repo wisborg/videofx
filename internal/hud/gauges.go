@@ -3,6 +3,7 @@ package hud
 import (
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/fogleman/gg"
 
@@ -73,17 +74,49 @@ func (g MetricsGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
 
 // TimeDateGauge is the upper-right clock: the display-time on a larger line
 // with the date beneath it, both right-aligned to the anchor.
-type TimeDateGauge struct{}
+type TimeDateGauge struct {
+	// ShowElapsed swaps the wall-clock line for f.Elapsed, formatted by
+	// formatElapsed -- the same single-field shape as MetricsGauge.OmitPower.
+	// The date line underneath is UNTOUCHED: --hud-time only changes what the
+	// larger line reads, never the date. Named for the same reason OmitPower
+	// is named for its negative sense: the zero value, TimeDateGauge{}, must
+	// keep drawing the wall clock, which is what every layout drew before
+	// this field existed and what a bare struct literal still gets without
+	// being updated.
+	ShowElapsed bool
+}
 
 func (TimeDateGauge) Name() string { return "time-date" }
 
-func (TimeDateGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
+func (g TimeDateGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
 	px := r.FontPx(f)
 	timePx := px * 1.4
 	// Top-anchored: the time's top sits at box.Y (the inset anchor), the date
 	// a line below it; both right-aligned to box.X.
-	r.Text(dc, f.Time.Format("15:04:05"), box.X, box.Y, 1, timePx)
+	line := f.Time.Format("15:04:05")
+	if g.ShowElapsed {
+		line = formatElapsed(f.Elapsed)
+	}
+	r.Text(dc, line, box.X, box.Y, 1, timePx)
 	r.Text(dc, f.Time.Format("02/01/2006"), box.X, box.Y+timePx*1.2, 1, px)
+}
+
+// formatElapsed renders d as H:MM:SS, hours UNPADDED (so a sub-hour reading
+// is "0:04:12", not "00:04:12") and built from d's total seconds rather than
+// through a time.Time -- a time.Time wraps at 24h, which would make a
+// 26-hour ultra read "2:10:04" instead of "26:10:04". Negative durations
+// (which TimerModel's own clamp should already have ruled out, but a caller
+// constructing a Frame directly has no such guarantee) clamp to "0:00:00"
+// rather than printing a minus sign.
+func formatElapsed(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	total := int64(d / time.Second)
+	h := total / 3600
+	m := (total % 3600) / 60
+	s := total % 60
+	return fmt.Sprintf("%d:%02d:%02d", h, m, s)
 }
 
 // gradeWindowMeters is the +/- distance the incline is averaged over; a
