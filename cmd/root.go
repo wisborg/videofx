@@ -213,6 +213,10 @@ func NewRootCmd() *cobra.Command {
 	// clip. --effect (a local, required flag on root) is not inherited by
 	// it, so `videofx calibrate` runs without demanding --effect.
 	root.AddCommand(newCalibrateCmd())
+	// `videofx estimate-offset <video>` is the same kind of sibling: it
+	// measures the --offset a clip and a FIT activity need, it does not
+	// process a clip either.
+	root.AddCommand(newEstimateOffsetCmd())
 
 	return root
 }
