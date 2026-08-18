@@ -19,8 +19,9 @@ func secTimes(n int, step time.Duration) []time.Time {
 // TestGaussSmooth_ReproducesAConstantExactly checks the partition-of-unity
 // property: a kernel that sums to 1 convolved with a constant signal must
 // reproduce that constant everywhere, including at the boundaries -- which
-// is exactly where a boundary-handling bug would show up first (and is
-// where test_corner_2's evidence lives, per the package's originating plan).
+// is exactly where a boundary-handling bug would show up first -- and the
+// boundary is load-bearing here, because on at least one measured clip the
+// turn that carries the whole match sits against the start of the series.
 func TestGaussSmooth_ReproducesAConstantExactly(t *testing.T) {
 	values := make([]float64, 40)
 	for i := range values {

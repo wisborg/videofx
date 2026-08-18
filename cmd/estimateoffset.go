@@ -252,9 +252,10 @@ func warpModelName(m stabilize.WarpModel) string {
 }
 
 // printEstimateReport renders an estimateReport: clip/activity context,
-// ranked candidates, verdict, and caveats -- in the order section 4A of the
-// feature's plan specifies. Split out from runEstimateOffset so the
-// formatting is testable without a real analysis/FIT file.
+// ranked candidates, verdict, and caveats -- in that order, so the number a
+// reader came for is never above the evidence that qualifies it. Split out
+// from runEstimateOffset so the formatting is testable without a real
+// analysis/FIT file.
 func printEstimateReport(w io.Writer, video, fitPath string, info vidio.Info, track *telemetry.Track, rep estimateReport) {
 	fmt.Fprintf(w, "Clip:     %s (%.2fs @ %.3ffps)\n", video, info.Duration, info.FPS)
 	fmt.Fprintf(w, "          creation_time %s\n", info.CreationTime.Format(time.RFC3339))

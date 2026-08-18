@@ -49,9 +49,13 @@ const MinCornerWindow = 15 * time.Second
 // three files to see every number this package's confidence gates depend
 // on at once.
 const (
-	// sampleRateHz is the fixed rate both series are compared at, across
-	// every candidate tau (see the fixed-sample-set amendment in the
-	// package's originating plan).
+	// sampleRateHz is the fixed rate both series are compared at. The rate
+	// -- and the sample set it generates -- is deliberately the SAME for
+	// every candidate tau: data holes in the FIT track would otherwise let
+	// the set shrink as tau sweeps, so a tau straddling a hole would be
+	// normalized over fewer samples and score against a different
+	// denominator than its neighbours. Two candidates are only comparable
+	// when they were scored over the same points.
 	sampleRateHz = 10.0
 	// tauStepSeconds is the tau scan's step size.
 	tauStepSeconds = 0.05
