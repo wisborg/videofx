@@ -427,3 +427,59 @@ func TestReadSidecar_StaleFormatVersionIsRejected(t *testing.T) {
 		t.Errorf("error = %q, want it to name the version mismatch", err)
 	}
 }
+
+// TestReadSidecarForSource_FailureCausesAreDistinguishable pins the property
+// three callers depend on: ReadSidecarForSource's two error paths must SAY
+// which one happened.
+//
+// This exists because the callers collapsed their hand-written per-cause warn
+// branches into one that renders this function's error through a single %v
+// (see loadUsableSidecarForAutoOffset). That collapse is only safe while the
+// two messages stay distinguishable, and nothing else asserts it -- a later
+// edit unifying them into one generic "unusable sidecar" string would leave
+// every caller logging a reason that no longer names its cause, which is this
+// codebase's most common class of silent failure. The test deliberately checks
+// for the DISTINGUISHING substrings rather than the whole message, so rewording
+// stays free.
+func TestReadSidecarForSource_FailureCausesAreDistinguishable(t *testing.T) {
+	dir := t.TempDir()
+
+	// Cause 1: the file is not a readable sidecar at all.
+	corrupt := filepath.Join(dir, "corrupt.sidecar")
+	if err := os.WriteFile(corrupt, []byte("not a sidecar"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, corruptErr := ReadSidecarForSource(corrupt, "clip.mp4")
+	if corruptErr == nil {
+		t.Fatal("ReadSidecarForSource on a corrupt file returned no error")
+	}
+
+	// Cause 2: it reads fine, but it belongs to a different clip.
+	wrongClip := filepath.Join(dir, "other.sidecar")
+	if err := WriteSidecar(wrongClip, &MotionSeries{
+		SourcePath:    "some_other_clip.mp4",
+		SourceWidth:   1920,
+		SourceHeight:  1080,
+		AnalysisWidth: 960, AnalysisHeight: 540,
+		FPS:         30,
+		FrameCount:  2,
+		Options:     DefaultOptions(),
+		Transitions: []Transition{{Scale: 1, OK: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, mismatchErr := ReadSidecarForSource(wrongClip, "clip.mp4")
+	if mismatchErr == nil {
+		t.Fatal("ReadSidecarForSource on another clip's sidecar returned no error")
+	}
+
+	if corruptErr.Error() == mismatchErr.Error() {
+		t.Fatalf("both failure causes render identically: %q", corruptErr)
+	}
+	if !strings.Contains(corruptErr.Error(), "reading sidecar") {
+		t.Errorf("unreadable-sidecar error does not name its cause: %q", corruptErr)
+	}
+	if !strings.Contains(mismatchErr.Error(), "some_other_clip.mp4") {
+		t.Errorf("wrong-clip error does not name the clip it was analyzed from: %q", mismatchErr)
+	}
+}

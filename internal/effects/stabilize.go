@@ -3,7 +3,6 @@ package effects
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"videofx/internal/logging"
@@ -484,20 +483,16 @@ func modelName(m stabilize.WarpModel) string {
 //     change found the leftover Reporter sitting there and wired it in.
 func (g *GoCVStabilizer) loadOrAnalyze(ctx context.Context, log *logging.Logger, sourcePath string, opts stabilize.Options, progressCfg *progress.Config) (*stabilize.MotionSeries, error) {
 	if g.SidecarPath != "" {
-		if _, err := os.Stat(g.SidecarPath); err == nil {
-			series, err := stabilize.ReadSidecar(g.SidecarPath)
-			if err != nil {
-				return nil, fmt.Errorf("reading sidecar %s: %w", g.SidecarPath, err)
-			}
-			// MotionSeries.SourcePath is provenance-only and unvalidated
-			// by ReadSidecar itself (see its doc comment) -- this is
-			// exactly the place that would otherwise silently warp
-			// sourcePath with a different clip's motion data, so it's
-			// checked here rather than trusted.
-			if series.SourcePath != "" && series.SourcePath != sourcePath {
-				return nil, fmt.Errorf("sidecar %s was analyzed from %q, not %q -- refusing to apply another clip's motion data (use a different -sidecar, or delete this one to re-analyze)",
-					g.SidecarPath, series.SourcePath, sourcePath)
-			}
+		// ReadSidecarForSource is the shared "stat, read, validate
+		// SourcePath" check (internal/stabilize/sidecar.go) -- the same one
+		// cmd/estimateoffset.go and cmd/offsetauto.go use, so all three
+		// agree on what "usable" means and on the exact wording when they
+		// refuse another clip's motion data.
+		series, err := stabilize.ReadSidecarForSource(g.SidecarPath, sourcePath)
+		if err != nil {
+			return nil, err
+		}
+		if series != nil {
 			warnIfOptionsDiffer(log, g.SidecarPath, series.Options, opts)
 			warnIfShortAnalysis(log, sourcePath, series)
 			return series, nil

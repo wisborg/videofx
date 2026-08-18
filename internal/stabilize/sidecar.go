@@ -419,6 +419,45 @@ func ReadSidecar(path string) (*MotionSeries, error) {
 	return series, nil
 }
 
+// ReadSidecarForSource reads path's sidecar (see ReadSidecar) and validates
+// that its recorded SourcePath matches sourcePath, so a sidecar pointed at
+// another clip is refused rather than silently applying that clip's motion
+// data. MotionSeries.SourcePath is provenance-only and unvalidated by
+// ReadSidecar itself (see its doc comment) -- this is exactly the place
+// that check belongs, checked once here rather than trusted or re-derived
+// per caller.
+//
+// (nil, nil) means "no sidecar to use, analyze fresh" -- NOT an error --
+// for both of the ordinary reasons that can be true: path is empty, or
+// nothing exists there yet (the common case for a --sidecar that is about
+// to be WRITTEN by a first run). Every caller of this function decides its
+// own write policy and its own reaction to a non-nil error (some fail hard,
+// some warn and fall back to a fresh analysis); this function only answers
+// "is there a usable sidecar for this source at this path", not what to do
+// about it.
+//
+// This is the single shared form of a check that used to be copied at
+// three call sites (internal/effects' GoCVStabilizer.loadOrAnalyze and two
+// in cmd/estimate-offset) with a drifted error message between them -- the
+// original said "-sidecar" (a stray single dash; the flag is "--sidecar").
+func ReadSidecarForSource(path, sourcePath string) (*MotionSeries, error) {
+	if path == "" {
+		return nil, nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil, nil
+	}
+	series, err := ReadSidecar(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading sidecar %s: %w", path, err)
+	}
+	if series.SourcePath != "" && series.SourcePath != sourcePath {
+		return nil, fmt.Errorf("sidecar %s was analyzed from %q, not %q -- refusing to apply another clip's motion data (use a different --sidecar, or delete this one to re-analyze)",
+			path, series.SourcePath, sourcePath)
+	}
+	return series, nil
+}
+
 // minTransitionBytes is the smallest a single transition record can be: the
 // 1-byte flags, four float64s of similarity, and two int32 counts. Every
 // optional field (RS, rotation, perspective, mesh) only adds to it. It is used
