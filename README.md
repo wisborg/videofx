@@ -157,7 +157,7 @@ Flags:
 - `--mesh-grid` — gocv-stabilizer only, `--warp-model mesh`: the mesh grid size, in cells across the frame width (the vertical count is derived to keep cells roughly square). `0` = default `1` (a 2×2 corner mesh — see below). A finer grid corrects more localized motion but is noisier per vertex (a wigglier warp) and exposes/crops more of the frame; coarser converges toward a single global correction. Baked into a `--sidecar`'s analysis (change it and `--sidecar` together).
 - `--mesh-strength` — gocv-stabilizer only, `--warp-model mesh`: the mesh correction gain, `0.0`–`1.0`. A spatially-varying warp inherently trades some picture distortion (a per-frame bend/swim) **and crop** for stabilization, so **lower this to reduce both** at a little less shake removal; `1.0` is full strength, `0` disables the mesh (falls back to similarity). `-1` (default) uses the built-in default of `0.3`. Unlike `--mesh-grid`, this is applied at **render time**, so it can be swept against a cached `--sidecar` without re-analyzing.
 - `--fit` — **telemetry / telemetry-hud only**, and **required** when either is in `--effect` (Cobra can't express a conditional-required flag, so this is validated by hand at startup with a clear error if missing). Path to the Garmin FIT activity file to sync GPS/telemetry from.
-- `--offset` — clock-skew offset in seconds between the camera and the FIT-recording device, signed and fractional. Default `0`. See Telemetry below for the sync model. It shifts an absolute `--start`/`--end` timestamp **for any effect**, not just the telemetry ones — the trim resolves through the same `fit_time = creation_time + offset + pts` relation, so a cut and the telemetry it lines up with move together. A **non-zero** offset also rewrites the `telemetry` output's `creation_time` to the corrected instant (and re-bases the GPX/subtitle timeline to match), so the clip finally carries its true wall-clock start. It shifts the HUD's telemetry sync identically.
+- `--offset` — clock-skew offset in seconds between the camera and the FIT-recording device, signed and fractional. Default `0`. See Telemetry below for the sync model. It shifts an absolute `--start`/`--end` timestamp **for any effect**, not just the telemetry ones — the trim resolves through the same `fit_time = creation_time + offset + pts` relation, so a cut and the telemetry it lines up with move together. A **non-zero** offset also rewrites the `telemetry` output's `creation_time` to the corrected instant (and re-bases the GPX/subtitle timeline to match), so the clip finally carries its true wall-clock start. It shifts the HUD's telemetry sync identically. Pass **`auto`** to *measure* it instead of typing a number (see [Measuring `--offset`](#measuring---offset)) — it requires `--fit` and exactly one input file, stays opt-in (a wrong offset is otherwise silent), and a declined estimate is a hard error rather than a silent `0`.
 - `--telemetry-scope` — **telemetry / telemetry-hud only**: how much of the activity the clip's telemetry describes. `full` (**default**, and what this has always done) means the **whole recording**: the HUD's course map, elevation profile, splits and progress bar cover the entire run, and distances stay cumulative from its start, however short the clip cut out of it is. `clip-rebased` narrows everything to the stretch of the activity that runs underneath the clip, with distance, splits/lap numbering and the progress bar **restarting at zero at the clip's first frame** — the clip read as its own activity. `clip-absolute` narrows to that same stretch but keeps distance and lap numbers **as the FIT recorded them**, so a clip cut from 10.2 km into a marathon reads `10.2`–`12.4 km` and its one complete lap is km 12. The two clip modes place the progress bar and the elevation profile over the **same stretch**, differing only in the numbers on their axes. **The splits table additionally differs**: a rebased clip's origin is a kilometre boundary by construction, an absolute clip's is not, so the same 10.2–12.4 km completes two laps rebased (header `1 km lap 3/2`) and one absolute (km 12, header `1 km lap 13/12`). Different row counts on the same footage is what the modes mean, not a splits bug.
 
   **The wall clock is never rebased, in any mode** — the on-screen clock, the GPX `<time>` and the SRT datetime stay on real time, because Telemetry Overlay (and anything else matching on `creation_time`) depends on that. With `--start`/`--end`, the overlapping stretch is measured against the **trimmed** clip. For the `telemetry` effect the clip modes move only the SRT's cumulative distance column — its GPX/SRT already cover just the clip window — so `full` and `clip-absolute` there normally produce identical output (they can differ where a recording gap straddles a clip boundary); it is `telemetry-hud` where this flag visibly changes what you get.
@@ -347,6 +347,49 @@ telemetry subtitle + location tag) and, because `--gpx` was passed,
 options (the defaults) to get just the location-tagged clip, or add
 `--location=false` to stop videofx adding a location tag of its own — it does not remove
 a position the camera already wrote (see [What comes across from the source](#what-comes-across-from-the-source)).
+
+### Measuring `--offset`
+
+`--offset` has always been a number you had to know or guess. `videofx
+estimate-offset` measures it instead, by matching the camera's own recovered
+yaw (from a rotation-model motion analysis) against the heading a FIT
+activity's GPS track turns through — a runner's camera turns with their body,
+most visibly at a corner, so lining the two turning signals up recovers the
+clock skew between them:
+
+```
+videofx estimate-offset run.mp4 --fit "run.fit"
+```
+
+This prints a full report — every candidate offset it found, a Lambda figure
+(the statistic that actually separates a real match from a decoy corner, not
+the raw score), a verdict (confident / weak / declined, with a specific
+reason when it declines), and the caveats that apply to every estimate: it is
+accurate to about 1-2 seconds (never better than the ~0.7s floor set by
+`creation_time` and FIT timestamps both being integer-second), and it is the
+offset that makes the *turn* line up, not purely clock error — a runner turns
+their head into a corner before their body (and so the GPS) follows. It never
+processes the video; like `videofx calibrate`, it is a measurement tool.
+
+`--offset auto` runs the same measurement inline, as part of a normal
+`videofx` invocation, and uses the result instead of a number you typed:
+
+```
+videofx run.mp4 --effect telemetry --fit "run.fit" --offset auto --gpx
+```
+
+`auto` requires `--fit` and **exactly one** input file — an offset is a
+property of the camera/watch *pair*, not of any one clip, so a batch of
+clips from the same camera and watch all want the *same* offset. The intended
+workflow is to run `estimate-offset` once per camera/watch pairing, read the
+number off its report, and pass that explicit number to every later run
+(`--offset 2.7`) — not to re-measure it (and re-run a multi-minute rotation
+analysis) on every clip in a batch. `auto` is opt-in for the same reason a
+wrong offset is otherwise silent: it just syncs to the wrong instant, with
+nothing in a successful-looking run to say so. A **declined** estimate under
+`--offset auto` is a hard error — it never silently falls back to `0` — and
+names the decline reason plus the top few candidates it found, so the failure
+points straight at `videofx estimate-offset` for the full picture.
 
 ### Embedding telemetry for Telemetry Overlay
 

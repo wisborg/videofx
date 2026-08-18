@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"slices"
 	"strconv"
@@ -65,7 +66,15 @@ var (
 	rollingShutter bool
 	rsRatio        float64
 
-	fitPath        string
+	fitPath string
+	// offsetSpec is --offset's raw binding: either a signed decimal number
+	// of seconds or the literal "auto". offsetSeconds (below) is the
+	// RESOLVED value every other reader (configureEffect, configureTelemetry,
+	// applyTrimWindows) uses -- see parseOffsetSpec and runRoot's resolution
+	// step. Kept as two variables, not one, because root_test.go's 32
+	// existing references set offsetSeconds directly and must keep working
+	// unchanged.
+	offsetSpec     string
 	offsetSeconds  float64
 	srtFormat      string
 	showSubtitle   bool
@@ -175,8 +184,8 @@ func NewRootCmd() *cobra.Command {
 
 	root.Flags().StringVar(&fitPath, "fit", "",
 		"telemetry and telemetry-hud: path to a Garmin FIT activity file to sync GPS/telemetry from (required with either effect)")
-	root.Flags().Float64Var(&offsetSeconds, "offset", 0,
-		"clock-skew offset in seconds between the camera and the FIT-recording device, signed and fractional -- fit_time = creation_time + offset + pts, so a positive offset means the camera's clock reads behind the watch's. Applies to ANY effect whenever --start/--end is an absolute timestamp: the trim resolves through the same relation, so a cut and the telemetry it lines up with move together. With telemetry/telemetry-hud it also drives the FIT sync, and a non-zero offset rewrites the output's creation_time to the corrected instant (and re-bases the GPX/subtitle to match)")
+	root.Flags().StringVar(&offsetSpec, "offset", "0",
+		"clock-skew offset in seconds between the camera and the FIT-recording device, signed and fractional -- fit_time = creation_time + offset + pts, so a positive offset means the camera's clock reads behind the watch's. Applies to ANY effect whenever --start/--end is an absolute timestamp: the trim resolves through the same relation, so a cut and the telemetry it lines up with move together. With telemetry/telemetry-hud it also drives the FIT sync, and a non-zero offset rewrites the output's creation_time to the corrected instant (and re-bases the GPX/subtitle to match). Pass \"auto\" to MEASURE it instead of typing a number: this runs the same rotation-model matching `videofx estimate-offset` does, against --fit, and requires exactly one input file -- an offset is a property of the camera/watch PAIR, not of one clip, so the intended workflow is one `estimate-offset` run per pair and the resulting number reused across a batch with an explicit --offset, not \"auto\" on every run. \"auto\" stays opt-in for that reason: a wrong offset is silent (it just syncs to the wrong instant), so trading a one-time measurement for a per-run guess is not a safe default. A declined estimate is a hard error here, never a silent fall back to 0")
 	root.Flags().StringVar(&telemetryScope, "telemetry-scope", "full",
 		"telemetry and telemetry-hud: how much of the activity the clip's telemetry describes -- \"full\" (default, and what this has always done: the WHOLE recording, so the HUD's course map, elevation profile, splits and progress bar cover the entire run and distances stay cumulative from its start, however short the clip cut out of it is), \"clip-rebased\" (only the part of the activity that runs underneath the clip, with distance, splits/lap numbering and the progress bar all restarting at zero at the clip's first frame, as if the clip were its own activity), or \"clip-absolute\" (that same part, but with distance and lap numbers kept as the FIT recorded them, so a clip cut from 10.2 km into a marathon reads 10.2-12.4 km). The WALL CLOCK is never rebased, in any mode: the on-screen clock, the GPX <time> and the SRT datetime stay on real time, because Telemetry Overlay -- and anything else matching on creation_time -- depends on that. With --start/--end the overlapping part is measured against the TRIMMED clip. For the telemetry effect specifically the clip modes move only the SRT's cumulative distance column (its GPX/SRT already cover just the clip window), so \"full\" and \"clip-absolute\" there normally produce identical output -- they can differ where a recording gap straddles a clip boundary")
 	root.Flags().StringVar(&srtFormat, "srt-format", "none",
@@ -754,6 +763,67 @@ func validateWarpModel(model string) error {
 	}
 }
 
+// parseOffsetSpec parses --offset's raw value: either the exact, lowercase
+// string "auto" or a signed decimal number of seconds. auto reports which
+// form matched, and seconds is meaningless when auto is true.
+//
+// --offset used to be a Float64Var, which rejected a typo like "--offset
+// atuo" for free (strconv-backed flag parsing fails loudly on anything that
+// isn't a number). Switching the flag to a plain string so it can also
+// spell "auto" hands that job to THIS function -- it is now the only thing
+// standing between a typo and a silently-accepted, meaningless offset -- so
+// anything that is neither "auto" nor a valid number is rejected by name,
+// naming both accepted forms.
+func parseOffsetSpec(s string) (seconds float64, auto bool, err error) {
+	if s == "auto" {
+		return 0, true, nil
+	}
+	invalid := fmt.Errorf("--offset %q is invalid; use \"auto\" (measure it) or a signed decimal number of seconds (e.g. 3, -2.5, +3.5)", s)
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, false, invalid
+	}
+	// strconv.ParseFloat accepts "NaN"/"Inf"/"-Inf" (and their many-cased
+	// spellings) as valid float64 literals -- they are not valid clock-skew
+	// offsets, and letting one through here would carry a non-finite value
+	// into fit_time = creation_time + offset + pts, poisoning every later
+	// comparison against it (a NaN offset compares false against anything,
+	// including itself) with nothing at the point of failure to say why.
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, false, invalid
+	}
+	return v, false, nil
+}
+
+// requireAutoOffsetOneInputFile enforces --offset auto's "exactly one input
+// file" precondition: the effect chain shares one Effect instance and one
+// OffsetSeconds field (see setTelemetryOffset), so a per-file offset has
+// nowhere to live, and an offset is a property of the camera/watch PAIR
+// (not of any one clip) in the first place -- the intended workflow is one
+// `videofx estimate-offset` run reused, as an explicit number, across a
+// whole batch. Checked as soon as args is known (cheap, no I/O), well
+// before the expensive estimate itself runs.
+func requireAutoOffsetOneInputFile(numInputFiles int) error {
+	if numInputFiles != 1 {
+		return fmt.Errorf("--offset auto requires exactly one input file (got %d) -- an offset is a property of the camera/watch pair, not of one clip: run `videofx estimate-offset` once and reuse the number across a batch with an explicit --offset",
+			numInputFiles)
+	}
+	return nil
+}
+
+// requireAutoOffsetFitPath enforces --offset auto's other precondition:
+// --fit is required regardless of which effects are selected, since auto
+// measures the offset from a FIT activity even on a chain (say, plain
+// rotate) that would not otherwise need one. requireFitPath, by contrast,
+// only requires --fit when telemetry/telemetry-hud is in the chain -- a
+// different, effect-driven rule this one does not replace.
+func requireAutoOffsetFitPath(fitPath string) error {
+	if fitPath == "" {
+		return fmt.Errorf("--offset auto requires --fit (it measures the offset from a FIT activity's GPS track)")
+	}
+	return nil
+}
+
 // validateTrim rejects a nonsensical --start/--end range up front, before any
 // file is opened. Negative times are already rejected by cliutil.ParseTimeSpec,
 // so what is left is the ordering: an --end at or before --start.
@@ -1189,7 +1259,7 @@ func configureEffect(effect effects.Effect, flags *pflag.FlagSet) error {
 			return err
 		}
 		h.FitPath = fitPath
-		h.OffsetSeconds = offsetSeconds
+		setTelemetryOffset(h, offsetSeconds)
 		h.Quality = quality
 		h.TimeZone = loc
 		h.ElevationSmoothing = elevSmoothing
@@ -1267,7 +1337,7 @@ func parseUTCOffset(s string) (int, bool) {
 func configureTelemetry(effect effects.Effect) {
 	if tel, ok := effect.(*effects.Telemetry); ok {
 		tel.FitPath = fitPath
-		tel.OffsetSeconds = offsetSeconds
+		setTelemetryOffset(tel, offsetSeconds)
 		tel.Scope = parseTelemetryScope(telemetryScope)
 		tel.SRTFormat = srtFormat
 		tel.ShowSubtitle = showSubtitle
@@ -1278,6 +1348,27 @@ func configureTelemetry(effect effects.Effect) {
 		// field's zero value has to keep writing the tag. See
 		// effects.Telemetry.OmitLocation.
 		tel.OmitLocation = !location
+	}
+}
+
+// setTelemetryOffset applies seconds to effect's OffsetSeconds field if it
+// is a *effects.Telemetry or *effects.TelemetryHUD, and does nothing
+// otherwise. This is the ONE place that field is written, from TWO
+// different call sites: configureEffect/configureTelemetry (using whatever
+// offsetSeconds holds at flag-configuration time -- the final value for a
+// literal --offset, a placeholder 0 for "auto") and, for "auto", a second
+// pass in runRoot AFTER the real offset has been measured, which calls this
+// again for every effect in the chain to overwrite that placeholder. Having
+// one function for both means a --effect telemetry-hud chain (which
+// impliedEffects expands into BOTH a TelemetryHUD and a trailing Telemetry)
+// cannot end up with the two effects disagreeing about which offset they
+// used, the way two independent field-assignment call sites could.
+func setTelemetryOffset(effect effects.Effect, seconds float64) {
+	switch e := effect.(type) {
+	case *effects.Telemetry:
+		e.OffsetSeconds = seconds
+	case *effects.TelemetryHUD:
+		e.OffsetSeconds = seconds
 	}
 }
 
@@ -1376,6 +1467,27 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	if err := validateWarpModel(warpModel); err != nil {
 		return err
 	}
+	// --offset: resolve the LITERAL case immediately, so offsetSeconds
+	// already holds its final value by the time the configureEffect loop
+	// below runs (every existing reader keeps working unchanged). "auto"
+	// leaves offsetSeconds at 0 here -- a harmless placeholder overwritten
+	// once the real measurement runs, well after this point (see below) --
+	// but its two cheap preconditions (no I/O, no expensive estimate) are
+	// checked now, alongside every other flag-only validator.
+	offsetVal, offsetIsAuto, err := parseOffsetSpec(offsetSpec)
+	if err != nil {
+		return err
+	}
+	if offsetIsAuto {
+		if err := requireAutoOffsetFitPath(fitPath); err != nil {
+			return err
+		}
+		if err := requireAutoOffsetOneInputFile(len(args)); err != nil {
+			return err
+		}
+	} else {
+		offsetSeconds = offsetVal
+	}
 	// Parsed once, here, rather than validated now and reparsed later beside
 	// ProcessorConfig -- the same shape --start/--end use above, parsing into
 	// a value that is then carried down to where it's needed (applyTrimWindows
@@ -1428,6 +1540,28 @@ func runRoot(cmd *cobra.Command, args []string) error {
 
 	if err := cliutil.ValidateInputFiles(args); err != nil {
 		return err
+	}
+
+	// --offset auto's expensive measurement runs here: after every cheap
+	// objection (flag validators, dependency checks, prepareOutputDir,
+	// ValidateInputFiles) has already had its chance to fail the run for
+	// free, and before applyTrimWindows -- an absolute --start/--end
+	// resolves THROUGH the offset (resolveInstant), so the real value must
+	// be in hand before any trim window is computed. requireAutoOffsetOneInputFile
+	// above already guarantees args has exactly one element here.
+	if offsetIsAuto {
+		resolved, err := resolveAutoOffset(cmd.Context(), log, args[0], fitPath, sidecarPath, buildProgressConfig(progressSeconds, log))
+		if err != nil {
+			return err
+		}
+		offsetSeconds = resolved
+		log.Infof("--offset auto resolved to %+.2fs", offsetSeconds)
+		// Reaches every Telemetry/TelemetryHUD in the chain -- see
+		// setTelemetryOffset's doc for why a --effect telemetry-hud chain
+		// (which impliedEffects expands into both) needs this second pass.
+		for _, e := range effs {
+			setTelemetryOffset(e, offsetSeconds)
+		}
 	}
 
 	jobs := make([]video.Job, len(args))
