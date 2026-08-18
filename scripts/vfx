@@ -81,7 +81,7 @@ finish() {
 }
 
 cmd_gates() {
-	local rc=0 stage_rc=0 fmt
+	local rc=0 stage_rc=0 fmt test_rc
 
 	fmt="$(gofmt -l . 2>&1)"
 	if [ -n "$fmt" ]; then
@@ -103,9 +103,29 @@ cmd_gates() {
 	# Only the failures and the per-package verdicts are interesting; a full
 	# `go test ./...` transcript here is mostly ffmpeg chatter from the
 	# encode-path tests.
-	if go test ./... 2>&1 | grep -v -e "^ok" -e "no test files"; then
+	#
+	# The exit status checked below MUST be go test's own, via PIPESTATUS[0]
+	# -- exactly like cmd_test does -- not the pipeline's overall status and
+	# not grep's. This used to be `if go test ./... | grep -v ...; then
+	# FAILED`, which under the `set -o pipefail` at the top of this file
+	# could never take its own FAILED branch. `grep -v` exits 0 when it
+	# PRINTS a line and 1 when it prints nothing, the exact inverse of what
+	# is wanted, and pipefail reports the rightmost NON-ZERO exit in the
+	# pipeline: a failing suite gives (go test 1, grep 0) -> 1, and a
+	# passing suite gives (go test 0, grep 1) -> 1. The `if` reads 1 as
+	# false BOTH times, so the FAILED branch was unreachable and a green run
+	# printed the right thing for a reason unrelated to the tests -- which
+	# is why this survived unnoticed. Measured live: a deliberately failing
+	# test produced "FAIL videofx/cmd" in the transcript immediately
+	# followed by "test: all packages ok" / "vfx gates: ok", exit 0.
+	# PIPESTATUS[0] sidesteps all of it by reading go test's status
+	# directly, and the grep is left as pure display -- nothing downstream
+	# depends on what it emits, so its filter list can change freely.
+	go test ./... 2>&1 | grep -v -e "^ok" -e "no test files"
+	test_rc="${PIPESTATUS[0]}"
+	if [ "$test_rc" -ne 0 ]; then
 		echo "test: FAILED (output above)"
-		rc=1
+		rc=$test_rc
 	else
 		echo "test: all packages ok"
 	fi
