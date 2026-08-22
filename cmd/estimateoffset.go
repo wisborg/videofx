@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -15,6 +16,8 @@ import (
 	"videofx/internal/telemetry"
 	"videofx/internal/timesync"
 	"videofx/internal/vidio"
+
+	"github.com/wisborg/output/table"
 )
 
 var (
@@ -331,29 +334,34 @@ const offsetAccuracyCaveat = "This is within about 1-2s on the clips measured (w
 func printCandidateTable(w io.Writer, candidates []timesync.Candidate) {
 	fmt.Fprintln(w, "Candidates, best first:")
 	fmt.Fprintln(w)
-	// Widths are shared between the header and the rows, and every numeric
-	// column is right-aligned, so digits line up under each other and the
-	// eye can compare a column by scanning it. The turn column is composed
-	// first, with its own internal widths, then padded as one unit --
-	// formatting it inline would left-align "4.5deg" against "179.9deg".
-	const (
-		offsetW = 9
-		scoreW  = 8
-		lamW    = 8
-		turnW   = 25
-		sepW    = 8
+
+	// Numeric columns are right-aligned so digits sit under digits and a
+	// column can be compared by scanning down it. The turn column is one
+	// composed string rather than two columns, because the per-minute figure
+	// only means anything beside the total it normalizes.
+	t := table.New(
+		table.Column{Header: "offset", Align: table.Right, Format: "%+.2fs"},
+		table.Column{Header: "score", Align: table.Right, Format: "%.3f"},
+		table.Column{Header: "lambda", Align: table.Right, Format: "%.1f"},
+		table.Column{Header: "GPS turn matched", Align: table.Right},
+		table.Column{Header: "vs next", Align: table.Right},
 	)
-	fmt.Fprintf(w, "  %*s %*s %*s   %*s %*s\n",
-		offsetW, "offset", scoreW, "score", lamW, "lambda", turnW, "GPS turn matched", sepW, "vs next")
 	for i, c := range candidates {
 		sep := "-"
 		if i+1 < len(candidates) && candidates[i+1].Score > 0 {
 			sep = fmt.Sprintf("%.2fx", c.Score/candidates[i+1].Score)
 		}
-		turn := fmt.Sprintf("%7.1fdeg (%5.0fdeg/min)", c.MatchedTurnDeg, c.MatchedTurnPerMinute())
-		fmt.Fprintf(w, "  %+*.2fs %*.3f %*.1f   %*s %*s\n",
-			offsetW-1, c.Tau.Seconds(), scoreW, c.Score, lamW, c.Lambda, turnW, turn, sepW, sep)
+		t.MustAppend(
+			c.Tau.Seconds(), c.Score, c.Lambda,
+			// Internal widths, so "deg" and "deg/min" line up down the
+			// column. Right-aligning the composed string only lines up its
+			// last character, which leaves 0.0deg hanging under 104.2deg.
+			fmt.Sprintf("%7.1fdeg (%5.0fdeg/min)", c.MatchedTurnDeg, c.MatchedTurnPerMinute()),
+			sep,
+		)
 	}
+	writeIndented(w, "  ", t)
+
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  offset    the value to pass as --offset: fit_time = creation_time + offset + pts.")
 	fmt.Fprintln(w, "  score     0 to 1, higher is better. How well the camera's turn-rate curve and the")
@@ -368,4 +376,19 @@ func printCandidateTable(w io.Writer, candidates []timesync.Candidate) {
 	fmt.Fprintf(w, "  vs next   how many times this candidate's score beats the one below it. Under\n")
 	fmt.Fprintf(w, "            %.1fx the two are hard to tell apart and the verdict drops to weak.\n", timesync.WeakSeparationRatio)
 	fmt.Fprintln(w)
+}
+
+// writeIndented renders t and writes it to w with every line prefixed, so a
+// table can sit inside a block that is already indented.
+//
+// The prefix is applied here rather than asked of the table package: an
+// indent is a property of the surrounding report, not of the table, and
+// rendering to a buffer first costs nothing at these sizes. Render cannot
+// fail against a strings.Builder, which is why its error is dropped.
+func writeIndented(w io.Writer, prefix string, t *table.Table) {
+	var b strings.Builder
+	_ = t.Render(&b, table.Style{})
+	for _, line := range strings.Split(strings.TrimRight(b.String(), "\n"), "\n") {
+		fmt.Fprintf(w, "%s%s\n", prefix, line)
+	}
 }

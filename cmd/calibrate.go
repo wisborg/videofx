@@ -9,6 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/wisborg/output/table"
+
 	"videofx/internal/calibrate"
 	"videofx/internal/cliutil"
 	"videofx/internal/logging"
@@ -204,14 +206,23 @@ func parseSegmentDuration(flag, s string) (float64, error) {
 // without running ffmpeg.
 func printCalibration(w io.Writer, source string, res calibrate.Result) {
 	fmt.Fprintf(w, "Quality calibration for %s (hevc_videotoolbox, target VMAF %.1f)\n\n", source, res.Target)
-	fmt.Fprintf(w, "  --quality   VMAF      segment bitrate\n")
+	// The suggestion marker is its own column rather than text appended to
+	// the bitrate: appended, it would count toward that column's width and
+	// push every other row's number out of line with it.
+	t := table.New(
+		table.Column{Header: "--quality", Align: table.Right},
+		table.Column{Header: "VMAF", Align: table.Right, Format: "%.2f"},
+		table.Column{Header: "segment bitrate", Align: table.Right, Format: "%.1f Mbps"},
+		table.Column{Header: ""},
+	)
 	for _, p := range res.Points {
 		marker := ""
 		if res.Met && p.Quality == res.Suggested {
-			marker = "   <- suggested"
+			marker = "<- suggested"
 		}
-		fmt.Fprintf(w, "  %-11d %-9.2f %.1f Mbps%s\n", p.Quality, p.VMAF, p.Bitrate, marker)
+		t.MustAppend(p.Quality, p.VMAF, p.Bitrate, marker)
 	}
+	writeIndented(w, "  ", t)
 	fmt.Fprintln(w)
 
 	if res.Met {
