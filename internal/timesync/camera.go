@@ -84,11 +84,22 @@ func CameraHeadingRates(series *stabilize.MotionSeries, creationTime time.Time) 
 	// reason instead of blaming a lens that was never the problem.
 	var lensWarnings []string
 	if !series.Lens.Reliable() {
+		// State the ACTION, not just the fact. A warning a reader cannot act
+		// on is noise they learn to skip, and this one is common: it fires on
+		// any clip whose motion never distinguished one focal length from
+		// another, which includes some of the best inputs this measurement
+		// has. The honest action is usually "none" -- so say that, and say
+		// which numbers to lean on instead of the one it degrades.
 		lensWarnings = append(lensWarnings, fmt.Sprintf(
-			"timesync: %s's rotation-model lens calibration is not reliable (%v) -- "+
-				"the yaw SHAPE is still usable, but its scale may be off, which depresses "+
-				"the score and inflates the matched-filter energy; weigh the verdict accordingly",
-			displaySource(series), series.Lens))
+			"this clip's motion never distinguished one lens focal length from another, so the "+
+				"scale of its measured yaw may be off (%v).\n"+
+				"  No action needed: the offset is measured from the SHAPE of the yaw over time, "+
+				"which this does not affect.\n"+
+				"  It does skew two of the reported numbers, so read them with that in mind -- an "+
+				"off scale depresses the score\n"+
+				"  and inflates lambda. Weigh the GPS turn and the null percentile, which are "+
+				"measured from the FIT track and are unaffected.",
+			series.Lens))
 	}
 	if series.FPS <= 0 {
 		return Series{}, nil, fmt.Errorf("timesync: %s has no FPS recorded", displaySource(series))

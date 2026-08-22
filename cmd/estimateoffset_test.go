@@ -165,12 +165,12 @@ func TestEstimate_UnreliableLensDoesNotDeclineAndWarnsNamingTheLens(t *testing.T
 	}
 	var named bool
 	for _, w := range rep.camWarnings {
-		if strings.Contains(w, "not reliable") {
+		if strings.Contains(w, "focal length") {
 			named = true
 		}
 	}
 	if !named {
-		t.Errorf("no warning named the unreliable calibration; got %v", rep.camWarnings)
+		t.Errorf("no warning named the lens focal length as the thing in doubt; got %v", rep.camWarnings)
 	}
 }
 
@@ -218,8 +218,8 @@ func TestPrintEstimateReport_ConfidentShowsCandidatesAndCaveats(t *testing.T) {
 		"+2.70s", "0.821", "13.5", "104.2deg",
 		"Verdict: confident",
 		"Null percentile: 0.0000",
-		"Largest sustained camera turn: 76.2deg",
-		"Camera turn is NOT evidence",
+		"Largest sustained turn IN THE VIDEO: 76.2deg",
+		"A head turn moves the camera",
 		"about 1-2s on the clips measured",
 	} {
 		if !strings.Contains(out, want) {

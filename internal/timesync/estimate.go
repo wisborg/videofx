@@ -65,15 +65,21 @@ const (
 	// both variances are tiny -- measured: a 10s no-turn segment scored
 	// 0.97 at a nonsense offset without this floor.
 	sigma0 = 3.0
-	// lambdaGate is the minimum matched-filter energy (see
+	// LambdaGate is the minimum matched-filter energy (see
 	// matchedFilterEnergy) a winning candidate must clear. Measured true
 	// positives: 13.6, 13.6, 19.1; measured controls: 1.1, 2.2, 1.5 -- a
 	// 6-9x separation, well clear of this gate.
-	lambdaGate = 5.0
-	// turnGateDeg is the minimum matched GPS turn (degrees) a winning
+	//
+	// Exported, with TurnGateDeg and WeakSeparationRatio, because the CLI's
+	// report prints a legend quoting each threshold ("needs >= 5.0"). A
+	// legend restating them as its own literals would be free to drift from
+	// the gates it describes, and a reader has no way to tell a stale legend
+	// from a live one.
+	LambdaGate = 5.0
+	// TurnGateDeg is the minimum matched GPS turn (degrees) a winning
 	// candidate must clear, kept as a second, cheap, interpretable
 	// condition alongside Lambda (which carries the actual separation).
-	turnGateDeg = 60.0
+	TurnGateDeg = 60.0
 	// minCoverageFrac is the minimum fraction of the fixed video sample set
 	// that must resolve on the FIT side for a tau to be scored at all.
 	minCoverageFrac = 0.90
@@ -81,11 +87,11 @@ const (
 	// FWHM was 6.3-7.5s; at the previously-used 4s a reported "runner-up"
 	// could be the true peak's own shoulder.
 	dedupMinSeconds = 6.0
-	// weakSeparationRatio: a winner within this ratio of its runner-up's
+	// WeakSeparationRatio: a winner within this ratio of its runner-up's
 	// score is reported Weak rather than Confident. Measured:
 	// test_very_shaken (a genuine true positive) was 0.47 vs 0.43, ratio
 	// ~1.09 -- separation is a caveat here, never a gate.
-	weakSeparationRatio = 1.2
+	WeakSeparationRatio = 1.2
 	// edgeGuardSeconds is how close (in seconds) the matched turn's window
 	// may sit to either clip edge before EdgeWarning fires. Set equal to
 	// yawSmoothSigmaSeconds (the camera series' own smoothing sigma):
@@ -123,7 +129,7 @@ const (
 	// Result.DeclineReason for which one.
 	Declined Verdict = iota
 	// Weak means the gates cleared, but the runner-up scored within
-	// weakSeparationRatio of the winner -- a genuine measured true positive
+	// WeakSeparationRatio of the winner -- a genuine measured true positive
 	// can land here (test_very_shaken), so this is a caveat, not a
 	// second-class result.
 	Weak
@@ -320,8 +326,8 @@ func Estimate(camera, fit Series, opts Options) (Result, error) {
 
 // classify decides candidates' (score-descending) verdict, gating on the TOP
 // candidate only: Lambda first (it carries the actual true-positive/control
-// separation -- see lambdaGate's doc), then matched turn. A near-tie between
-// the top two (score ratio within weakSeparationRatio) is reordered IN
+// separation -- see LambdaGate's doc), then matched turn. A near-tie between
+// the top two (score ratio within WeakSeparationRatio) is reordered IN
 // PLACE to prefer the smaller |tau| of the two -- the measured tie-break --
 // before the gates are checked, and downgrades a pass from Confident to
 // Weak (never gates it out on its own).
@@ -336,7 +342,7 @@ func classify(candidates []Candidate) (Verdict, string) {
 
 	isWeak := false
 	if len(candidates) >= 2 && candidates[1].Score > 0 &&
-		candidates[0].Score/candidates[1].Score <= weakSeparationRatio {
+		candidates[0].Score/candidates[1].Score <= WeakSeparationRatio {
 		isWeak = true
 		if math.Abs(candidates[1].Tau.Seconds()) < math.Abs(candidates[0].Tau.Seconds()) {
 			candidates[0], candidates[1] = candidates[1], candidates[0]
@@ -347,9 +353,9 @@ func classify(candidates []Candidate) (Verdict, string) {
 	switch {
 	case winner.MatchedWindowSeconds <= 0:
 		return Declined, "no GPS in the matched window"
-	case winner.Lambda < lambdaGate:
+	case winner.Lambda < LambdaGate:
 		return Declined, "Lambda too low"
-	case winner.MatchedTurnDeg < turnGateDeg:
+	case winner.MatchedTurnDeg < TurnGateDeg:
 		return Declined, "turn too small"
 	case isWeak:
 		return Weak, ""

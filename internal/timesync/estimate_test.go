@@ -230,7 +230,7 @@ func TestClassify_GatingTable(t *testing.T) {
 }
 
 // TestClassify_NearTieSetsWeakAndPrefersSmallerTau checks the measured
-// tie-break: when the runner-up scores within weakSeparationRatio of the
+// tie-break: when the runner-up scores within WeakSeparationRatio of the
 // winner, the verdict downgrades to Weak (not Declined -- a near-tie can
 // still be a genuine true positive), AND the reported winner (Candidates[0]
 // after classify) is whichever of the two has the smaller |tau|.
@@ -254,7 +254,7 @@ func TestClassify_ClearSeparationIsConfidentNotWeak(t *testing.T) {
 	top := candWithTau(13.6, 90, 3.0)
 	top.Score = 0.50
 	runnerUp := candWithTau(1.0, 10, 20.0)
-	runnerUp.Score = 0.10 // ratio 5.0, well outside weakSeparationRatio
+	runnerUp.Score = 0.10 // ratio 5.0, well outside WeakSeparationRatio
 
 	v, _ := classify([]Candidate{top, runnerUp})
 	if v != Confident {
@@ -307,7 +307,7 @@ func TestEdgeWarning_SilentWhenTurnCentroidIsCentral(t *testing.T) {
 // peak covariance (and hence Lambda) without changing MatchedTurnDeg at all
 // (matchedTurn integrates the FIT side alone, over a window centered on the
 // camera's own turn location, independent of how well the shapes match).
-// That decoupling is what lets this fixture put turnGateDeg and lambdaGate
+// That decoupling is what lets this fixture put TurnGateDeg and LambdaGate
 // on opposite sides of their thresholds by varying one number.
 func lambdaGateFixture(camAmplitude float64) (camera, fit Series) {
 	const clipSec = 150.0
@@ -328,7 +328,7 @@ func lambdaGateFixture(camAmplitude float64) (camera, fit Series) {
 		fitTimes = append(fitTimes, t0.Add(time.Duration(tt*float64(time.Second))))
 		v := 0.0
 		if tt >= spikeAt+tau0-5 && tt <= spikeAt+tau0+5 {
-			v = 8.0 // deg/s, flat for 10s -> integrates to ~80deg, well clear of turnGateDeg
+			v = 8.0 // deg/s, flat for 10s -> integrates to ~80deg, well clear of TurnGateDeg
 		}
 		fitVals = append(fitVals, v)
 	}
@@ -337,11 +337,11 @@ func lambdaGateFixture(camAmplitude float64) (camera, fit Series) {
 }
 
 // TestEstimate_WeakLocalizedMatchDeclinesOnLambdaAloneNotTurn is the case the
-// package's own design notes (lambdaGate's doc comment, measured 13.6/13.6/
+// package's own design notes (LambdaGate's doc comment, measured 13.6/13.6/
 // 19.1 true positives vs 1.1/2.2/1.5 controls) rely on but the unit suite
 // otherwise never exercises end to end: a candidate that reaches scoring
 // (unlike an unreliable-lens clip, which CameraHeadingRates declines before
-// Estimate ever runs) and clears turnGateDeg comfortably, but must still be
+// Estimate ever runs) and clears TurnGateDeg comfortably, but must still be
 // declined because its matched-filter energy is too low. Without this test,
 // nothing but real footage (env-gated, does not run in `make test`) checks
 // that Estimate's own Lambda computation -- not just classify()'s hand-fed
@@ -357,11 +357,11 @@ func TestEstimate_WeakLocalizedMatchDeclinesOnLambdaAloneNotTurn(t *testing.T) {
 		t.Fatalf("no candidates at all; verdict=%s reason=%q", res.Verdict, res.DeclineReason)
 	}
 	winner := res.Candidates[0]
-	if winner.MatchedTurnDeg < turnGateDeg {
-		t.Fatalf("test setup: matched turn %.1fdeg does not even clear turnGateDeg (%.0f) -- fixture needs retuning", winner.MatchedTurnDeg, turnGateDeg)
+	if winner.MatchedTurnDeg < TurnGateDeg {
+		t.Fatalf("test setup: matched turn %.1fdeg does not even clear TurnGateDeg (%.0f) -- fixture needs retuning", winner.MatchedTurnDeg, TurnGateDeg)
 	}
-	if winner.Lambda >= lambdaGate {
-		t.Fatalf("test setup: Lambda %.2f already clears lambdaGate (%.1f) -- fixture needs retuning", winner.Lambda, lambdaGate)
+	if winner.Lambda >= LambdaGate {
+		t.Fatalf("test setup: Lambda %.2f already clears LambdaGate (%.1f) -- fixture needs retuning", winner.Lambda, LambdaGate)
 	}
 	if res.Verdict != Declined || res.DeclineReason != "Lambda too low" {
 		t.Errorf("verdict=%s reason=%q (Lambda=%.2f turn=%.1fdeg), want declined \"Lambda too low\"",
@@ -385,8 +385,8 @@ func TestEstimate_StrongerLocalizedMatchClearsLambdaAtTheSameTurn(t *testing.T) 
 		t.Fatalf("no candidates; verdict=%s reason=%q", res.Verdict, res.DeclineReason)
 	}
 	winner := res.Candidates[0]
-	if winner.Lambda < lambdaGate {
-		t.Fatalf("test setup: Lambda %.2f does not clear lambdaGate (%.1f) -- fixture needs retuning", winner.Lambda, lambdaGate)
+	if winner.Lambda < LambdaGate {
+		t.Fatalf("test setup: Lambda %.2f does not clear LambdaGate (%.1f) -- fixture needs retuning", winner.Lambda, LambdaGate)
 	}
 	if res.Verdict == Declined {
 		t.Errorf("verdict=declined (%q) with Lambda=%.2f clearing the gate, want a pass", res.DeclineReason, winner.Lambda)

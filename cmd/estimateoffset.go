@@ -280,16 +280,7 @@ func printEstimateReport(w io.Writer, video, fitPath string, info vidio.Info, tr
 
 	res := rep.result
 	if len(res.Candidates) > 0 {
-		fmt.Fprintln(w, "  offset      score   lambda   matched turn              separation")
-		for i, c := range res.Candidates {
-			sep := "-"
-			if i+1 < len(res.Candidates) && res.Candidates[i+1].Score > 0 {
-				sep = fmt.Sprintf("%.2fx next", c.Score/res.Candidates[i+1].Score)
-			}
-			fmt.Fprintf(w, "  %+7.2fs   %.3f   %6.1f   %6.1fdeg (%.1fdeg/min)   %s\n",
-				c.Tau.Seconds(), c.Score, c.Lambda, c.MatchedTurnDeg, c.MatchedTurnPerMinute(), sep)
-		}
-		fmt.Fprintln(w)
+		printCandidateTable(w, res.Candidates)
 	}
 
 	fmt.Fprintf(w, "Verdict: %s", res.Verdict)
@@ -302,11 +293,21 @@ func printEstimateReport(w io.Writer, video, fitPath string, info vidio.Info, tr
 		fmt.Fprintf(w, "Warning: %s\n", res.EdgeWarning)
 	}
 	if !math.IsNaN(res.NullPercentile) {
-		fmt.Fprintf(w, "Null percentile: %.4f of implausible (|tau|>30s) offsets score at least as well as the winner -- context, not a gate\n", res.NullPercentile)
+		fmt.Fprintf(w, "Null percentile: %.4f -- the fraction of implausible (|offset|>30s) alignments that score\n", res.NullPercentile)
+		fmt.Fprintf(w, "  at least as well as the winner. Lower is better; this is context, not a gate.\n")
 	}
 	if res.MaxCameraTurnDeg > 0 {
-		fmt.Fprintf(w, "Largest sustained camera turn: %.1fdeg over %.0fs, %.1fs into the clip -- for choosing --corner. Camera turn is NOT evidence: on two control clips the camera turned 84-86deg while the runner never changed direction -- a head turn moves the camera and not the GPS\n",
+		// Explicitly "in the VIDEO", because the table's "GPS turn" column is
+		// the OTHER source and the two are routinely different numbers for the
+		// same corner: they measure different things (where the camera pointed
+		// vs where the runner went) over different windows (a fixed 6s span
+		// here, the matched window there). Reported side by side without that
+		// said, they read as a contradiction.
+		fmt.Fprintf(w, "Largest sustained turn IN THE VIDEO: %.1fdeg over %.0fs, %.1fs into the clip.\n",
 			res.MaxCameraTurnDeg, res.MaxCameraTurnWindowSeconds, res.MaxCameraTurnAt.Seconds())
+		fmt.Fprintf(w, "  This is the camera, not the GPS, and it is only for choosing --corner -- it is NOT\n")
+		fmt.Fprintf(w, "  evidence: on two control clips the camera turned 84-86deg while the runner never\n")
+		fmt.Fprintf(w, "  changed direction at all. A head turn moves the camera and leaves the GPS straight.\n")
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, offsetAccuracyCaveat)
@@ -318,3 +319,53 @@ const offsetAccuracyCaveat = "This is within about 1-2s on the clips measured (w
 	"one), never better than the ~0.7s clock-quantization floor. It is also the offset that\n" +
 	"makes the turn line up, not purely clock error -- a runner turns their head into a corner\n" +
 	"before their body follows, and Garmin's position filtering lags the actual path."
+
+// printCandidateTable renders the ranked candidates with a legend.
+//
+// The legend is not optional decoration. Every column here is a term of art
+// -- a concordance score, a matched-filter energy, a score ratio -- and a
+// reader who cannot tell which direction is good, or which of two turn
+// figures came from the video and which from the GPS, cannot act on the
+// table at all. The gate thresholds are quoted inline for the same reason:
+// "lambda 27.9" means nothing without "confident needs 5.0".
+func printCandidateTable(w io.Writer, candidates []timesync.Candidate) {
+	fmt.Fprintln(w, "Candidates, best first:")
+	fmt.Fprintln(w)
+	// Widths are shared between the header and the rows, and every numeric
+	// column is right-aligned, so digits line up under each other and the
+	// eye can compare a column by scanning it. The turn column is composed
+	// first, with its own internal widths, then padded as one unit --
+	// formatting it inline would left-align "4.5deg" against "179.9deg".
+	const (
+		offsetW = 9
+		scoreW  = 8
+		lamW    = 8
+		turnW   = 25
+		sepW    = 8
+	)
+	fmt.Fprintf(w, "  %*s %*s %*s   %*s %*s\n",
+		offsetW, "offset", scoreW, "score", lamW, "lambda", turnW, "GPS turn matched", sepW, "vs next")
+	for i, c := range candidates {
+		sep := "-"
+		if i+1 < len(candidates) && candidates[i+1].Score > 0 {
+			sep = fmt.Sprintf("%.2fx", c.Score/candidates[i+1].Score)
+		}
+		turn := fmt.Sprintf("%7.1fdeg (%5.0fdeg/min)", c.MatchedTurnDeg, c.MatchedTurnPerMinute())
+		fmt.Fprintf(w, "  %+*.2fs %*.3f %*.1f   %*s %*s\n",
+			offsetW-1, c.Tau.Seconds(), scoreW, c.Score, lamW, c.Lambda, turnW, turn, sepW, sep)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  offset    the value to pass as --offset: fit_time = creation_time + offset + pts.")
+	fmt.Fprintln(w, "  score     0 to 1, higher is better. How well the camera's turn-rate curve and the")
+	fmt.Fprintln(w, "            GPS's agree at that offset, in SHAPE and in SIZE -- a turn of the right")
+	fmt.Fprintln(w, "            shape but the wrong magnitude scores below one that matches both.")
+	fmt.Fprintf(w, "  lambda    higher is better; the confidence gate. How far the match stands above\n")
+	fmt.Fprintf(w, "            noise, so it stays comparable between clips as score does not. Needs >= %.1f.\n", timesync.LambdaGate)
+	fmt.Fprintf(w, "  GPS turn  how far the FIT track's heading sweeps inside the matched window --\n")
+	fmt.Fprintf(w, "            measured from GPS, NOT from the video. Needs >= %.0fdeg. The per-minute\n", timesync.TurnGateDeg)
+	fmt.Fprintln(w, "            figure is the honest one on a long clip, where the total accumulates")
+	fmt.Fprintln(w, "            GPS noise and clears a fixed threshold on length alone.")
+	fmt.Fprintf(w, "  vs next   how many times this candidate's score beats the one below it. Under\n")
+	fmt.Fprintf(w, "            %.1fx the two are hard to tell apart and the verdict drops to weak.\n", timesync.WeakSeparationRatio)
+	fmt.Fprintln(w)
+}

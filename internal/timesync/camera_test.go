@@ -110,7 +110,7 @@ func TestCameraHeadingRates_NoRotationsReturnsError(t *testing.T) {
 	}
 }
 
-func TestCameraHeadingRates_UnreliableLensReturnsError(t *testing.T) {
+func TestCameraHeadingRates_UnreliableLensWarnsAndStillReturnsASeries(t *testing.T) {
 	series := seriesWithTransitions(30, 10, 500, func(i int) stabilize.Transition {
 		return stabilize.Transition{OK: true, Rotation3: quatFromYRad(0.01), DX: 5, Scale: 1}
 	})
@@ -124,12 +124,12 @@ func TestCameraHeadingRates_UnreliableLensReturnsError(t *testing.T) {
 	}
 	var named bool
 	for _, w := range warnings {
-		if strings.Contains(w, "not reliable") {
+		if strings.Contains(w, "focal length") {
 			named = true
 		}
 	}
 	if !named {
-		t.Errorf("no warning named the unreliable calibration; got %v", warnings)
+		t.Errorf("no warning named the lens focal length as the thing in doubt; got %v", warnings)
 	}
 }
 
