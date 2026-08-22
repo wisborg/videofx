@@ -37,13 +37,16 @@ const (
 // estimate.go.
 //
 // Requires series to have been analyzed with
-// stabilize.Options.WarpModel = stabilize.WarpModelRotation: a reliable lens
-// calibration and at least one fitted per-pair rotation. This is checked and
-// reported as a distinct ERROR, not a zero-valued Series, because
-// stabilize.DefaultOptions returns the zero WarpModel -- WarpModelSimilarity
-// -- so a caller that forgot to set WarpModelRotation would otherwise get an
-// all-zero yaw series that reads exactly like "no turn in this clip" and is
-// silently indistinguishable from it.
+// stabilize.Options.WarpModel = stabilize.WarpModelRotation: a lens
+// calibration must be present and at least one per-pair rotation fitted.
+// Both are checked and reported as distinct ERRORS, not as a zero-valued
+// Series, because stabilize.DefaultOptions returns the zero WarpModel --
+// WarpModelSimilarity -- so a caller that forgot to set WarpModelRotation
+// would otherwise get an all-zero yaw series that reads exactly like "no
+// turn in this clip" and is silently indistinguishable from it.
+//
+// A lens calibration that is present but NOT Reliable() is a warning, not an
+// error -- see the reasoning at the check itself.
 //
 // Returns any non-fatal warnings from the DX-vs-yaw sign/scale sanity check
 // (see the package doc's sign-convention section) alongside the series.
@@ -51,12 +54,41 @@ func CameraHeadingRates(series *stabilize.MotionSeries, creationTime time.Time) 
 	if series == nil {
 		return Series{}, nil, fmt.Errorf("timesync: nil motion series")
 	}
-	if series.Lens == nil || !series.Lens.Reliable() {
+	if series.Lens == nil {
 		return Series{}, nil, fmt.Errorf(
-			"timesync: %s carries no reliable rotation-model lens calibration -- "+
+			"timesync: %s carries no rotation-model lens calibration at all -- "+
 				"analyze with stabilize.Options.WarpModel = stabilize.WarpModelRotation "+
 				"(the default WarpModel is similarity, which fits no rotation at all and "+
 				"would otherwise look identical to \"no turn in this clip\")", displaySource(series))
+	}
+	// An UNRELIABLE calibration is deliberately not fatal here, though it is
+	// fatal for stabilizing. LensCalibration.Reliable answers "is this focal
+	// length trustworthy enough to warp pixels with", and a warp puts the
+	// focal in the geometry: get it wrong and every frame lands in the wrong
+	// place. This package only needs the SHAPE of the yaw over time. The
+	// focal enters solely as a scale on that shape, where it meets a gain
+	// penalty gentle enough that a 2x error costs about 20% of the score.
+	//
+	// Refusing here also refused the wrong clips. Reliable() fails when the
+	// motion never distinguished one focal length from another -- a flat
+	// error curve -- which is what steady running with a single big turn
+	// looks like, i.e. the best possible input for this measurement. Measured:
+	// an 81s clip containing a 180-degree turn calibrated at an error ratio of
+	// 0.9929 against the 0.95 threshold and was refused, yet recovered the
+	// offset with the strongest matched-filter energy of any clip tried
+	// (Lambda 27.9, against 13.6/13.6/19.1 for the three that passed the gate).
+	//
+	// The gates that DO belong here are Lambda and the matched GPS turn, and
+	// they hold without this one: the two negative controls whose lenses are
+	// also unreliable still decline, on Lambda 2.2 and 1.5 -- naming the real
+	// reason instead of blaming a lens that was never the problem.
+	var lensWarnings []string
+	if !series.Lens.Reliable() {
+		lensWarnings = append(lensWarnings, fmt.Sprintf(
+			"timesync: %s's rotation-model lens calibration is not reliable (%v) -- "+
+				"the yaw SHAPE is still usable, but its scale may be off, which depresses "+
+				"the score and inflates the matched-filter energy; weigh the verdict accordingly",
+			displaySource(series), series.Lens))
 	}
 	if series.FPS <= 0 {
 		return Series{}, nil, fmt.Errorf("timesync: %s has no FPS recorded", displaySource(series))
@@ -108,6 +140,7 @@ func CameraHeadingRates(series *stabilize.MotionSeries, creationTime time.Time) 
 	if err != nil {
 		return Series{}, nil, err
 	}
+	warnings = append(lensWarnings, warnings...)
 
 	smoothed := gaussSmooth(raw, yawSmoothSigmaSeconds*fps)
 	return Series{Times: times, Values: smoothed}, warnings, nil

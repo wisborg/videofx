@@ -93,19 +93,44 @@ func buildTestTrack() *telemetry.Track {
 	}
 }
 
-// TestEstimate_UnreliableLensDeclineNamesTheLensNotMissingRotations checks
-// estimate()'s own labeling, not just printEstimateReport's rendering of a
-// hand-crafted string: a MotionSeries that DOES carry per-pair rotations but
-// whose lens calibration is not Reliable() is exactly the case
-// timesync.CameraHeadingRates reports as "no reliable rotation-model lens
-// calibration", not as "no rotations" -- the transitions are real, only the
-// lens is untrusted. estimate() must not paper over that distinction by
-// prefixing every CameraHeadingRates failure with the same "no rotations in
-// the analysis" label; a reader (or a script parsing DeclineReason) told "no
-// rotations" when the clip visibly turned, and the real cause is an
-// unreliable lens fit, is being actively misled about what to fix (recalibrate
-// the lens, e.g. with --lens, not "there's no turn in this clip").
-func TestEstimate_UnreliableLensDeclineNamesTheLensNotMissingRotations(t *testing.T) {
+// buildMovingTestTrack is a 1Hz track running due north at ~3 m/s from
+// start for secs seconds -- enough real displacement that the heading side
+// resolves, so a test can reach whatever it actually means to exercise.
+func buildMovingTestTrack(start time.Time, secs int) *telemetry.Track {
+	const metresPerDegLat = 111132.0
+	samples := make([]telemetry.Sample, secs)
+	for i := range samples {
+		samples[i] = telemetry.Sample{
+			Time:   start.Add(time.Duration(i) * time.Second),
+			HasGPS: true,
+			Lat:    -33 + float64(i)*3.0/metresPerDegLat,
+			Lon:    151,
+		}
+	}
+	return &telemetry.Track{SourcePath: "moving.fit", Samples: samples}
+}
+
+// TestEstimate_UnreliableLensDoesNotDeclineAndWarnsNamingTheLens pins the
+// contract for a MotionSeries that carries real per-pair rotations but whose
+// lens calibration is not Reliable(): it must produce a RESULT with a warning
+// naming the lens, never an early decline.
+//
+// This started life asserting the opposite, and both versions are about the
+// same thing -- a rejection that misdescribes itself. The first bug was the
+// LABEL: every CameraHeadingRates failure was prefixed "no rotations in the
+// analysis", which is false for a clip whose transitions all carry a fitted
+// Rotation3. Fixing the label exposed the deeper one: refusing at all was
+// wrong. Reliable() asks whether a focal length is trustworthy enough to WARP
+// PIXELS with; this package only needs the yaw's shape over time, where the
+// focal is a scale meeting a gentle gain penalty. The gate was rejecting
+// clips for a reason that did not apply to the measurement being made --
+// including an 81s clip containing a 180-degree turn, the best input the
+// method has ever been given.
+//
+// So the assertion is inverted deliberately: a result, plus a warning that
+// names the lens so the caller can weigh it. Declining here again would be a
+// regression, not a return to caution.
+func TestEstimate_UnreliableLensDoesNotDeclineAndWarnsNamingTheLens(t *testing.T) {
 	const n = 20
 	trs := make([]stabilize.Transition, n)
 	for i := range trs {
@@ -118,30 +143,34 @@ func TestEstimate_UnreliableLensDeclineNamesTheLensNotMissingRotations(t *testin
 		FPS:         30,
 		FrameCount:  n + 1,
 		Transitions: trs,
-		// Lens.Reliable() is false: not Forced, and Pairs/Error/FlatError are
-		// all zero -- the exact "clip did not move enough to calibrate"
-		// shape timesync.CameraHeadingRates's own doc comment describes, NOT
-		// an absence of fitted rotations.
+		// Reliable() is false: not Forced, and Pairs/Error/FlatError are all
+		// zero -- the "clip did not distinguish a focal length" shape, NOT an
+		// absence of fitted rotations.
 		Lens: &stabilize.LensCalibration{Lens: stabilize.Lens{Focal: 500}},
 	}
 	if series.Lens.Reliable() {
 		t.Fatal("test setup: lens must be unreliable")
 	}
 
-	track := buildTestTrack()
+	// A track that actually MOVES: buildTestTrack's two fixes an hour apart
+	// decline on the FIT side before the lens is ever reached, which would
+	// make this test pass for the wrong reason.
+	track := buildMovingTestTrack(time.Date(2026, 8, 1, 8, 28, 0, 0, time.UTC), 240)
 	rep, err := estimate(series, track, time.Date(2026, 8, 1, 8, 30, 0, 0, time.UTC), timesync.Options{})
 	if err != nil {
 		t.Fatalf("estimate: %v", err)
 	}
-	if rep.hasResult {
-		t.Fatal("expected an early decline, got a result")
+	if !rep.hasResult {
+		t.Fatalf("an unreliable lens must not decline the clip; got early reason %q", rep.earlyReason)
 	}
-	if strings.Contains(rep.earlyReason, "no rotations") {
-		t.Errorf("earlyReason = %q, wrongly says \"no rotations\" for a series whose transitions ALL carry a fitted Rotation3 -- "+
-			"the real cause (an unreliable lens calibration) is buried in the appended detail, not named by the label itself", rep.earlyReason)
+	var named bool
+	for _, w := range rep.camWarnings {
+		if strings.Contains(w, "not reliable") {
+			named = true
+		}
 	}
-	if !strings.Contains(rep.earlyReason, "lens") {
-		t.Errorf("earlyReason = %q, want it to name the lens as the cause", rep.earlyReason)
+	if !named {
+		t.Errorf("no warning named the unreliable calibration; got %v", rep.camWarnings)
 	}
 }
 

@@ -115,9 +115,21 @@ func TestCameraHeadingRates_UnreliableLensReturnsError(t *testing.T) {
 		return stabilize.Transition{OK: true, Rotation3: quatFromYRad(0.01), DX: 5, Scale: 1}
 	})
 	series.Lens = &stabilize.LensCalibration{Lens: stabilize.Lens{Focal: 500}} // not Forced, Pairs==0 -> not Reliable
-	_, _, err := CameraHeadingRates(series, t0)
-	if err == nil {
-		t.Fatal("expected an error for an unreliable lens calibration, got nil")
+	got, warnings, err := CameraHeadingRates(series, t0)
+	if err != nil {
+		t.Fatalf("an unreliable lens calibration must WARN, not fail: %v", err)
+	}
+	if len(got.Values) == 0 {
+		t.Fatal("expected a usable yaw series despite the unreliable calibration")
+	}
+	var named bool
+	for _, w := range warnings {
+		if strings.Contains(w, "not reliable") {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("no warning named the unreliable calibration; got %v", warnings)
 	}
 }
 

@@ -178,9 +178,10 @@ func estimate(series *stabilize.MotionSeries, track *telemetry.Track, creationTi
 	if err != nil {
 		// A NEUTRAL label, not a fixed "no rotations in the analysis"
 		// prefix: CameraHeadingRates already returns a SPECIFIC error for
-		// each of its distinct failure modes (no reliable lens calibration,
+		// each of its distinct failure modes (no lens calibration at all,
 		// literally no fitted rotations, ...), and a clip that carries real
 		// per-pair rotations but an unreliable lens is not "no rotations" --
+		// nor, since that gate was removed, a failure at all --
 		// telling a reader that when the clip visibly turned points them at
 		// the wrong fix (there IS a turn; the lens fit needs help, e.g.
 		// --lens/--lens-focal). Surface the real error verbatim instead of
