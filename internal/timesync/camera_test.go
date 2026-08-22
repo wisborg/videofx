@@ -161,3 +161,44 @@ func TestCameraHeadingRates_NegatedRotationFailsTheSignCheck(t *testing.T) {
 		t.Errorf("error = %q, want it to name the sign check", err.Error())
 	}
 }
+
+// TestCheckYawSign_ImpliedFocalIsPixelsPerRadianNotItsReciprocal pins the
+// ORIENTATION of the DX-vs-yaw regression, which the positive-slope check
+// alone cannot: inverting a slope preserves its sign, so swapping the
+// regression's x and y leaves the hard sign check passing while the implied
+// focal silently becomes (180/pi)^2/f^2 instead of f.
+//
+// That is not hypothetical -- it shipped. With the arguments swapped, a clip
+// whose calibrated focal was 269px reported an implied ratio of 0.037 and a
+// clip at 1488px reported 0.001, so the [0.5, 2.0] band warned on every clip
+// ever run through it and told the reader "the scale is off" about a scale
+// that was in fact correct. Re-measured in the right orientation the same two
+// clips give 0.895 and 1.149.
+//
+// The fixture makes DX exactly focal*yaw_radians, the relation the check is
+// built on, so a correct implementation implies a ratio of 1.0 and emits NO
+// scale warning. Asserting the absence of a warning is the whole point: the
+// swapped version produces a series and a sign that both look fine.
+func TestCheckYawSign_ImpliedFocalIsPixelsPerRadianNotItsReciprocal(t *testing.T) {
+	const (
+		focal = 640.0
+		n     = 60
+	)
+	series := seriesWithTransitions(30, n, focal, func(i int) stabilize.Transition {
+		// A yaw that varies in size (and sign) so the regression has real
+		// spread to fit, rather than one repeated point.
+		y := 0.004 * float64(i-n/2)
+		return stabilize.Transition{OK: true, Scale: 1, Rotation3: quatFromYRad(y), DX: focal * y}
+	})
+
+	_, warnings, err := CameraHeadingRates(series, t0)
+	if err != nil {
+		t.Fatalf("CameraHeadingRates: %v", err)
+	}
+	for _, w := range warnings {
+		if strings.Contains(w, "focal length") {
+			t.Errorf("DX = focal*yaw exactly, so the implied focal must match the calibrated one "+
+				"and emit no scale warning; got %q", w)
+		}
+	}
+}

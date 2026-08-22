@@ -71,7 +71,7 @@ func CameraHeadingRates(series *stabilize.MotionSeries, creationTime time.Time) 
 	haveRotation := false
 	raw := make([]float64, n)
 	times := make([]time.Time, n)
-	var signX, signY []float64
+	var sigDeg, sigDX []float64
 	for i := range series.Transitions {
 		tr := &series.Transitions[i]
 		// Transition i spans frames i and i+1; stamp it at the midpoint of
@@ -84,8 +84,8 @@ func CameraHeadingRates(series *stabilize.MotionSeries, creationTime time.Time) 
 			y := tr.Rotation3.Normalized().Log().Y
 			// The negation is derived and confirmed in the package doc.
 			raw[i] = -y * fps * 180 / math.Pi
-			signY = append(signY, y*180/math.Pi) // degrees, for the sanity regression below
-			signX = append(signX, tr.DX)
+			sigDeg = append(sigDeg, y*180/math.Pi) // degrees, for the sanity regression below
+			sigDX = append(sigDX, tr.DX)
 		}
 		// tr.OK == false or a nil Rotation3 contributes 0 -- "no observed
 		// motion" -- without shifting the time base: times[i] is set either
@@ -97,7 +97,14 @@ func CameraHeadingRates(series *stabilize.MotionSeries, creationTime time.Time) 
 				"analyze with stabilize.Options.WarpModel = stabilize.WarpModelRotation", displaySource(series))
 	}
 
-	warnings, err := checkYawSign(series, signX, signY)
+	// Argument order is load-bearing: checkYawSign regresses DX *on* degrees
+	// (degrees is x, pixels is y), so the slope is px/deg and its implied
+	// focal is slope*180/pi. Passing these the other way round still yields a
+	// correctly-SIGNED slope -- inverting a slope preserves its sign -- so the
+	// hard sign check goes on passing while the implied focal comes out as
+	// (180/pi)^2/f^2 instead of f. That is how the scale band silently
+	// reported ~0.04x on every clip and warned on all of them.
+	warnings, err := checkYawSign(series, sigDeg, sigDX)
 	if err != nil {
 		return Series{}, nil, err
 	}
