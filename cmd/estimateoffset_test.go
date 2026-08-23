@@ -215,10 +215,10 @@ func TestPrintEstimateReport_ConfidentShowsCandidatesAndCaveats(t *testing.T) {
 	out := buf.String()
 
 	for _, want := range []string{
-		"+2.70s", "0.821", "13.5", "104.2deg",
+		"+2.70s", "0.821", "13.5", "104.2°",
 		"Verdict: confident",
 		"Null percentile: 0.0000",
-		"Largest sustained turn IN THE VIDEO: 76.2deg",
+		"Largest sustained turn IN THE VIDEO: 76.2°",
 		"A head turn moves the camera",
 		"about 1-2s on the clips measured",
 	} {

@@ -154,7 +154,7 @@ func headingRatesFromUnwrapped(ht []time.Time, hv []float64) ([]time.Time, []flo
 		// specifically to catch a fault, and a fault that produces NaN must
 		// not be the one case it misses.
 		if math.IsNaN(rate) || math.Abs(rate) > headingMaxRateDegPerSec {
-			return nil, nil, fmt.Errorf("timesync: fit heading rate %.1f deg/s at %s exceeds the %.0f deg/s sanity bound -- likely a bad GPS fix or a missed unwrap",
+			return nil, nil, fmt.Errorf("timesync: fit heading rate %.1f °/s at %s exceeds the %.0f °/s sanity bound -- likely a bad GPS fix or a missed unwrap",
 				rate, ht[i].Format(time.RFC3339), headingMaxRateDegPerSec)
 		}
 		mid := ht[i].Add(ht[i+1].Sub(ht[i]) / 2)

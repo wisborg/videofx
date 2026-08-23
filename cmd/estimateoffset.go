@@ -306,10 +306,10 @@ func printEstimateReport(w io.Writer, video, fitPath string, info vidio.Info, tr
 		// vs where the runner went) over different windows (a fixed 6s span
 		// here, the matched window there). Reported side by side without that
 		// said, they read as a contradiction.
-		fmt.Fprintf(w, "Largest sustained turn IN THE VIDEO: %.1fdeg over %.0fs, %.1fs into the clip.\n",
+		fmt.Fprintf(w, "Largest sustained turn IN THE VIDEO: %.1f° over %.0fs, %.1fs into the clip.\n",
 			res.MaxCameraTurnDeg, res.MaxCameraTurnWindowSeconds, res.MaxCameraTurnAt.Seconds())
 		fmt.Fprintf(w, "  This is the camera, not the GPS, and it is only for choosing --corner -- it is NOT\n")
-		fmt.Fprintf(w, "  evidence: on two control clips the camera turned 84-86deg while the runner never\n")
+		fmt.Fprintf(w, "  evidence: on two control clips the camera turned 84-86° while the runner never\n")
 		fmt.Fprintf(w, "  changed direction at all. A head turn moves the camera and leaves the GPS straight.\n")
 	}
 	fmt.Fprintln(w)
@@ -353,10 +353,10 @@ func printCandidateTable(w io.Writer, candidates []timesync.Candidate) {
 		}
 		t.MustAppend(
 			c.Tau.Seconds(), c.Score, c.Lambda,
-			// Internal widths, so "deg" and "deg/min" line up down the
+			// Internal widths, so the degree signs line up down the
 			// column. Right-aligning the composed string only lines up its
-			// last character, which leaves 0.0deg hanging under 104.2deg.
-			fmt.Sprintf("%7.1fdeg (%5.0fdeg/min)", c.MatchedTurnDeg, c.MatchedTurnPerMinute()),
+			// last character, which leaves 0.0° hanging under 104.2°.
+			fmt.Sprintf("%7.1f° (%5.0f°/min)", c.MatchedTurnDeg, c.MatchedTurnPerMinute()),
 			sep,
 		)
 	}
@@ -370,7 +370,7 @@ func printCandidateTable(w io.Writer, candidates []timesync.Candidate) {
 	fmt.Fprintf(w, "  lambda    higher is better; the confidence gate. How far the match stands above\n")
 	fmt.Fprintf(w, "            noise, so it stays comparable between clips as score does not. Needs >= %.1f.\n", timesync.LambdaGate)
 	fmt.Fprintf(w, "  GPS turn  how far the FIT track's heading sweeps inside the matched window --\n")
-	fmt.Fprintf(w, "            measured from GPS, NOT from the video. Needs >= %.0fdeg. The per-minute\n", timesync.TurnGateDeg)
+	fmt.Fprintf(w, "            measured from GPS, NOT from the video. Needs >= %.0f°. The per-minute\n", timesync.TurnGateDeg)
 	fmt.Fprintln(w, "            figure is the honest one on a long clip, where the total accumulates")
 	fmt.Fprintln(w, "            GPS noise and clears a fixed threshold on length alone.")
 	fmt.Fprintf(w, "  vs next   how many times this candidate's score beats the one below it. Under\n")

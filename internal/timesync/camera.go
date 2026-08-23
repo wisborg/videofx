@@ -184,7 +184,7 @@ func checkYawSign(series *stabilize.MotionSeries, degY, dx []float64) ([]string,
 	}
 	if slope <= 0 {
 		return nil, fmt.Errorf(
-			"timesync: %s's DX-vs-yaw regression slope is %.4g px/deg, not positive -- "+
+			"timesync: %s's DX-vs-yaw regression slope is %.4g px/°, not positive -- "+
 				"DX and Rotation3.Log().Y should move together for a real yaw (see the package "+
 				"doc's sign-convention section); this usually means a sign got flipped somewhere "+
 				"in the analysis pipeline, and any offset recovered from it would be meaningless",
