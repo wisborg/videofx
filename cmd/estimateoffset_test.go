@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wisborg/fitactivity"
+
 	"videofx/internal/stabilize"
-	"videofx/internal/telemetry"
 	"videofx/internal/timesync"
 	"videofx/internal/vidio"
 )
@@ -83,10 +84,10 @@ func TestWarpModelName_SpellsTheEmptyDefaultAsSimilarity(t *testing.T) {
 // buildTestTrack is a minimal in-memory Track for report-formatting tests --
 // no FIT decoding, matching the project's convention for testing telemetry
 // consumers.
-func buildTestTrack() *telemetry.Track {
-	return &telemetry.Track{
+func buildTestTrack() *fitactivity.Track {
+	return &fitactivity.Track{
 		SourcePath: "activity.fit",
-		Samples: []telemetry.Sample{
+		Samples: []fitactivity.Sample{
 			{Time: time.Date(2026, 8, 1, 8, 0, 0, 0, time.UTC), HasGPS: true, Lat: -33, Lon: 151},
 			{Time: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC), HasGPS: true, Lat: -33.01, Lon: 151.01},
 		},
@@ -96,18 +97,18 @@ func buildTestTrack() *telemetry.Track {
 // buildMovingTestTrack is a 1Hz track running due north at ~3 m/s from
 // start for secs seconds -- enough real displacement that the heading side
 // resolves, so a test can reach whatever it actually means to exercise.
-func buildMovingTestTrack(start time.Time, secs int) *telemetry.Track {
+func buildMovingTestTrack(start time.Time, secs int) *fitactivity.Track {
 	const metresPerDegLat = 111132.0
-	samples := make([]telemetry.Sample, secs)
+	samples := make([]fitactivity.Sample, secs)
 	for i := range samples {
-		samples[i] = telemetry.Sample{
+		samples[i] = fitactivity.Sample{
 			Time:   start.Add(time.Duration(i) * time.Second),
 			HasGPS: true,
 			Lat:    -33 + float64(i)*3.0/metresPerDegLat,
 			Lon:    151,
 		}
 	}
-	return &telemetry.Track{SourcePath: "moving.fit", Samples: samples}
+	return &fitactivity.Track{SourcePath: "moving.fit", Samples: samples}
 }
 
 // TestEstimate_UnreliableLensDoesNotDeclineAndWarnsNamingTheLens pins the

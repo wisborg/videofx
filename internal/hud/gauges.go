@@ -7,7 +7,7 @@ import (
 
 	"github.com/fogleman/gg"
 
-	"videofx/internal/telemetry"
+	"github.com/wisborg/fitactivity"
 )
 
 // MetricsGauge is the lower-left instantaneous readout: heart rate, cadence,
@@ -151,7 +151,7 @@ func (ElevationProfileGauge) Name() string { return "elevation-profile" }
 // elevation MODEL's own first and last profile points -- not from
 // Course.StartDistance/TotalDistance, which describe the progress bar's axis.
 // The two can legitimately differ by a few metres; see
-// telemetry.ElevationModel.StartDistance for why they are not reconciled.
+// fitactivity.ElevationModel.StartDistance for why they are not reconciled.
 type elevPlot struct {
 	px, lblPx               float64
 	left, right, top, axisY float64
@@ -359,7 +359,7 @@ func (GainLossGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
 }
 
 // courseElevation returns f's non-empty elevation model, or nil.
-func courseElevation(f Frame) *telemetry.ElevationModel {
+func courseElevation(f Frame) *fitactivity.ElevationModel {
 	if f.Course == nil || f.Course.Elevation == nil || f.Course.Elevation.Empty() {
 		return nil
 	}

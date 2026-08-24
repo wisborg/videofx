@@ -10,10 +10,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/wisborg/fitactivity"
+
 	"videofx/internal/logging"
 	"videofx/internal/progress"
 	"videofx/internal/stabilize"
-	"videofx/internal/telemetry"
 	"videofx/internal/timesync"
 	"videofx/internal/vidio"
 
@@ -143,7 +144,7 @@ func runEstimateOffset(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	track, err := telemetry.Decode(estOffsetFit)
+	track, err := fitactivity.Decode(estOffsetFit)
 	if err != nil {
 		return fmt.Errorf("estimate-offset: decoding %s: %w", estOffsetFit, err)
 	}
@@ -176,7 +177,7 @@ type estimateReport struct {
 // names itself" rule) rather than letting it read as an empty/unmeasured
 // result. Split out from runEstimateOffset so it's testable without a real
 // ffmpeg/gocv analysis pass.
-func estimate(series *stabilize.MotionSeries, track *telemetry.Track, creationTime time.Time, opts timesync.Options) (estimateReport, error) {
+func estimate(series *stabilize.MotionSeries, track *fitactivity.Track, creationTime time.Time, opts timesync.Options) (estimateReport, error) {
 	camera, warnings, err := timesync.CameraHeadingRates(series, creationTime)
 	if err != nil {
 		// A NEUTRAL label, not a fixed "no rotations in the analysis"
@@ -260,7 +261,7 @@ func warpModelName(m stabilize.WarpModel) string {
 // reader came for is never above the evidence that qualifies it. Split out
 // from runEstimateOffset so the formatting is testable without a real
 // analysis/FIT file.
-func printEstimateReport(w io.Writer, video, fitPath string, info vidio.Info, track *telemetry.Track, rep estimateReport) {
+func printEstimateReport(w io.Writer, video, fitPath string, info vidio.Info, track *fitactivity.Track, rep estimateReport) {
 	fmt.Fprintf(w, "Clip:     %s (%.2fs @ %.3ffps)\n", video, info.Duration, info.FPS)
 	fmt.Fprintf(w, "          creation_time %s\n", info.CreationTime.Format(time.RFC3339))
 	first, last := track.Coverage()

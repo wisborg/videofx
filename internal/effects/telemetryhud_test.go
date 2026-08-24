@@ -21,11 +21,12 @@ import (
 	"github.com/muktihari/fit/profile/mesgdef"
 	"github.com/muktihari/fit/profile/typedef"
 
-	"videofx/internal/fittest"
+	"github.com/wisborg/fitactivity"
+	"github.com/wisborg/fitactivity/fittest"
+
 	"videofx/internal/hud"
 	"videofx/internal/logging"
 	"videofx/internal/progress"
-	"videofx/internal/telemetry"
 	"videofx/internal/vidio"
 )
 
@@ -445,7 +446,7 @@ const (
 
 // hudScopeFixture decodes the fixture above and resolves the clip's window
 // against it, exactly as TelemetryHUD.Apply does before scoping.
-func hudScopeFixture(t *testing.T) (*telemetry.Track, telemetry.Sync) {
+func hudScopeFixture(t *testing.T) (*fitactivity.Track, fitactivity.Sync) {
 	t.Helper()
 	start, err := time.Parse(time.RFC3339, hudScopeStart)
 	if err != nil {
@@ -465,13 +466,13 @@ func hudScopeFixture(t *testing.T) (*telemetry.Track, telemetry.Sync) {
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("writing the HUD scope FIT fixture: %v", err)
 	}
-	track, err := telemetry.Decode(path)
+	track, err := fitactivity.Decode(path)
 	if err != nil {
 		t.Fatalf("decoding the HUD scope FIT fixture: %v", err)
 	}
 
-	sync := telemetry.Resolve(track, start.Add(hudClipOffsetSec*time.Second), 0, hudClipSeconds*time.Second)
-	if sync.Overlap != telemetry.FullOverlap {
+	sync := fitactivity.Resolve(track, start.Add(hudClipOffsetSec*time.Second), 0, hudClipSeconds*time.Second)
+	if sync.Overlap != fitactivity.FullOverlap {
 		t.Fatalf("the fixture clip window resolved to %v, want full overlap", sync.Overlap)
 	}
 	return track, sync
@@ -480,11 +481,11 @@ func hudScopeFixture(t *testing.T) (*telemetry.Track, telemetry.Sync) {
 // hudScopeCourse builds the Course TelemetryHUD.Apply would hand the gauges at
 // the given scope, with no explicit elevation smoothing -- the default every
 // run uses unless --elevation-smoothing was passed.
-func hudScopeCourse(t *testing.T, scope telemetry.Scope) (*hud.Course, *telemetry.ScopedActivity) {
+func hudScopeCourse(t *testing.T, scope fitactivity.Scope) (*hud.Course, *fitactivity.ScopedActivity) {
 	t.Helper()
 	track, sync := hudScopeFixture(t)
-	scoped := telemetry.BuildScopedActivity(track, sync, scope)
-	return buildCourse(scoped, telemetry.ElevationOptions{}), scoped
+	scoped := fitactivity.BuildScopedActivity(track, sync, scope)
+	return buildCourse(scoped, fitactivity.ElevationOptions{}), scoped
 }
 
 // TestBuildCourse_ClipScopingNarrowsEveryGaugeTheCourseFeeds is the assertion
@@ -516,13 +517,13 @@ func hudScopeCourse(t *testing.T, scope telemetry.Scope) (*hud.Course, *telemetr
 // here and draw a 60 km profile under a 5 km bar.
 func TestBuildCourse_ClipScopingNarrowsEveryGaugeTheCourseFeeds(t *testing.T) {
 	for _, c := range []struct {
-		scope                    telemetry.Scope
+		scope                    fitactivity.Scope
 		startDistance, totalDist float64
 		routePoints              int
 		firstKm, totalKm         int
 		elevStart, elevEnd       float64
 	}{{
-		scope: telemetry.ScopeActivity,
+		scope: fitactivity.ScopeActivity,
 		// The default must still describe the whole activity, or this feature
 		// changed something nobody asked it to.
 		startDistance: 0, totalDist: 60000,
@@ -530,13 +531,13 @@ func TestBuildCourse_ClipScopingNarrowsEveryGaugeTheCourseFeeds(t *testing.T) {
 		firstKm:     1, totalKm: 60,
 		elevStart: 0, elevEnd: 60000,
 	}, {
-		scope:         telemetry.ScopeClipRebased,
+		scope:         fitactivity.ScopeClipRebased,
 		startDistance: 0, totalDist: 5000,
 		routePoints: hudClipSeconds + 1,
 		firstKm:     1, totalKm: 5,
 		elevStart: 0, elevEnd: 5000,
 	}, {
-		scope:         telemetry.ScopeClipAbsolute,
+		scope:         fitactivity.ScopeClipAbsolute,
 		startDistance: 10000, totalDist: 15000,
 		routePoints: hudClipSeconds + 1,
 		firstKm:     12, totalKm: 15,
@@ -571,7 +572,7 @@ func TestBuildCourse_ClipScopingNarrowsEveryGaugeTheCourseFeeds(t *testing.T) {
 			// the map somewhere else entirely.
 			if len(course.Route) > 0 {
 				wantFirst := time.Time{}
-				if c.scope == telemetry.ScopeActivity {
+				if c.scope == fitactivity.ScopeActivity {
 					wantFirst, _ = time.Parse(time.RFC3339, hudScopeStart)
 				} else {
 					start, _ := time.Parse(time.RFC3339, hudScopeStart)
@@ -595,8 +596,8 @@ func TestBuildCourse_ClipScopingNarrowsEveryGaugeTheCourseFeeds(t *testing.T) {
 // quietly rebased -- gives a progress bar whose span is right and whose
 // position is wrong, which no single-mode assertion above would notice.
 func TestBuildCourse_TheTwoClipModesDifferOnlyInTheNumbersPrinted(t *testing.T) {
-	rebased, _ := hudScopeCourse(t, telemetry.ScopeClipRebased)
-	absolute, _ := hudScopeCourse(t, telemetry.ScopeClipAbsolute)
+	rebased, _ := hudScopeCourse(t, fitactivity.ScopeClipRebased)
+	absolute, _ := hudScopeCourse(t, fitactivity.ScopeClipAbsolute)
 
 	if got, want := rebased.TotalDistance, absolute.TotalDistance-absolute.StartDistance; got != want {
 		t.Errorf("the rebased course spans %v m but the absolute one spans %v m (%v - %v) -- "+
@@ -633,12 +634,12 @@ func TestBuildCourse_TheTwoClipModesDifferOnlyInTheNumbersPrinted(t *testing.T) 
 // two must therefore differ; equal sigmas would mean the condition never fired
 // on either side and the flag below is being carried for nothing.
 func TestBuildCourse_AClipModeDropsTheDeviceElevationTarget(t *testing.T) {
-	full, fullScoped := hudScopeCourse(t, telemetry.ScopeActivity)
+	full, fullScoped := hudScopeCourse(t, fitactivity.ScopeActivity)
 	if !fullScoped.Track.HasElevationTotals {
 		t.Fatal("the fixture carries no device elevation totals, so this test would pass on any code at all")
 	}
 
-	for _, scope := range []telemetry.Scope{telemetry.ScopeClipRebased, telemetry.ScopeClipAbsolute} {
+	for _, scope := range []fitactivity.Scope{fitactivity.ScopeClipRebased, fitactivity.ScopeClipAbsolute} {
 		t.Run(scope.String(), func(t *testing.T) {
 			clip, scoped := hudScopeCourse(t, scope)
 
@@ -660,9 +661,9 @@ func TestBuildCourse_AClipModeDropsTheDeviceElevationTarget(t *testing.T) {
 // narrowing the track to a clip makes them stale.
 func TestBuildCourse_AnExplicitSmoothingRequestSurvivesScoping(t *testing.T) {
 	track, sync := hudScopeFixture(t)
-	scoped := telemetry.BuildScopedActivity(track, sync, telemetry.ScopeClipAbsolute)
+	scoped := fitactivity.BuildScopedActivity(track, sync, fitactivity.ScopeClipAbsolute)
 
-	course := buildCourse(scoped, telemetry.ElevationOptions{Sigma: 3.5})
+	course := buildCourse(scoped, fitactivity.ElevationOptions{Sigma: 3.5})
 	if got := course.Elevation.Sigma(); got != 3.5 {
 		t.Errorf("elevation sigma = %v, want the requested 3.5", got)
 	}
@@ -689,11 +690,11 @@ func TestTelemetryHUD_Apply_ClipScopeReachesTheRender(t *testing.T) {
 	requireFFmpeg(t)
 
 	for _, c := range []struct {
-		scope telemetry.Scope
+		scope fitactivity.Scope
 		want  string
 	}{
-		{telemetry.ScopeClipRebased, "clip scope clip-rebased: 3 samples, 4.87-4.88 km, rebased by 4.87 km"},
-		{telemetry.ScopeClipAbsolute, "clip scope clip-absolute: 3 samples, 4.87-4.88 km"},
+		{fitactivity.ScopeClipRebased, "clip scope clip-rebased: 3 samples, 4.87-4.88 km, rebased by 4.87 km"},
+		{fitactivity.ScopeClipAbsolute, "clip scope clip-absolute: 3 samples, 4.87-4.88 km"},
 	} {
 		t.Run(c.scope.String(), func(t *testing.T) {
 			dir := t.TempDir()
@@ -804,7 +805,7 @@ func TestTelemetryHUD_Apply_SelectsTheLayoutFromTheFITsOwnPowerData(t *testing.T
 	for _, c := range []struct {
 		name              string
 		mutate            func(*fittest.Options)
-		powerSource       telemetry.PowerSource
+		powerSource       fitactivity.PowerSource
 		layoutMode        string
 		want              string
 		wantNoPowerSource bool
@@ -837,17 +838,17 @@ func TestTelemetryHUD_Apply_SelectsTheLayoutFromTheFITsOwnPowerData(t *testing.T
 		{
 			name: "Stryd-only fixture, PowerNative requested -> default-no-power",
 			mutate: func(o *fittest.Options) {
-				o.DeveloperField = telemetry.StrydPowerField
+				o.DeveloperField = fitactivity.StrydPowerField
 			},
-			powerSource: telemetry.PowerNative,
+			powerSource: fitactivity.PowerNative,
 			want:        "default-no-power",
 		},
 		{
 			name: "the SAME Stryd-only fixture, PowerAuto -> default",
 			mutate: func(o *fittest.Options) {
-				o.DeveloperField = telemetry.StrydPowerField
+				o.DeveloperField = fitactivity.StrydPowerField
 			},
-			powerSource: telemetry.PowerAuto,
+			powerSource: fitactivity.PowerAuto,
 			want:        "default",
 		},
 		{
@@ -860,7 +861,7 @@ func TestTelemetryHUD_Apply_SelectsTheLayoutFromTheFITsOwnPowerData(t *testing.T
 			// PowerNative) down to HasPower would satisfy every other row.
 			name:        "native-only fixture, PowerStryd requested -> default-no-power",
 			mutate:      func(o *fittest.Options) { o.PowerWatts = 210 },
-			powerSource: telemetry.PowerStryd,
+			powerSource: fitactivity.PowerStryd,
 			want:        "default-no-power",
 		},
 	} {
@@ -889,7 +890,7 @@ func TestTelemetryHUD_Apply_SelectsTheLayoutFromTheFITsOwnPowerData(t *testing.T
 			// cannot supply: "default-no-power" alone does not say which
 			// reading came up empty, and the whole point of naming it is that
 			// a user who mistyped --power-source can see it. Logging a
-			// constant here (`telemetry.PowerAuto` instead of
+			// constant here (`fitactivity.PowerAuto` instead of
 			// `t.PowerSource`, a one-token slip) was verified to pass every
 			// other assertion in this file.
 			wantSrc := "power source: " + c.powerSource.String() + ")"
@@ -945,7 +946,7 @@ func countHUDLayoutLines(got string) int {
 // This is the join cmd's flag test cannot reach: that one proves --hud-time
 // lands in TelemetryHUD.TimeMode, while this proves the value Apply actually
 // rendered with is the one it reports. Substituting a literal
-// telemetry.TimeElapsed for t.TimeMode in the log call -- a one-token slip of
+// fitactivity.TimeElapsed for t.TimeMode in the log call -- a one-token slip of
 // exactly the kind this file's power-source assertion was written for -- is
 // caught here by the "active" row and by nothing else in the package.
 func TestTelemetryHUD_Apply_LayoutLineNamesTheTimeModeOnlyWhereItShows(t *testing.T) {
@@ -953,18 +954,18 @@ func TestTelemetryHUD_Apply_LayoutLineNamesTheTimeModeOnlyWhereItShows(t *testin
 
 	for _, c := range []struct {
 		name       string
-		mode       telemetry.TimeMode
+		mode       fitactivity.TimeMode
 		layoutMode string
 		// want is the clause the line must carry; empty means it must carry
 		// no "time:" clause at all.
 		want string
 	}{
-		{name: "clock is the default and says nothing", mode: telemetry.TimeClock, layoutMode: "default"},
-		{name: "elapsed names itself", mode: telemetry.TimeElapsed, layoutMode: "default", want: "time: elapsed"},
-		{name: "active names itself", mode: telemetry.TimeActive, layoutMode: "default", want: "time: active"},
+		{name: "clock is the default and says nothing", mode: fitactivity.TimeClock, layoutMode: "default"},
+		{name: "elapsed names itself", mode: fitactivity.TimeElapsed, layoutMode: "default", want: "time: elapsed"},
+		{name: "active names itself", mode: fitactivity.TimeActive, layoutMode: "default", want: "time: active"},
 		{
 			name:       "vertical has no clock to show it on, so the line stays quiet",
-			mode:       telemetry.TimeElapsed,
+			mode:       fitactivity.TimeElapsed,
 			layoutMode: "vertical",
 		},
 	} {
@@ -1172,7 +1173,7 @@ func TestTelemetryHUD_TheLayoutDecisionReadsTheSCOPEDTrack(t *testing.T) {
 	// SECOND half, where the activity's own samples have none. PoweredRecords
 	// is fittest.Options' knob for exactly this -- power that stops partway
 	// through an activity, rather than being present or absent for the whole
-	// file -- alongside OutOfOrder, which exists for one internal/telemetry
+	// file -- alongside OutOfOrder, which exists for one fitactivity
 	// decode test the same way.
 	opts := fittest.DefaultOptions()
 	opts.Start = start
@@ -1189,7 +1190,7 @@ func TestTelemetryHUD_TheLayoutDecisionReadsTheSCOPEDTrack(t *testing.T) {
 	clipCreation := start.Add(totalRecords * 3 / 4 * time.Second) // well into the unpowered second half
 	src := generateHUDSourceAt(t, dir, clipCreation)
 
-	run := func(scope telemetry.Scope) string {
+	run := func(scope fitactivity.Scope) string {
 		var buf bytes.Buffer
 		e := &TelemetryHUD{FitPath: fitPath, Scope: scope}
 		out := filepath.Join(t.TempDir(), "out.mp4")
@@ -1203,10 +1204,10 @@ func TestTelemetryHUD_TheLayoutDecisionReadsTheSCOPEDTrack(t *testing.T) {
 		return buf.String()
 	}
 
-	if got := run(telemetry.ScopeActivity); !hudLayoutLogged(got, "default") {
+	if got := run(fitactivity.ScopeActivity); !hudLayoutLogged(got, "default") {
 		t.Errorf("ScopeActivity: log does not report the default layout (the whole activity has power in its first half):\n%s", got)
 	}
-	if got := run(telemetry.ScopeClipRebased); !hudLayoutLogged(got, "default-no-power") {
+	if got := run(fitactivity.ScopeClipRebased); !hudLayoutLogged(got, "default-no-power") {
 		t.Errorf("ScopeClipRebased: log does not report default-no-power -- "+
 			"the clip's own window has no power even though the unscoped activity does, "+
 			"which means the layout decision read the wrong track:\n%s", got)
@@ -1410,16 +1411,16 @@ func TestTelemetryHUD_Apply_TheProgressFillTracksTheClipsOwnDistance(t *testing.
 
 	const w, h = blackHUDSourceW, blackHUDSourceH
 	for _, c := range []struct {
-		scope       telemetry.Scope
+		scope       fitactivity.Scope
 		minAdvance  int
 		maxAdvance  int
 		explanation string
 	}{
-		{telemetry.ScopeActivity, 0, 2,
+		{fitactivity.ScopeActivity, 0, 2,
 			"the clip is 6 m of a 49 km activity, so its fill must sit still"},
-		{telemetry.ScopeClipRebased, w / 4, w,
+		{fitactivity.ScopeClipRebased, w / 4, w,
 			"the bar's axis is the clip, so its fill must cross the bar"},
-		{telemetry.ScopeClipAbsolute, w / 4, w,
+		{fitactivity.ScopeClipAbsolute, w / 4, w,
 			"the bar's axis is the clip, so its fill must cross the bar"},
 	} {
 		t.Run(c.scope.String(), func(t *testing.T) {
@@ -1537,7 +1538,7 @@ func TestTelemetryHUD_Apply_ElapsedAndActiveRenderDifferentPixels(t *testing.T) 
 	src := generateBlackHUDSource(t, dir)
 	fit := hudTimerFixturePath(t)
 
-	render := func(mode telemetry.TimeMode) []byte {
+	render := func(mode fitactivity.TimeMode) []byte {
 		out := filepath.Join(dir, mode.String()+".mp4")
 		e := &TelemetryHUD{FitPath: fit, LayoutMode: "default", TimeMode: mode}
 		if err := e.Apply(context.Background(), Input{SourcePath: src, OutputPath: out}); err != nil {
@@ -1546,7 +1547,7 @@ func TestTelemetryHUD_Apply_ElapsedAndActiveRenderDifferentPixels(t *testing.T) 
 		return rawRGBInBox(t, out, hudClockBox)
 	}
 
-	elapsed, active := render(telemetry.TimeElapsed), render(telemetry.TimeActive)
+	elapsed, active := render(fitactivity.TimeElapsed), render(fitactivity.TimeActive)
 	diff := meanAbsDiff(t, elapsed, active)
 	if diff < 1.0 { // measured 1.90 for genuinely different digits, ~0.3 for identical ones (see the scope test below)
 		t.Errorf("elapsed and active TimeMode rendered near-identical clock pixels (mean abs diff %.3f) -- "+
@@ -1559,8 +1560,8 @@ func TestTelemetryHUD_Apply_ElapsedAndActiveRenderDifferentPixels(t *testing.T) 
 // distance, splits and the progress bar to the clip's own window, but
 // elapsed/active time is measured from the WHOLE activity's start in every
 // scope (see TelemetryHUD.TimeMode's doc comment and
-// telemetry.BuildScopedActivity's comment on why Timing survives every scope
-// unchanged). A build that ever moved telemetry.BuildTimerModel to read the
+// fitactivity.BuildScopedActivity's comment on why Timing survives every scope
+// unchanged). A build that ever moved fitactivity.BuildTimerModel to read the
 // SCOPED track instead of the one Decode returned would make the clock reset
 // to 0 at the clip's own opening frame under clip-rebased -- this is the test
 // that would catch it.
@@ -1571,16 +1572,16 @@ func TestTelemetryHUD_Apply_ElapsedStaysActivityRelativeUnderClipRebasedScope(t 
 	src := generateBlackHUDSource(t, dir)
 	fit := hudTimerFixturePath(t)
 
-	render := func(scope telemetry.Scope) []byte {
+	render := func(scope fitactivity.Scope) []byte {
 		out := filepath.Join(dir, scope.String()+".mp4")
-		e := &TelemetryHUD{FitPath: fit, LayoutMode: "default", TimeMode: telemetry.TimeElapsed, Scope: scope}
+		e := &TelemetryHUD{FitPath: fit, LayoutMode: "default", TimeMode: fitactivity.TimeElapsed, Scope: scope}
 		if err := e.Apply(context.Background(), Input{SourcePath: src, OutputPath: out}); err != nil {
 			t.Fatalf("Apply(Scope=%s): %v", scope, err)
 		}
 		return rawRGBInBox(t, out, hudClockBox)
 	}
 
-	full, rebased := render(telemetry.ScopeActivity), render(telemetry.ScopeClipRebased)
+	full, rebased := render(fitactivity.ScopeActivity), render(fitactivity.ScopeClipRebased)
 	diff := meanAbsDiff(t, full, rebased)
 	if diff > 1.0 { // measured 0.31 for identical digits (two independent encodes' quantization noise); ~1.9 when the digits genuinely differ (see the pause test above)
 		t.Errorf("--hud-time elapsed rendered different clock pixels under full vs clip-rebased scope (mean abs diff %.3f) -- "+
@@ -1664,7 +1665,7 @@ func TestTelemetryHUD_Apply_WarnsWhenActiveCannotLocateItsPauses(t *testing.T) {
 
 	dir := t.TempDir()
 	var buf bytes.Buffer
-	e := &TelemetryHUD{FitPath: buildUnlocatablePauseFITPath(t), LayoutMode: "default", TimeMode: telemetry.TimeActive}
+	e := &TelemetryHUD{FitPath: buildUnlocatablePauseFITPath(t), LayoutMode: "default", TimeMode: fitactivity.TimeActive}
 	err := e.Apply(context.Background(), Input{
 		SourcePath: generateBlackHUDSource(t, dir),
 		OutputPath: filepath.Join(dir, "out.mp4"),
@@ -1695,7 +1696,7 @@ func TestTelemetryHUD_Apply_WarnsWhenTheLayoutHasNoTimeDateGaugeToShowItOn(t *te
 
 	dir := t.TempDir()
 	var buf bytes.Buffer
-	e := &TelemetryHUD{FitPath: testFITPath(t), LayoutMode: "vertical", TimeMode: telemetry.TimeElapsed}
+	e := &TelemetryHUD{FitPath: testFITPath(t), LayoutMode: "vertical", TimeMode: fitactivity.TimeElapsed}
 	err := e.Apply(context.Background(), Input{
 		SourcePath: generateHUDSource(t, dir),
 		OutputPath: filepath.Join(dir, "out.mp4"),

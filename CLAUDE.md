@@ -65,8 +65,12 @@ paths: take the clip and the FIT activity as **arguments** (or read them from
   **not** part of the shipped CLI surface: `vidiobench`, `xreg`, `fitdump`.
 - `internal/effects/` — one file per effect, registered through the `Effect` interface.
 - `internal/stabilize/` — all the motion estimation, smoothing and warping.
-- `internal/vidio/` — decode/encode/probe/trim; `internal/telemetry/`, `internal/hud/` —
-  FIT parsing and the gauge overlay.
+- `internal/vidio/` — decode/encode/probe/trim; `internal/hud/` — the gauge overlay.
+- FIT parsing lives OUTSIDE this repo, in `github.com/wisborg/fitactivity` (checked out
+  at `../fitactivity`, wired in by a `replace` directive in `go.mod` until it is
+  published). What used to be `internal/telemetry` and `internal/fittest` is that module
+  now; it is shared with the fitdash project, so a change there lands in two consumers
+  and belongs in the library's own branch and test run, not in a videofx commit.
 
 ## Measurement tools
 
@@ -93,7 +97,7 @@ VFX_VIDEO=test_videos/test_very_shaken.mp4 go test ./internal/stabilize/ -run Pa
 ```
 
 `test_videos/` is gitignored — several GB of 4K sample footage plus a FIT activity file,
-kept locally. `internal/fittest/` generates a synthetic FIT activity so the telemetry
+kept locally. `fitactivity/fittest` generates a synthetic FIT activity so the telemetry
 tests need no real one.
 
 ## This repository is public

@@ -7,7 +7,7 @@ import (
 
 	"github.com/fogleman/gg"
 
-	"videofx/internal/telemetry"
+	"github.com/wisborg/fitactivity"
 )
 
 // SplitsGauge is the upper-left kilometre-splits list: a header (current lap /
@@ -77,7 +77,7 @@ func (SplitsGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
 // wherever it appears, including inside the window, so it needs sp.Fastest for
 // styling whether or not that lap was pinned. Returning the pinned number
 // would not remove that call, only split one question across two places.
-func splitsRows(sp *telemetry.Splits, curKm int) []int {
+func splitsRows(sp *fitactivity.Splits, curKm int) []int {
 	const maxWindow = 5
 	startKm := curKm - maxWindow + 1
 	if first := sp.FirstKm(); startKm < first {
@@ -106,7 +106,7 @@ func (ProgressBarGauge) Name() string { return "progress" }
 
 // progressPlot is the bar's geometry. Its distance axis runs from startD to
 // endD rather than from zero to a total: a clip-scoped course keeping the
-// activity's own numbering (telemetry.ScopeClipAbsolute) measures and labels
+// activity's own numbering (fitactivity.ScopeClipAbsolute) measures and labels
 // the 10.2..12.4 km it actually covers. startD is 0 for a whole activity and
 // for a rebased clip, in which case the span IS the total and every number
 // here is what it has always been.
@@ -148,7 +148,7 @@ func progressGeometry(r *Renderer, box Box, f Frame) (progressPlot, bool) {
 	//
 	// Written as "<= 0" rather than "== 0" because the span can also come out
 	// NEGATIVE: telemetry's clip origin deliberately does not skip a backwards
-	// distance blip the way BuildSplits does (see telemetry.firstDistance), so
+	// distance blip the way BuildSplits does (see fitactivity.firstDistance), so
 	// a clip opening on one rebases to negative distances. A negative span
 	// would draw the bar's fill leftwards off the frame.
 	if f.Course == nil || f.Course.TotalDistance-f.Course.StartDistance <= 0 {

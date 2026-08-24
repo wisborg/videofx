@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"videofx/internal/telemetry"
+	"github.com/wisborg/fitactivity"
 )
 
 const (
@@ -70,7 +70,7 @@ type fix struct {
 // into independent runs, each resampled, smoothed and differentiated on its
 // own, so no heading is ever computed across a stretch the GPS did not
 // actually observe.
-func HeadingRates(track *telemetry.Track) (Series, error) {
+func HeadingRates(track *fitactivity.Track) (Series, error) {
 	fixes := gpsFixes(track)
 	if len(fixes) < 2 {
 		return Series{}, fmt.Errorf("timesync: %s carries fewer than 2 GPS fixes, not enough to measure a heading", track.SourcePath)
@@ -164,7 +164,7 @@ func headingRatesFromUnwrapped(ht []time.Time, hv []float64) ([]time.Time, []flo
 	return times, rates, nil
 }
 
-func gpsFixes(track *telemetry.Track) []fix {
+func gpsFixes(track *fitactivity.Track) []fix {
 	var out []fix
 	for _, s := range track.Samples {
 		// A non-finite Lat/Lon cannot come from a real FIT file today (FIT
@@ -201,7 +201,7 @@ type gridPoint struct {
 // range, linearly interpolating lat/lon between the two raw fixes bracketing
 // each grid instant -- provided they are no more than headingMaxRawGap apart
 // (see the constant's doc comment). fixes must be sorted ascending by time,
-// which telemetry.Track guarantees.
+// which fitactivity.Track guarantees.
 func resampleUniform(fixes []fix) []gridPoint {
 	var out []gridPoint
 	start, end := fixes[0].t, fixes[len(fixes)-1].t

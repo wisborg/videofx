@@ -10,9 +10,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wisborg/fitactivity"
+
 	"videofx/internal/logging"
 	"videofx/internal/runner"
-	"videofx/internal/telemetry"
 	"videofx/internal/vidio"
 )
 
@@ -23,17 +24,17 @@ func init() {
 }
 
 // Telemetry is Phase 4 of the FIT-telemetry-overlay feature: it wires
-// internal/telemetry's decode/sync/emission pipeline (Phases 1-3) into
+// fitactivity's decode/sync/emission pipeline (Phases 1-3) into
 // the CLI as a first-class Effect. Given a Garmin FIT activity file and a
 // video clip, it:
 //
-//  1. Decodes the FIT file into a Track (telemetry.Decode).
+//  1. Decodes the FIT file into a Track (fitactivity.Decode).
 //  2. Resolves the clip's telemetry window against the Track's coverage
-//     (telemetry.Resolve), using the clip's own container creation_time
+//     (fitactivity.Resolve), using the clip's own container creation_time
 //     and OffsetSeconds to correct for clock skew between the camera and
 //     the FIT-recording device.
 //  3. Re-bases the Track onto the clip's own video clock
-//     (telemetry.BuildClipPoints) and emits, only when explicitly
+//     (fitactivity.BuildClipPoints) and emits, only when explicitly
 //     requested, a GPX sidecar (when GPX is set) and/or an SRT subtitle
 //     track (when Subtitle is set).
 //  4. Muxes the SRT into the output as a mov_text subtitle stream and
@@ -55,7 +56,7 @@ type Telemetry struct {
 
 	// FitPath is the Garmin FIT activity file to source telemetry from.
 	// Required: Apply returns a clear error if this is empty rather than
-	// letting telemetry.Decode fail on an empty path.
+	// letting fitactivity.Decode fail on an empty path.
 	FitPath string
 
 	// OffsetSeconds corrects clock skew between the camera and the FIT
@@ -63,7 +64,7 @@ type Telemetry struct {
 	// fit_time = creation_time + OffsetSeconds + pts. Positive means the
 	// camera's clock reads BEHIND the watch's (creation_time needs to be
 	// pushed forward to line up with the FIT timeline). See
-	// internal/telemetry.Resolve and BuildClipPoints for the full model.
+	// internal/fitactivity.Resolve and BuildClipPoints for the full model.
 	//
 	// When non-zero, Apply also REWRITES the output's creation_time to the
 	// corrected instant (original creation_time + OffsetSeconds) so the
@@ -76,7 +77,7 @@ type Telemetry struct {
 	// muxes none (the default -- the location tag is produced regardless);
 	// "readable" a human-readable per-second readout; "dji" the DJI-drone
 	// SRT layout that Telemetry Overlay reads directly from the video (see
-	// telemetry.SRTFormat). Only the muxed subtitle stream is affected.
+	// fitactivity.SRTFormat). Only the muxed subtitle stream is affected.
 	SRTFormat string
 
 	// ShowSubtitle keeps an EMBEDDED subtitle track visible/auto-displayed.
@@ -109,7 +110,7 @@ type Telemetry struct {
 
 	// IncludeStryd includes Stryd running-dynamics developer fields
 	// (Sample.DevFields) in both the GPX sidecar and the muxed SRT. Off
-	// by default, matching telemetry.FieldOptions.Stryd's own documented
+	// by default, matching fitactivity.FieldOptions.Stryd's own documented
 	// default and rationale.
 	IncludeStryd bool
 
@@ -134,9 +135,9 @@ type Telemetry struct {
 
 	// Scope selects how much of the activity the emitted telemetry describes.
 	// Wired from --telemetry-scope.
-	// The ZERO VALUE is telemetry.ScopeActivity -- the whole activity, which
+	// The ZERO VALUE is fitactivity.ScopeActivity -- the whole activity, which
 	// is what this effect has always emitted -- so a caller that never sets it
-	// gets today's behaviour. See telemetry.Scope on why an unset enum is the
+	// gets today's behaviour. See fitactivity.Scope on why an unset enum is the
 	// documented default here rather than a trap.
 	//
 	// For THIS effect the two clip modes differ only in the SRT's cumulative
@@ -162,7 +163,7 @@ type Telemetry struct {
 	// rebasing involved. The scoped output is arguably the more honest of the
 	// two -- it declines to place a point the window has no data for -- but
 	// anyone diffing a real clip needs to know why the bytes moved.
-	Scope telemetry.Scope
+	Scope fitactivity.Scope
 }
 
 func (t *Telemetry) Name() string         { return "telemetry" }
@@ -190,7 +191,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 	// spelled into each sentence.
 	log := in.Log.Named(t.Name()).WithField("fit", t.FitPath)
 
-	track, err := telemetry.Decode(t.FitPath)
+	track, err := fitactivity.Decode(t.FitPath)
 	if err != nil {
 		return err
 	}
@@ -232,14 +233,14 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 	// BuildClipPoints below).
 	correctedCreationTime := info.CreationTime.Add(offset)
 
-	sync := telemetry.Resolve(track, info.CreationTime, offset, duration)
+	sync := fitactivity.Resolve(track, info.CreationTime, offset, duration)
 	switch sync.Overlap {
-	case telemetry.NoOverlap:
+	case fitactivity.NoOverlap:
 		return fmt.Errorf("clip window [%s, %s] does not overlap %s's recorded coverage [%s, %s] at all -- "+
 			"wrong FIT file, or wrong --offset?",
 			sync.Start.Format(time.RFC3339), sync.End.Format(time.RFC3339), t.FitPath,
 			sync.CoverageStart.Format(time.RFC3339), sync.CoverageEnd.Format(time.RFC3339))
-	case telemetry.PartialOverlap:
+	case fitactivity.PartialOverlap:
 		log.Warnf("clip window [%s, %s] only partially overlaps the FIT file's recorded coverage [%s, %s] -- emitting the overlapping part only",
 			sync.Start.Format(time.RFC3339), sync.End.Format(time.RFC3339),
 			sync.CoverageStart.Format(time.RFC3339), sync.CoverageEnd.Format(time.RFC3339))
@@ -252,12 +253,12 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 	// track still classifies as PartialOverlap or NoOverlap exactly as the
 	// full one does); it simply could not be written. See
 	// BuildScopedActivity's doc comment.
-	scoped := telemetry.BuildScopedActivity(track, sync, t.Scope)
+	scoped := fitactivity.BuildScopedActivity(track, sync, t.Scope)
 	logClipScope(log, scoped)
 
-	points := telemetry.BuildClipPoints(scoped.Track, correctedCreationTime, 0, duration, telemetry.DefaultCadence)
+	points := fitactivity.BuildClipPoints(scoped.Track, correctedCreationTime, 0, duration, fitactivity.DefaultCadence)
 
-	fields := telemetry.DefaultFieldOptions()
+	fields := fitactivity.DefaultFieldOptions()
 	fields.Stryd = t.IncludeStryd
 
 	if t.GPX {
@@ -288,7 +289,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 		}
 		defer os.RemoveAll(tmpDir)
 
-		srtPath = filepath.Join(tmpDir, "telemetry.srt")
+		srtPath = filepath.Join(tmpDir, "fitactivity.srt")
 		if err := writeSRTFile(log, srtPath, points, fields, srtFormat); err != nil {
 			return err
 		}
@@ -372,8 +373,8 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 // The far end is trackTotalDistance, the same "last sample carrying a
 // distance" rule the HUD's course gauge measures against; there is no
 // corresponding field to read it from, and no second copy of the rule here.
-func logClipScope(log *logging.Logger, scoped *telemetry.ScopedActivity) {
-	if scoped.Scope == telemetry.ScopeActivity {
+func logClipScope(log *logging.Logger, scoped *fitactivity.ScopedActivity) {
+	if scoped.Scope == fitactivity.ScopeActivity {
 		return
 	}
 
@@ -411,16 +412,16 @@ func (t *Telemetry) EmbedsSubtitle() bool {
 }
 
 // resolveSRTFormat maps the effect's SRTFormat string onto a
-// telemetry.SRTFormat and whether any subtitle should be muxed at all. "" and
+// fitactivity.SRTFormat and whether any subtitle should be muxed at all. "" and
 // "none" mean no subtitle; "dji" and "readable" select their layouts;
 // anything else is treated as no subtitle (the CLI validates the value up
 // front, so an unknown value only reaches here from a programmatic caller).
-func resolveSRTFormat(format string) (telemetry.SRTFormat, bool) {
+func resolveSRTFormat(format string) (fitactivity.SRTFormat, bool) {
 	switch format {
 	case "dji":
-		return telemetry.SRTFormatDJI, true
+		return fitactivity.SRTFormatDJI, true
 	case "readable":
-		return telemetry.SRTFormatReadable, true
+		return fitactivity.SRTFormatReadable, true
 	default:
 		return "", false
 	}
@@ -428,7 +429,7 @@ func resolveSRTFormat(format string) (telemetry.SRTFormat, bool) {
 
 // gpxSidecarPath derives the GPX sidecar path from an effect's resolved
 // output path: the output's own extension replaced with ".gpx" (e.g.
-// "clip - telemetry.mp4" -> "clip - telemetry.gpx"), so the sidecar sits
+// "clip - fitactivity.mp4" -> "clip - fitactivity.gpx"), so the sidecar sits
 // right next to the file it describes and shares its FilenameSlug-derived
 // name.
 func gpxSidecarPath(outputPath string) string {
@@ -438,7 +439,7 @@ func gpxSidecarPath(outputPath string) string {
 
 // srtSidecarPath derives the SRT sidecar path from the output path the same
 // way gpxSidecarPath does: the output's extension replaced with ".srt" (e.g.
-// "clip - telemetry.mp4" -> "clip - telemetry.srt"). Sharing the output's
+// "clip - fitactivity.mp4" -> "clip - fitactivity.srt"). Sharing the output's
 // stem is what lets Telemetry Overlay pair the .srt with the video the way it
 // pairs a DJI clip's "NAME.MP4" with "NAME.SRT".
 func srtSidecarPath(outputPath string) string {
@@ -454,7 +455,7 @@ func srtSidecarPath(outputPath string) string {
 // the video's stem -- that is how Telemetry Overlay pairs "NAME.MP4" with
 // "NAME.SRT", and it is the whole reason gpxSidecarPath/srtSidecarPath derive
 // from the output path rather than inventing one. Resolve's collision suffix
-// would produce "clip - telemetry - 1.srt" beside "clip - telemetry.mp4",
+// would produce "clip - telemetry - 1.srt" beside "clip - fitactivity.mp4",
 // which pairs with nothing: a uniquely-named sidecar is a broken sidecar.
 //
 // The video path it is derived from has already been through Resolve, so the
@@ -469,7 +470,7 @@ func srtSidecarPath(outputPath string) string {
 //
 // The open refuses to follow a symlink. Because the sidecar path is derived,
 // not Resolve'd, it is the one output this program will write over -- so a
-// symlink planted at "clip - telemetry.gpx" would have had its TARGET truncated
+// symlink planted at "clip - fitactivity.gpx" would have had its TARGET truncated
 // and filled with GPX instead. Planting it needs write access to the output
 // directory, which already allows replacing the video, so this matters only for
 // a shared or world-writable --output-dir; O_NOFOLLOW costs nothing and removes
@@ -493,18 +494,18 @@ func writeSidecar(log *logging.Logger, kind, path string, render func(io.Writer)
 	return werr
 }
 
-// writeGPXFile creates path and renders points to it via telemetry.WriteGPX.
-func writeGPXFile(log *logging.Logger, path string, points []telemetry.ClipPoint, fields telemetry.FieldOptions) error {
+// writeGPXFile creates path and renders points to it via fitactivity.WriteGPX.
+func writeGPXFile(log *logging.Logger, path string, points []fitactivity.ClipPoint, fields fitactivity.FieldOptions) error {
 	return writeSidecar(log, "GPX", path, func(w io.Writer) error {
-		return telemetry.WriteGPX(w, points, telemetry.GPXOptions{Fields: fields})
+		return fitactivity.WriteGPX(w, points, fitactivity.GPXOptions{Fields: fields})
 	})
 }
 
-// writeSRTFile creates path and renders points to it via telemetry.WriteSRT
+// writeSRTFile creates path and renders points to it via fitactivity.WriteSRT
 // in the given format.
-func writeSRTFile(log *logging.Logger, path string, points []telemetry.ClipPoint, fields telemetry.FieldOptions, format telemetry.SRTFormat) error {
+func writeSRTFile(log *logging.Logger, path string, points []fitactivity.ClipPoint, fields fitactivity.FieldOptions, format fitactivity.SRTFormat) error {
 	return writeSidecar(log, "SRT", path, func(w io.Writer) error {
-		return telemetry.WriteSRT(w, points, telemetry.SRTOptions{Fields: fields, Format: format})
+		return fitactivity.WriteSRT(w, points, fitactivity.SRTOptions{Fields: fields, Format: format})
 	})
 }
 
@@ -517,13 +518,13 @@ func writeSRTFile(log *logging.Logger, path string, points []telemetry.ClipPoint
 // altitude from the same point as lat/lon keeps the location tag internally
 // consistent (one instant), and HasElevation may legitimately be false on a
 // GPS-having point, in which case the altitude component is simply omitted.
-func firstGPSPoint(points []telemetry.ClipPoint) (sample telemetry.Sample, ok bool) {
+func firstGPSPoint(points []fitactivity.ClipPoint) (sample fitactivity.Sample, ok bool) {
 	for _, p := range points {
 		if p.Sample.HasGPS {
 			return p.Sample, true
 		}
 	}
-	return telemetry.Sample{}, false
+	return fitactivity.Sample{}, false
 }
 
 // formatCreationTime renders t in the exact form ffmpeg/ffprobe itself

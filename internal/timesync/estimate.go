@@ -153,7 +153,7 @@ func (v Verdict) String() string {
 // (subject to the near-tie smaller-|tau| preference -- see classify).
 type Candidate struct {
 	// Tau is the candidate offset: fit_time = creation_time + Tau + pts,
-	// the same quantity telemetry.Resolve's offset is.
+	// the same quantity fitactivity.Resolve's offset is.
 	Tau time.Duration
 	// Score is the shrunken concordance score at this tau's peak.
 	Score float64

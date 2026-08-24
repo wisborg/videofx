@@ -8,10 +8,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wisborg/fitactivity"
+
 	"videofx/internal/hud"
 	"videofx/internal/logging"
 	"videofx/internal/progress"
-	"videofx/internal/telemetry"
 	"videofx/internal/vidio"
 )
 
@@ -46,7 +47,7 @@ type TelemetryHUD struct {
 	// this only affects what the on-screen clock reads.
 	TimeZone *time.Location
 	// ElevationSmoothing, ElevationGain, ElevationLoss configure the
-	// elevation gauges' smoothing (see telemetry.ElevationOptions): an
+	// elevation gauges' smoothing (see fitactivity.ElevationOptions): an
 	// explicit Gaussian sigma (samples), or gain/loss targets (meters) that
 	// auto-tune it. All 0 (the default) uses the FIT's own device totals as
 	// the target when present, else a mild default sigma.
@@ -54,9 +55,9 @@ type TelemetryHUD struct {
 	ElevationGain, ElevationLoss float64
 	// PowerSource selects which power reading the metrics gauge shows when the
 	// FIT carries both a footpod (Stryd) developer field and the standard FIT
-	// power field. The zero value is telemetry.PowerAuto (prefer Stryd, fall
+	// power field. The zero value is fitactivity.PowerAuto (prefer Stryd, fall
 	// back to native). Wired from --power-source.
-	PowerSource telemetry.PowerSource
+	PowerSource fitactivity.PowerSource
 	// LayoutMode selects the gauge arrangement by name: "auto" (the default)
 	// picks the vertical layout for portrait clips, else the default layout --
 	// or, when the FIT carries no power reading for PowerSource, the default
@@ -72,9 +73,9 @@ type TelemetryHUD struct {
 	// "custom" rather than an empty string.
 	Layout *hud.Layout
 	// Scope selects how much of the activity the gauges describe. Wired from
-	// --telemetry-scope. The ZERO VALUE is telemetry.ScopeActivity -- the whole
+	// --telemetry-scope. The ZERO VALUE is fitactivity.ScopeActivity -- the whole
 	// activity, which is what this effect has always drawn -- so a caller that
-	// never sets it gets today's HUD. See telemetry.Scope on why an unset enum
+	// never sets it gets today's HUD. See fitactivity.Scope on why an unset enum
 	// is the documented default here rather than a trap.
 	//
 	// It changes far more here than it does on the Telemetry effect, where
@@ -110,20 +111,20 @@ type TelemetryHUD struct {
 	// the instants the per-frame lookup and the course map's covered-so-far
 	// split are keyed on -- because that is what the FIT sync itself is built
 	// on.
-	Scope telemetry.Scope
+	Scope fitactivity.Scope
 
 	// TimeMode selects what the upper-right time/date gauge displays in
 	// place of the wall clock: elapsed time since the FIT activity's start
-	// (including or excluding pauses -- see telemetry.TimeMode) instead of
-	// the current time. The ZERO VALUE is telemetry.TimeClock -- today's
+	// (including or excluding pauses -- see fitactivity.TimeMode) instead of
+	// the current time. The ZERO VALUE is fitactivity.TimeClock -- today's
 	// wall-clock HUD -- so a caller that never sets this gets unchanged
 	// behaviour. Wired from --hud-time.
 	//
 	// Unlike Scope, this is measured from the WHOLE activity's own start
-	// regardless of --telemetry-scope: telemetry.BuildScopedActivity carries
+	// regardless of --telemetry-scope: fitactivity.BuildScopedActivity carries
 	// Timing through every scope unchanged for exactly this reason (see that
 	// function's doc comment).
-	TimeMode telemetry.TimeMode
+	TimeMode fitactivity.TimeMode
 
 	// layoutMu guards loggedLayouts, the set of layout lines this effect has
 	// already emitted, so a batch reports each one once instead of once per
@@ -193,7 +194,7 @@ func (t *TelemetryHUD) logLayoutOnce(runLog, clipLog *logging.Logger, layout hud
 	if layout.HasMetricsReadout() {
 		msg += fmt.Sprintf(", power source: %s", t.PowerSource)
 	}
-	if t.TimeMode != telemetry.TimeClock && layout.HasTimeDateGauge() {
+	if t.TimeMode != fitactivity.TimeClock && layout.HasTimeDateGauge() {
 		msg += fmt.Sprintf(", time: %s", t.TimeMode)
 	}
 	msg += ")"
@@ -221,7 +222,7 @@ func (t *TelemetryHUD) logLayoutOnce(runLog, clipLog *logging.Logger, layout hud
 
 // trackTotalDistance is the activity's final cumulative distance (m) -- the
 // last sample that carries one (distance is monotonic).
-func trackTotalDistance(track *telemetry.Track) float64 {
+func trackTotalDistance(track *fitactivity.Track) float64 {
 	for i := len(track.Samples) - 1; i >= 0; i-- {
 		if track.Samples[i].HasDistance {
 			return track.Samples[i].Distance
@@ -233,7 +234,7 @@ func trackTotalDistance(track *telemetry.Track) float64 {
 // buildRoute collects the GPS track for the course-map gauge, downsampled to
 // at most maxRoutePoints (a multi-hour activity has thousands of fixes, far
 // more than a small on-screen map needs), preserving time order.
-func buildRoute(track *telemetry.Track) []hud.GeoPoint {
+func buildRoute(track *fitactivity.Track) []hud.GeoPoint {
 	var pts []hud.GeoPoint
 	for _, s := range track.Samples {
 		if s.HasGPS {
@@ -285,7 +286,7 @@ func buildRoute(track *telemetry.Track) []hud.GeoPoint {
 // is deliberate: a clip-length model tuned to hit the whole day's 180 m of
 // ascent would be smoothed to the far end of its range, and the profile it
 // drew would not be the terrain.
-func buildCourse(scoped *telemetry.ScopedActivity, elevOpts telemetry.ElevationOptions) *hud.Course {
+func buildCourse(scoped *fitactivity.ScopedActivity, elevOpts fitactivity.ElevationOptions) *hud.Course {
 	track := scoped.Track
 	if elevOpts.Sigma <= 0 && elevOpts.TargetGain <= 0 && elevOpts.TargetLoss <= 0 && track.HasElevationTotals {
 		elevOpts.TargetGain = track.TotalAscent
@@ -294,7 +295,7 @@ func buildCourse(scoped *telemetry.ScopedActivity, elevOpts telemetry.ElevationO
 	return &hud.Course{
 		TotalDistance: trackTotalDistance(track),
 		StartDistance: scoped.StartDistance,
-		Elevation:     telemetry.BuildElevationModel(track, elevOpts),
+		Elevation:     fitactivity.BuildElevationModel(track, elevOpts),
 		Splits:        scoped.Splits,
 		Route:         buildRoute(track),
 	}
@@ -318,7 +319,7 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	// something every message has to name.
 	log := in.Log.Named(t.Name()).WithField("fit", t.FitPath)
 
-	track, err := telemetry.Decode(t.FitPath)
+	track, err := fitactivity.Decode(t.FitPath)
 	if err != nil {
 		return err
 	}
@@ -326,9 +327,9 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	// Built from the UNSCOPED track, before any --telemetry-scope narrowing
 	// below: elapsed/active time is always measured from the WHOLE
 	// activity's own start (see TimeMode's doc comment and
-	// telemetry.BuildScopedActivity's comment on why Timing survives every
+	// fitactivity.BuildScopedActivity's comment on why Timing survives every
 	// scope unchanged), so there is nothing here for scoping to affect.
-	timer := telemetry.BuildTimerModel(track)
+	timer := fitactivity.BuildTimerModel(track)
 
 	// unlocatablePause is how much paused time the FIT's own session totals
 	// claim that the file carries no `timer` events to LOCATE -- the case
@@ -371,14 +372,14 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	duration := time.Duration(info.Duration * float64(time.Second))
 	correctedCreation := info.CreationTime.Add(offset)
 
-	sync := telemetry.Resolve(track, info.CreationTime, offset, duration)
+	sync := fitactivity.Resolve(track, info.CreationTime, offset, duration)
 	switch sync.Overlap {
-	case telemetry.NoOverlap:
+	case fitactivity.NoOverlap:
 		return fmt.Errorf("clip window [%s, %s] does not overlap %s's recorded coverage [%s, %s] -- "+
 			"wrong FIT file, or wrong --offset?",
 			sync.Start.Format(time.RFC3339), sync.End.Format(time.RFC3339), t.FitPath,
 			sync.CoverageStart.Format(time.RFC3339), sync.CoverageEnd.Format(time.RFC3339))
-	case telemetry.PartialOverlap:
+	case fitactivity.PartialOverlap:
 		log.Warnf("clip window [%s, %s] only partially overlaps the FIT file's coverage [%s, %s] -- "+
 			"gauges show placeholders outside it",
 			sync.Start.Format(time.RFC3339), sync.End.Format(time.RFC3339),
@@ -421,7 +422,7 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	// records why reversing the two would NOT quietly break the
 	// partial-overlap warning -- a plausible hazard that was checked and found
 	// to be false.
-	scoped := telemetry.BuildScopedActivity(track, sync, t.Scope)
+	scoped := fitactivity.BuildScopedActivity(track, sync, t.Scope)
 	logClipScope(log, scoped)
 
 	// From here on `track` IS the scoped track.
@@ -448,7 +449,7 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	track = scoped.Track
 
 	// The whole-course context every graphical gauge reads, built once.
-	course := buildCourse(scoped, telemetry.ElevationOptions{
+	course := buildCourse(scoped, fitactivity.ElevationOptions{
 		Sigma:      t.ElevationSmoothing,
 		TargetGain: t.ElevationGain,
 		TargetLoss: t.ElevationLoss,
@@ -480,7 +481,7 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	// path for a layout with no clock (VerticalLayout); the Warnf below is
 	// what tells the caller that no-op happened, since the layout's own name
 	// staying "vertical" gives no such signal on its own.
-	if t.TimeMode != telemetry.TimeClock {
+	if t.TimeMode != fitactivity.TimeClock {
 		layout = hud.WithElapsedTime(layout)
 		// Both --hud-time caveats land here, and the order is the point: a
 		// layout with no clock displays NEITHER number, so telling the reader
@@ -492,7 +493,7 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		case !layout.HasTimeDateGauge():
 			log.Warnf("--hud-time %s was requested, but the %s layout has no time/date gauge to display it on -- the flag has no effect",
 				t.TimeMode, layout.Name)
-		case t.TimeMode == telemetry.TimeActive && unlocatablePause > 0:
+		case t.TimeMode == fitactivity.TimeActive && unlocatablePause > 0:
 			log.Warnf("--hud-time active was requested, but this activity carries no timer events to locate its pauses in -- "+
 				"the FIT's own totals show %s of paused time the gauge cannot find, so it will read total elapsed time instead",
 				unlocatablePause.Round(time.Second))
@@ -590,9 +591,9 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		// computed from it would then be wrong with nothing to see in a log.
 		var elapsed time.Duration
 		switch t.TimeMode {
-		case telemetry.TimeElapsed:
+		case fitactivity.TimeElapsed:
 			elapsed = timer.Elapsed(at)
-		case telemetry.TimeActive:
+		case fitactivity.TimeActive:
 			elapsed = timer.Active(at)
 		}
 

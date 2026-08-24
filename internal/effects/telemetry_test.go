@@ -15,10 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"videofx/internal/fittest"
+	"github.com/wisborg/fitactivity"
+	"github.com/wisborg/fitactivity/fittest"
+
 	"videofx/internal/logging"
 	"videofx/internal/runner"
-	"videofx/internal/telemetry"
 )
 
 // fitFixture caches the generated activity across the tests in this package.
@@ -93,7 +94,7 @@ func requireFFmpeg(t *testing.T) {
 
 // generateSyntheticSource builds a tiny lavfi-generated mp4, optionally
 // stamped with a creation_time tag, so tests can exercise Telemetry.Apply's
-// real telemetry.Decode/vidio.Probe/Resolve/BuildClipPoints wiring without
+// real fitactivity.Decode/vidio.Probe/Resolve/BuildClipPoints wiring without
 // needing test_videos/test_small.mp4 (130MB) checked out -- same rationale
 // as internal/stabilize/render_test.go's generateTinyTestSource.
 func generateSyntheticSource(t *testing.T, dir, name string, creationTime string) string {
@@ -198,7 +199,7 @@ func TestTelemetry_Apply_MissingCreationTime(t *testing.T) {
 }
 
 // TestTelemetry_Apply_EndToEndSynthetic exercises the full pipeline
-// (real telemetry.Decode + vidio.Probe + Resolve + BuildClipPoints +
+// (real fitactivity.Decode + vidio.Probe + Resolve + BuildClipPoints +
 // WriteGPX/WriteSRT) against a tiny synthetic source stamped with a
 // creation_time inside the fixture's coverage, with a fake Runner standing in
 // for ffmpeg's mux so the test stays fast and needs no video-comparison
@@ -293,9 +294,9 @@ func TestTelemetry_Apply_GPXOptIn(t *testing.T) {
 
 func TestGpxSidecarPath(t *testing.T) {
 	cases := map[string]string{
-		"clip - telemetry.mp4":         "clip - telemetry.gpx",
-		"/tmp/out/run - telemetry.mp4": "/tmp/out/run - telemetry.gpx",
-		"no_extension":                 "no_extension.gpx",
+		"clip - fitactivity.mp4":         "clip - fitactivity.gpx",
+		"/tmp/out/run - fitactivity.mp4": "/tmp/out/run - fitactivity.gpx",
+		"no_extension":                   "no_extension.gpx",
 	}
 	for in, want := range cases {
 		if got := gpxSidecarPath(in); got != want {
@@ -305,11 +306,11 @@ func TestGpxSidecarPath(t *testing.T) {
 }
 
 func TestFirstGPSPoint(t *testing.T) {
-	points := []telemetry.ClipPoint{
-		{PTS: 0, Sample: telemetry.Sample{HasGPS: false}},
-		{PTS: time.Second, Sample: telemetry.Sample{HasGPS: false}},
-		{PTS: 2 * time.Second, Sample: telemetry.Sample{HasGPS: true, Lat: 10.5, Lon: -20.25, HasElevation: true, Elevation: 42.5}},
-		{PTS: 3 * time.Second, Sample: telemetry.Sample{HasGPS: true, Lat: 99, Lon: 99}},
+	points := []fitactivity.ClipPoint{
+		{PTS: 0, Sample: fitactivity.Sample{HasGPS: false}},
+		{PTS: time.Second, Sample: fitactivity.Sample{HasGPS: false}},
+		{PTS: 2 * time.Second, Sample: fitactivity.Sample{HasGPS: true, Lat: 10.5, Lon: -20.25, HasElevation: true, Elevation: 42.5}},
+		{PTS: 3 * time.Second, Sample: fitactivity.Sample{HasGPS: true, Lat: 99, Lon: 99}},
 	}
 	sample, ok := firstGPSPoint(points)
 	if !ok {
@@ -323,7 +324,7 @@ func TestFirstGPSPoint(t *testing.T) {
 		t.Errorf("firstGPSPoint elevation = (%v, %v), want (true, 42.5)", sample.HasElevation, sample.Elevation)
 	}
 
-	_, ok = firstGPSPoint([]telemetry.ClipPoint{{Sample: telemetry.Sample{HasGPS: false}}})
+	_, ok = firstGPSPoint([]fitactivity.ClipPoint{{Sample: fitactivity.Sample{HasGPS: false}}})
 	if ok {
 		t.Error("expected ok=false when no point has GPS")
 	}
@@ -591,9 +592,9 @@ func TestTelemetry_Apply_EndToEndSynthetic_GPXIsWellFormed(t *testing.T) {
 
 func TestSrtSidecarPath(t *testing.T) {
 	cases := map[string]string{
-		"clip - telemetry.mp4":         "clip - telemetry.srt",
-		"/tmp/out/run - telemetry.mp4": "/tmp/out/run - telemetry.srt",
-		"no_extension":                 "no_extension.srt",
+		"clip - fitactivity.mp4":         "clip - fitactivity.srt",
+		"/tmp/out/run - fitactivity.mp4": "/tmp/out/run - fitactivity.srt",
+		"no_extension":                   "no_extension.srt",
 	}
 	for in, want := range cases {
 		if got := srtSidecarPath(in); got != want {
@@ -672,7 +673,7 @@ func devFieldFITPath(t *testing.T, fieldName string) string {
 // Telemetry.IncludeStryd (--telemetry-stryd) and the SRT's developer-field
 // line, in both directions.
 //
-// telemetry.WriteSRT's own gate is unit-tested in
+// fitactivity.WriteSRT's own gate is unit-tested in
 // TestWriteSRT_StrydLineGatedByFieldOption, but the gate is only as good as
 // the assignment that feeds it: drop `fields.Stryd = t.IncludeStryd` from
 // Apply and --telemetry-stryd becomes a no-op for the SRT. Nothing else
@@ -792,7 +793,7 @@ func scopeFITPathRecords(t *testing.T, count int) string {
 // scope fixture and returns the two sidecars it wrote plus everything it
 // logged. Each run gets its own temp dir so the three modes' sidecars can be
 // compared byte for byte rather than overwriting one another.
-func scopeRun(t *testing.T, fitPath string, scope telemetry.Scope) (srt, gpx []byte, logged string) {
+func scopeRun(t *testing.T, fitPath string, scope fitactivity.Scope) (srt, gpx []byte, logged string) {
 	t.Helper()
 	dir := t.TempDir()
 	src := generateSyntheticSource(t, dir, "src.mp4", scopeClipCreationTime)
@@ -828,7 +829,7 @@ func scopeRun(t *testing.T, fitPath string, scope telemetry.Scope) (srt, gpx []b
 
 // srtDistanceColumn pulls the leading "N.NN km" figure out of every readable
 // SRT cue's readout line. The readout is pipe-separated with distance first
-// (see telemetry.formatSRTCueBody); the GPS line above it has no pipes and no
+// (see fitactivity.formatSRTCueBody); the GPS line above it has no pipes and no
 // km suffix, and the pace field renders "M:SS/km" rather than "N.NN km", so
 // neither is picked up here.
 func srtDistanceColumn(t *testing.T, srt []byte) []float64 {
@@ -870,9 +871,9 @@ func TestTelemetry_Apply_ScopeRebasesOnlyTheSRTDistanceColumn(t *testing.T) {
 	requireFFmpeg(t)
 	fitPath := scopeFITPath(t)
 
-	fullSRT, _, fullLog := scopeRun(t, fitPath, telemetry.ScopeActivity)
-	rebasedSRT, _, rebasedLog := scopeRun(t, fitPath, telemetry.ScopeClipRebased)
-	absoluteSRT, _, absoluteLog := scopeRun(t, fitPath, telemetry.ScopeClipAbsolute)
+	fullSRT, _, fullLog := scopeRun(t, fitPath, fitactivity.ScopeActivity)
+	rebasedSRT, _, rebasedLog := scopeRun(t, fitPath, fitactivity.ScopeClipRebased)
+	absoluteSRT, _, absoluteLog := scopeRun(t, fitPath, fitactivity.ScopeClipAbsolute)
 
 	if !bytes.Equal(fullSRT, absoluteSRT) {
 		t.Errorf("clip-absolute's SRT differs from full's:\n--- full ---\n%s\n--- clip-absolute ---\n%s",
@@ -971,7 +972,7 @@ func TestTelemetry_Apply_ScopeNeverRebasesGPXTime_ItIsWhatGarminSyncMatchesOn(t 
 	requireFFmpeg(t)
 	fitPath := scopeFITPath(t)
 
-	_, fullGPX, _ := scopeRun(t, fitPath, telemetry.ScopeActivity)
+	_, fullGPX, _ := scopeRun(t, fitPath, fitactivity.ScopeActivity)
 
 	// The control: the clip's creation_time must actually appear, or "the
 	// bytes match" below would be satisfied by three empty files.
@@ -979,7 +980,7 @@ func TestTelemetry_Apply_ScopeNeverRebasesGPXTime_ItIsWhatGarminSyncMatchesOn(t 
 		t.Fatalf("the GPX does not carry the clip's creation_time, so this comparison proves nothing:\n%s", fullGPX)
 	}
 
-	for _, scope := range []telemetry.Scope{telemetry.ScopeClipRebased, telemetry.ScopeClipAbsolute} {
+	for _, scope := range []fitactivity.Scope{fitactivity.ScopeClipRebased, fitactivity.ScopeClipAbsolute} {
 		t.Run(scope.String(), func(t *testing.T) {
 			_, gpx, _ := scopeRun(t, fitPath, scope)
 			if !bytes.Equal(fullGPX, gpx) {
@@ -1017,8 +1018,8 @@ func TestTelemetry_Apply_ClipScopeUnderPartialOverlap(t *testing.T) {
 	// 10 records at 1 Hz from 21:05:45 cover 21:05:45..21:05:54.
 	fitPath := scopeFITPathRecords(t, 10)
 
-	fullSRT, _, fullLog := scopeRun(t, fitPath, telemetry.ScopeActivity)
-	rebasedSRT, _, rebasedLog := scopeRun(t, fitPath, telemetry.ScopeClipRebased)
+	fullSRT, _, fullLog := scopeRun(t, fitPath, fitactivity.ScopeActivity)
+	rebasedSRT, _, rebasedLog := scopeRun(t, fitPath, fitactivity.ScopeClipRebased)
 
 	// The premise. Without this the rest is just another fully-covered clip.
 	for _, c := range []struct{ mode, log string }{
@@ -1056,7 +1057,7 @@ func TestTelemetry_Apply_ClipScopeUnderPartialOverlap(t *testing.T) {
 }
 
 // TestTelemetry_Apply_ClipScopeKeepsTheDeveloperFields is the end-to-end half
-// of telemetry.TestBuildScopedActivity_ScopedSamplesKeepTheirDeveloperFields,
+// of fitactivity.TestBuildScopedActivity_ScopedSamplesKeepTheirDeveloperFields,
 // and it is here because developer fields are the one thing clip scoping could
 // drop without changing a single number anyone else asserts.
 //
@@ -1082,10 +1083,10 @@ func TestTelemetry_Apply_ClipScopeKeepsTheDeveloperFields(t *testing.T) {
 	wantEntry := fmt.Sprintf("%s=%.1f", fieldName, float64(fittest.DeveloperFieldRaw(8)))
 	fitPath := devFieldFITPath(t, fieldName)
 
-	for _, scope := range []telemetry.Scope{
-		telemetry.ScopeActivity,
-		telemetry.ScopeClipRebased,
-		telemetry.ScopeClipAbsolute,
+	for _, scope := range []fitactivity.Scope{
+		fitactivity.ScopeActivity,
+		fitactivity.ScopeClipRebased,
+		fitactivity.ScopeClipAbsolute,
 	} {
 		t.Run(scope.String(), func(t *testing.T) {
 			dir := t.TempDir()
@@ -1132,39 +1133,39 @@ func TestTelemetry_Apply_ClipScopeKeepsTheDeveloperFields(t *testing.T) {
 // origin alive in the effect.
 //
 // Consequently this helper does NOT test the origin rule; BuildScopedActivity
-// owns that, and telemetry.TestBuildScopedActivity_UsesTheFirstDistanceBearing
+// owns that, and fitactivity.TestBuildScopedActivity_UsesTheFirstDistanceBearing
 // SampleAsTheOrigin is where a leading dropout is proved to be skipped. What
 // the cases below still prove is everything downstream of the origin: which
 // mode announces what, that RebasedBy is added back, that the far end skips a
 // TRAILING dropout, and the no-distance wording.
-func scopedFor(scope telemetry.Scope, rebasedBy float64, dists []float64, present []bool) *telemetry.ScopedActivity {
+func scopedFor(scope fitactivity.Scope, rebasedBy float64, dists []float64, present []bool) *fitactivity.ScopedActivity {
 	base := time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC)
-	samples := make([]telemetry.Sample, len(dists))
+	samples := make([]fitactivity.Sample, len(dists))
 	for i := range dists {
-		samples[i] = telemetry.Sample{
+		samples[i] = fitactivity.Sample{
 			Time:        base.Add(time.Duration(i) * time.Second),
 			HasDistance: present[i],
 			Distance:    dists[i],
 		}
 	}
 
-	scoped := &telemetry.ScopedActivity{
+	scoped := &fitactivity.ScopedActivity{
 		Scope: scope,
-		Track: &telemetry.Track{Samples: samples},
+		Track: &fitactivity.Track{Samples: samples},
 	}
 	for _, s := range samples {
 		if !s.HasDistance {
 			continue // the origin is the first DISTANCE-BEARING sample
 		}
 		scoped.HasOrigin = true
-		if scope == telemetry.ScopeClipAbsolute {
+		if scope == fitactivity.ScopeClipAbsolute {
 			scoped.StartDistance = s.Distance
 		}
 		break
 	}
 	// RebasedBy is ignored outside the one mode that can carry it, so a case
 	// cannot ask for a rebased clip-absolute view -- there is no such thing.
-	if scope == telemetry.ScopeClipRebased {
+	if scope == fitactivity.ScopeClipRebased {
 		scoped.RebasedBy = rebasedBy
 	}
 	return scoped
@@ -1205,19 +1206,19 @@ func TestLogClipScope_ReportsTheClipsPlaceInTheActivity(t *testing.T) {
 
 	for _, c := range []struct {
 		name   string
-		scoped *telemetry.ScopedActivity
+		scoped *fitactivity.ScopedActivity
 		want   []string
 		absent []string
 	}{
 		{
 			name: "whole activity says nothing",
-			scoped: scopedFor(telemetry.ScopeActivity, 0,
+			scoped: scopedFor(fitactivity.ScopeActivity, 0,
 				[]float64{0, 1000, 2000}, []bool{true, true, true}),
 			absent: []string{"clip scope"},
 		},
 		{
 			name: "clip-absolute reports the activity's own kilometres",
-			scoped: scopedFor(telemetry.ScopeClipAbsolute, 0,
+			scoped: scopedFor(fitactivity.ScopeClipAbsolute, 0,
 				[]float64{poison, 10200, 11300, 12400, poison},
 				[]bool{false, true, true, true, false}),
 			want:   []string{"clip scope clip-absolute: 5 samples, 10.20-12.40 km"},
@@ -1225,7 +1226,7 @@ func TestLogClipScope_ReportsTheClipsPlaceInTheActivity(t *testing.T) {
 		},
 		{
 			name: "clip-rebased adds its origin back to report the same span",
-			scoped: scopedFor(telemetry.ScopeClipRebased, 10200,
+			scoped: scopedFor(fitactivity.ScopeClipRebased, 10200,
 				[]float64{poison, 0, 1100, 2200, poison},
 				[]bool{false, true, true, true, false}),
 			want:   []string{"clip scope clip-rebased: 5 samples, 10.20-12.40 km, rebased by 10.20 km"},
@@ -1233,14 +1234,14 @@ func TestLogClipScope_ReportsTheClipsPlaceInTheActivity(t *testing.T) {
 		},
 		{
 			name: "a window with no distance says so instead of printing zeroes",
-			scoped: scopedFor(telemetry.ScopeClipRebased, 0,
+			scoped: scopedFor(fitactivity.ScopeClipRebased, 0,
 				[]float64{poison, poison, poison}, []bool{false, false, false}),
 			want:   []string{"clip scope clip-rebased: 3 samples, no distance data in the clip's window"},
 			absent: []string{" km"},
 		},
 		{
 			name: "an empty window is reported, not skipped",
-			scoped: scopedFor(telemetry.ScopeClipAbsolute, 0,
+			scoped: scopedFor(fitactivity.ScopeClipAbsolute, 0,
 				[]float64{}, []bool{}),
 			want:   []string{"clip scope clip-absolute: 0 samples, no distance data in the clip's window"},
 			absent: []string{" km"},
@@ -1352,19 +1353,19 @@ func TestTelemetry_Apply_PartialOverlapWarns(t *testing.T) {
 //
 // The review asked for these to go through naming.Resolve like every other
 // output, and that would have been wrong: Resolve's collision suffix produces
-// "clip - telemetry - 1.srt" beside "clip - telemetry.mp4", and a sidecar that
+// "clip - telemetry - 1.srt" beside "clip - fitactivity.mp4", and a sidecar that
 // does not share the video's stem pairs with nothing -- which is the entire
 // point of writing one (see writeSidecar's doc comment). So the path still
 // tracks the video, and what changed is that clobbering an existing sidecar is
 // no longer silent.
 func TestWriteSidecar_AnnouncesAnOverwrite(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "clip - telemetry.gpx")
+	path := filepath.Join(dir, "clip - fitactivity.gpx")
 
-	points := []telemetry.ClipPoint{{
+	points := []fitactivity.ClipPoint{{
 		PTS:      0,
 		WallTime: time.Date(2026, 7, 4, 21, 0, 0, 0, time.UTC),
-		Sample: telemetry.Sample{
+		Sample: fitactivity.Sample{
 			Time: time.Date(2026, 7, 4, 21, 0, 0, 0, time.UTC),
 			Lat:  -27.4698, Lon: 153.0251, HasGPS: true,
 		},
@@ -1373,7 +1374,7 @@ func TestWriteSidecar_AnnouncesAnOverwrite(t *testing.T) {
 	t.Run("a fresh path says nothing", func(t *testing.T) {
 		var buf bytes.Buffer
 		log := logging.New(&buf, logging.LevelInfo)
-		if err := writeGPXFile(log, path, points, telemetry.DefaultFieldOptions()); err != nil {
+		if err := writeGPXFile(log, path, points, fitactivity.DefaultFieldOptions()); err != nil {
 			t.Fatalf("writeGPXFile: %v", err)
 		}
 		if strings.Contains(buf.String(), "overwriting") {
@@ -1391,13 +1392,13 @@ func TestWriteSidecar_AnnouncesAnOverwrite(t *testing.T) {
 
 		var buf bytes.Buffer
 		log := logging.New(&buf, logging.LevelInfo)
-		if err := writeGPXFile(log, path, points, telemetry.DefaultFieldOptions()); err != nil {
+		if err := writeGPXFile(log, path, points, fitactivity.DefaultFieldOptions()); err != nil {
 			t.Fatalf("writeGPXFile: %v", err)
 		}
 		if !strings.Contains(buf.String(), "overwriting an existing GPX sidecar") {
 			t.Errorf("overwrote an existing sidecar without saying so; log was: %q", buf.String())
 		}
-		if !strings.Contains(buf.String(), "clip - telemetry.gpx") {
+		if !strings.Contains(buf.String(), "clip - fitactivity.gpx") {
 			t.Errorf("the warning does not name the file; log was: %q", buf.String())
 		}
 
@@ -1417,7 +1418,7 @@ func TestWriteSidecar_AnnouncesAnOverwrite(t *testing.T) {
 	// through to its target. The sidecar path is the one output this program
 	// deliberately does not run through naming.Resolve (see above), so it is
 	// also the one that will happily write over what is already there -- and
-	// os.Create follows a symlink, so "clip - telemetry.gpx" -> somewhere else
+	// os.Create follows a symlink, so "clip - fitactivity.gpx" -> somewhere else
 	// meant truncating and filling somewhere else. It needs write access to the
 	// output directory, which already allows replacing the video, so this is
 	// only interesting for a shared --output-dir; the fix costs one open flag.
@@ -1428,14 +1429,14 @@ func TestWriteSidecar_AnnouncesAnOverwrite(t *testing.T) {
 		if err := os.WriteFile(target, []byte(treasure), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		link := filepath.Join(linkDir, "clip - telemetry.gpx")
+		link := filepath.Join(linkDir, "clip - fitactivity.gpx")
 		if err := os.Symlink(target, link); err != nil {
 			t.Fatal(err)
 		}
 
 		var buf bytes.Buffer
 		log := logging.New(&buf, logging.LevelInfo)
-		err := writeGPXFile(log, link, points, telemetry.DefaultFieldOptions())
+		err := writeGPXFile(log, link, points, fitactivity.DefaultFieldOptions())
 		if err == nil {
 			t.Error("writing through a symlinked sidecar path succeeded, want a refusal")
 		}
@@ -1460,11 +1461,11 @@ func TestWriteSidecar_AnnouncesAnOverwrite(t *testing.T) {
 	// The sidecar's name must still be derived from the video, not resolved
 	// away from it: this is the property that makes it a sidecar at all.
 	t.Run("the path still tracks the video's stem", func(t *testing.T) {
-		const out = "/tmp/clip - telemetry.mp4"
-		if got, want := gpxSidecarPath(out), "/tmp/clip - telemetry.gpx"; got != want {
+		const out = "/tmp/clip - fitactivity.mp4"
+		if got, want := gpxSidecarPath(out), "/tmp/clip - fitactivity.gpx"; got != want {
 			t.Errorf("gpxSidecarPath = %q, want %q", got, want)
 		}
-		if got, want := srtSidecarPath(out), "/tmp/clip - telemetry.srt"; got != want {
+		if got, want := srtSidecarPath(out), "/tmp/clip - fitactivity.srt"; got != want {
 			t.Errorf("srtSidecarPath = %q, want %q", got, want)
 		}
 	})

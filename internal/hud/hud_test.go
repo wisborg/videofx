@@ -11,7 +11,7 @@ import (
 
 	"github.com/fogleman/gg"
 
-	"videofx/internal/telemetry"
+	"github.com/wisborg/fitactivity"
 )
 
 func TestPaceLine(t *testing.T) {
@@ -100,7 +100,7 @@ func TestFormatElapsed(t *testing.T) {
 //   - heart rate: optU8 prints the raw value and the unit -- 144 -> "144 bpm".
 //   - cadence: FIT reports run cadence per leg, so cadenceLine doubles it --
 //     86 rpm -> 172 -> "172 spm".
-//   - power: PowerSource's zero value is telemetry.PowerAuto, which prefers
+//   - power: PowerSource's zero value is fitactivity.PowerAuto, which prefers
 //     Stryd and falls back to native; with no DevFields the native 250 is
 //     what resolves -> "250 W".
 //   - incline: Frame.Course is nil here, so inclineLine has no elevation
@@ -114,7 +114,7 @@ func TestFormatElapsed(t *testing.T) {
 func TestMetricsLines_ComposesTheReferenceRowOrder(t *testing.T) {
 	f := Frame{
 		HasSample: true,
-		Sample: telemetry.Sample{
+		Sample: fitactivity.Sample{
 			HasHeartRate: true, HeartRate: 144,
 			HasCadence: true, Cadence: 86,
 			HasPower: true, Power: 250,
@@ -177,7 +177,7 @@ func TestMetricsLines_ComposesTheReferenceRowOrder(t *testing.T) {
 func TestMetricsLines_OmitPowerDropsExactlyThePowerLine(t *testing.T) {
 	f := Frame{
 		HasSample: true,
-		Sample: telemetry.Sample{
+		Sample: fitactivity.Sample{
 			HasHeartRate: true, HeartRate: 144,
 			HasCadence: true, Cadence: 86,
 			HasPower: true, Power: 250,
@@ -263,7 +263,7 @@ func TestRender_DrawsGauges(t *testing.T) {
 		Width: w, Height: h,
 		Time:      time.Date(2026, 7, 5, 7, 5, 54, 0, time.UTC),
 		HasSample: true,
-		Sample: telemetry.Sample{
+		Sample: fitactivity.Sample{
 			HasHeartRate: true, HeartRate: 144,
 			HasCadence: true, Cadence: 86,
 			HasPower: true, Power: 393,
@@ -317,9 +317,9 @@ func TestRender_ElevationGauges(t *testing.T) {
 		dist[i] = float64(i) * 20
 		elev[i] = float64(i) // steady climb
 	}
-	model := telemetry.BuildElevationModel(
-		&telemetry.Track{Samples: elevSamples(dist, elev)},
-		telemetry.ElevationOptions{Sigma: 1},
+	model := fitactivity.BuildElevationModel(
+		&fitactivity.Track{Samples: elevSamples(dist, elev)},
+		fitactivity.ElevationOptions{Sigma: 1},
 	)
 	if model.Empty() {
 		t.Fatal("test model unexpectedly empty")
@@ -332,7 +332,7 @@ func TestRender_ElevationGauges(t *testing.T) {
 		Width: w, Height: h,
 		Time:      time.Now(),
 		HasSample: true,
-		Sample:    telemetry.Sample{HasDistance: true, Distance: 500},
+		Sample:    fitactivity.Sample{HasDistance: true, Distance: 500},
 		Course:    &Course{TotalDistance: model.TotalDistance(), Elevation: model},
 	})
 
@@ -362,13 +362,13 @@ func TestInclineLine(t *testing.T) {
 	}
 	dist := []float64{0, 100, 200}
 	elev := []float64{0, 6, 12} // +6%
-	model := telemetry.BuildElevationModel(
-		&telemetry.Track{Samples: elevSamples(dist, elev)},
-		telemetry.ElevationOptions{Sigma: 0.0001},
+	model := fitactivity.BuildElevationModel(
+		&fitactivity.Track{Samples: elevSamples(dist, elev)},
+		fitactivity.ElevationOptions{Sigma: 0.0001},
 	)
 	f := Frame{
 		HasSample: true,
-		Sample:    telemetry.Sample{HasDistance: true, Distance: 100},
+		Sample:    fitactivity.Sample{HasDistance: true, Distance: 100},
 		Course:    &Course{Elevation: model},
 	}
 	if got := inclineLine(f); got != "+6.0%" {
@@ -378,11 +378,11 @@ func TestInclineLine(t *testing.T) {
 
 // elevSamples builds telemetry samples with distance+elevation for a test
 // elevation model.
-func elevSamples(dist, elev []float64) []telemetry.Sample {
-	s := make([]telemetry.Sample, len(dist))
+func elevSamples(dist, elev []float64) []fitactivity.Sample {
+	s := make([]fitactivity.Sample, len(dist))
 	base := time.Now()
 	for i := range dist {
-		s[i] = telemetry.Sample{
+		s[i] = fitactivity.Sample{
 			Time:        base.Add(time.Duration(i) * time.Second),
 			HasDistance: true, Distance: dist[i],
 			HasElevation: true, Elevation: elev[i],
@@ -398,18 +398,18 @@ func elevSamples(dist, elev []float64) []telemetry.Sample {
 func TestRender_CourseGauges(t *testing.T) {
 	base := time.Now().UTC()
 	// A 3 km track with GPS, distance and time -> splits + route + distance.
-	var samples []telemetry.Sample
+	var samples []fitactivity.Sample
 	for i := 0; i <= 30; i++ {
-		samples = append(samples, telemetry.Sample{
+		samples = append(samples, fitactivity.Sample{
 			Time:        base.Add(time.Duration(i*10) * time.Second),
 			HasDistance: true, Distance: float64(i) * 100, // 100 m/step -> 3 km
 			HasGPS: true, Lat: -27.96 + float64(i)*0.001, Lon: 153.42 + float64(i)*0.0005,
 		})
 	}
-	track := &telemetry.Track{Samples: samples}
+	track := &fitactivity.Track{Samples: samples}
 	course := &Course{
 		TotalDistance: 3000,
-		Splits:        telemetry.BuildSplits(track),
+		Splits:        fitactivity.BuildSplits(track),
 		Route: func() []GeoPoint {
 			var r []GeoPoint
 			for _, s := range samples {
@@ -426,7 +426,7 @@ func TestRender_CourseGauges(t *testing.T) {
 		Width: w, Height: h,
 		Time:      base.Add(1500 * time.Second), // ~1.5 km in (mid-course)
 		HasSample: true,
-		Sample:    telemetry.Sample{HasDistance: true, Distance: 1500, HasGPS: true, Lat: -27.945, Lon: 153.4275},
+		Sample:    fitactivity.Sample{HasDistance: true, Distance: 1500, HasGPS: true, Lat: -27.945, Lon: 153.4275},
 		Course:    course,
 	})
 
@@ -454,26 +454,26 @@ func TestRender_CourseGauges(t *testing.T) {
 
 // splitsOver builds a Splits from a constant-pace series of (metres, seconds)
 // samples running from startM to endM.
-func splitsOver(base time.Time, startM, endM, stepM, stepS float64) *telemetry.Splits {
-	var samples []telemetry.Sample
+func splitsOver(base time.Time, startM, endM, stepM, stepS float64) *fitactivity.Splits {
+	var samples []fitactivity.Sample
 	for d, t := startM, 0.0; d <= endM; d, t = d+stepM, t+stepS {
-		samples = append(samples, telemetry.Sample{
+		samples = append(samples, fitactivity.Sample{
 			Time:        base.Add(time.Duration(t) * time.Second),
 			HasDistance: true, Distance: d,
 		})
 	}
-	return telemetry.BuildSplits(&telemetry.Track{Samples: samples})
+	return fitactivity.BuildSplits(&fitactivity.Track{Samples: samples})
 }
 
 // splitsWithAFastLap builds a Splits over 10 200 -> 18 400 m in which one
 // kilometre -- 12 000 to 13 000 m -- is run at 20 s per 100 m against 30 s
 // everywhere else, so the fastest lap is unambiguously km 13 and sits below
 // the row window at lap 19.
-func splitsWithAFastLap(base time.Time) *telemetry.Splits {
-	var samples []telemetry.Sample
+func splitsWithAFastLap(base time.Time) *fitactivity.Splits {
+	var samples []fitactivity.Sample
 	elapsed := 0.0
 	for d := 10200.0; d <= 18400.0; d += 100 {
-		samples = append(samples, telemetry.Sample{
+		samples = append(samples, fitactivity.Sample{
 			Time:        base.Add(time.Duration(elapsed) * time.Second),
 			HasDistance: true, Distance: d,
 		})
@@ -483,7 +483,7 @@ func splitsWithAFastLap(base time.Time) *telemetry.Splits {
 			elapsed += 30
 		}
 	}
-	return telemetry.BuildSplits(&telemetry.Track{Samples: samples})
+	return fitactivity.BuildSplits(&fitactivity.Track{Samples: samples})
 }
 
 // TestSplitsRows_NeverListsALapWhoseOpeningCrossingIsMissing checks the lap
@@ -501,7 +501,7 @@ func TestSplitsRows_NeverListsALapWhoseOpeningCrossingIsMissing(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		sp     *telemetry.Splits
+		sp     *fitactivity.Splits
 		curKm  int
 		want   []int
 		reason string
@@ -660,17 +660,17 @@ func TestVerticalLayout(t *testing.T) {
 // the bottom.
 func TestRender_VerticalLayout(t *testing.T) {
 	base := time.Now().UTC()
-	var samples []telemetry.Sample
+	var samples []fitactivity.Sample
 	for i := 0; i <= 30; i++ {
-		samples = append(samples, telemetry.Sample{
+		samples = append(samples, fitactivity.Sample{
 			Time:        base.Add(time.Duration(i*10) * time.Second),
 			HasDistance: true, Distance: float64(i) * 100, // 3 km
 			HasGPS: true, Lat: -27.96 + float64(i)*0.001, Lon: 153.42 + float64(i)*0.0005,
 			HasElevation: true, Elevation: float64(i),
 		})
 	}
-	track := &telemetry.Track{Samples: samples}
-	model := telemetry.BuildElevationModel(track, telemetry.ElevationOptions{Sigma: 1})
+	track := &fitactivity.Track{Samples: samples}
+	model := fitactivity.BuildElevationModel(track, fitactivity.ElevationOptions{Sigma: 1})
 	route := make([]GeoPoint, len(samples))
 	for i, s := range samples {
 		route[i] = GeoPoint{Lat: s.Lat, Lon: s.Lon, Time: s.Time}
@@ -678,7 +678,7 @@ func TestRender_VerticalLayout(t *testing.T) {
 	course := &Course{
 		TotalDistance: 3000,
 		Elevation:     model,
-		Splits:        telemetry.BuildSplits(track),
+		Splits:        fitactivity.BuildSplits(track),
 		Route:         route,
 	}
 
@@ -690,7 +690,7 @@ func TestRender_VerticalLayout(t *testing.T) {
 		Width: w, Height: h,
 		Time:      base.Add(1500 * time.Second),
 		HasSample: true,
-		Sample:    telemetry.Sample{HasDistance: true, Distance: 1500, HasGPS: true, Lat: -27.945, Lon: 153.4275},
+		Sample:    fitactivity.Sample{HasDistance: true, Distance: 1500, HasGPS: true, Lat: -27.945, Lon: 153.4275},
 		Course:    course,
 	})
 
@@ -802,7 +802,7 @@ func TestRender_NoPowerLayoutClosesTheGapDownward(t *testing.T) {
 	f := Frame{
 		Width: w, Height: h,
 		HasSample: true,
-		Sample: telemetry.Sample{
+		Sample: fitactivity.Sample{
 			HasHeartRate: true, HeartRate: 144,
 			HasCadence: true, Cadence: 86,
 			HasPower: true, Power: 250,
@@ -1086,7 +1086,7 @@ func TestRender_AZeroSpanCourseDrawsNoBarAtAll(t *testing.T) {
 		Width: w, Height: h,
 		Time:      time.Now(),
 		HasSample: true,
-		Sample:    telemetry.Sample{HasDistance: true, Distance: 10200},
+		Sample:    fitactivity.Sample{HasDistance: true, Distance: 10200},
 		Course:    &Course{StartDistance: 10200, TotalDistance: 10200},
 	})
 
@@ -1107,15 +1107,15 @@ func TestRender_AZeroSpanCourseDrawsNoBarAtAll(t *testing.T) {
 // elevModelOver builds an elevation model whose profile runs from startM to
 // endM metres, climbing 1 m per 100 m. Sigma is explicit so the model's shape
 // does not depend on the smoothing tuner.
-func elevModelOver(startM, endM, stepM float64) *telemetry.ElevationModel {
+func elevModelOver(startM, endM, stepM float64) *fitactivity.ElevationModel {
 	var dist, elev []float64
 	for d := startM; d <= endM; d += stepM {
 		dist = append(dist, d)
 		elev = append(elev, 10+(d-startM)/100)
 	}
-	return telemetry.BuildElevationModel(
-		&telemetry.Track{Samples: elevSamples(dist, elev)},
-		telemetry.ElevationOptions{Sigma: 1},
+	return fitactivity.BuildElevationModel(
+		&fitactivity.Track{Samples: elevSamples(dist, elev)},
+		fitactivity.ElevationOptions{Sigma: 1},
 	)
 }
 
@@ -1170,12 +1170,12 @@ func TestElevGeometry_ProfileSpansTheModelsOwnDistanceRange(t *testing.T) {
 // distance, because BuildElevationModel skips a sample whose distance went
 // BACKWARDS and keeps one that did not move.
 func TestElevGeometry_AZeroDistanceSpanDrawsNothingRatherThanNaN(t *testing.T) {
-	m := telemetry.BuildElevationModel(
-		&telemetry.Track{Samples: elevSamples(
+	m := fitactivity.BuildElevationModel(
+		&fitactivity.Track{Samples: elevSamples(
 			[]float64{500, 500, 500, 500},
 			[]float64{31, 32, 31, 30},
 		)},
-		telemetry.ElevationOptions{Sigma: 1},
+		fitactivity.ElevationOptions{Sigma: 1},
 	)
 	if m.Empty() {
 		t.Fatal("the fixture model is Empty, so the pre-existing guard would catch it and this test proves nothing")
@@ -1228,14 +1228,14 @@ func ramp(s []float64, a, b float64, n int) []float64 {
 // a 4-sample interior plateau lands about 0.01 m inside the value it holds.
 // That is nothing on a 3.2 m rise and a twentieth of the flat fixture's entire
 // 0.2 m range, where every expected position is a share of the range.
-func elevModelOfSeries(elev []float64) *telemetry.ElevationModel {
+func elevModelOfSeries(elev []float64) *fitactivity.ElevationModel {
 	dist := make([]float64, len(elev))
 	for i := range dist {
 		dist[i] = float64(i) * 10
 	}
-	return telemetry.BuildElevationModel(
-		&telemetry.Track{Samples: elevSamples(dist, elev)},
-		telemetry.ElevationOptions{Sigma: 1},
+	return fitactivity.BuildElevationModel(
+		&fitactivity.Track{Samples: elevSamples(dist, elev)},
+		fitactivity.ElevationOptions{Sigma: 1},
 	)
 }
 
@@ -1243,7 +1243,7 @@ func elevModelOfSeries(elev []float64) *telemetry.ElevationModel {
 // through the middle, and finishes on its highest: over the left quarter of the
 // plot the trace therefore sits at the FLOOR of the elevation range, well clear
 // of a label centred on the plot's midline.
-func elevProfileClimbing(loE, hiE float64) *telemetry.ElevationModel {
+func elevProfileClimbing(loE, hiE float64) *fitactivity.ElevationModel {
 	s := hold(nil, loE, 40)
 	s = ramp(s, loE, hiE, 40)
 	return elevModelOfSeries(hold(s, hiE, 40))
@@ -1253,7 +1253,7 @@ func elevProfileClimbing(loE, hiE float64) *telemetry.ElevationModel {
 // elevation range for the whole left half of the plot before dipping to its low
 // point and climbing to its high one. Over that left half the trace sits on the
 // plot's midline, clear of the label bands at the plot's top and bottom edges.
-func elevProfileOpeningMidRange(loE, hiE float64) *telemetry.ElevationModel {
+func elevProfileOpeningMidRange(loE, hiE float64) *fitactivity.ElevationModel {
 	mid := (loE + hiE) / 2
 	s := hold(nil, mid, 60)
 	s = ramp(s, mid, loE, 20)
@@ -1700,7 +1700,7 @@ func TestRender_AFlatCoursesTraceAndMarkerRunThroughTheMiddleOfThePlot(t *testin
 	// not depend on it.
 	const at = 1000.0
 	f.Time = time.Date(2026, 7, 4, 21, 0, 0, 0, time.UTC)
-	f.HasSample, f.Sample = true, telemetry.Sample{HasDistance: true, Distance: at}
+	f.HasSample, f.Sample = true, fitactivity.Sample{HasDistance: true, Distance: at}
 	if e, _, _ := m.AtDistance(at); math.Abs(e-hiE) > 1e-9 {
 		t.Fatalf("the fixture is at %v m at %v m along, want its high plateau at %v m", e, at, hiE)
 	}
@@ -1770,7 +1770,7 @@ func TestRender_AFlatCoursesTraceAndMarkerRunThroughTheMiddleOfThePlot(t *testin
 // smoothing pulled its extremes in would leave the assertions around it
 // arithmetically true and meaningless. It fails loudly rather than adapting,
 // because a range that moved is a fixture to rewrite, not a regression.
-func elevPlotOf(t *testing.T, m *telemetry.ElevationModel, loE, hiE float64, w, h int) (*Renderer, Frame, elevPlot) {
+func elevPlotOf(t *testing.T, m *fitactivity.ElevationModel, loE, hiE float64, w, h int) (*Renderer, Frame, elevPlot) {
 	t.Helper()
 	if lo, hi := m.Range(); math.Abs(lo-loE) > 1e-9 || math.Abs(hi-hiE) > 1e-9 {
 		t.Fatalf("the fixture model's smoothed range is %v..%v, want %v..%v -- "+
@@ -1837,7 +1837,7 @@ func TestElevFixtures_APlateauAtEachEndIsWhatMakesTheSmoothedRangeTheNamedOne(t 
 // they scan for label ink contains no trace ink above the band they are
 // looking in -- an assumption about the fixture that is cheaper to check than
 // to reason about, and wrong the moment a fixture's shape changes.
-func highestTraceY(g elevPlot, m *telemetry.ElevationModel, x float64) float64 {
+func highestTraceY(g elevPlot, m *fitactivity.ElevationModel, x float64) float64 {
 	top := math.Inf(1)
 	for px := g.left; px <= x; px++ {
 		d := g.startD + (px-g.left)/(g.right-g.left)*(g.endD-g.startD)
@@ -2062,7 +2062,7 @@ func TestRenderStatic_TheFlatProfilesOneLabelIsHungOnTheMidlineItself(t *testing
 	for _, c := range []struct {
 		name  string
 		g     elevPlot
-		m     *telemetry.ElevationModel
+		m     *fitactivity.ElevationModel
 		floor float64 // the trace must stay BELOW this y across the strip
 	}{
 		{"flat", gFlat, fFlat.Course.Elevation, (gFlat.top + gFlat.axisY) / 2},
@@ -2216,7 +2216,7 @@ func TestAxisLabels_TheUnitFollowsTheSpanAndTheWholeActivityIsUnchanged(t *testi
 		},
 		{
 			// A rebased clip opening on a backwards distance blip, which
-			// telemetry.firstDistance deliberately does not skip. At this
+			// fitactivity.firstDistance deliberately does not skip. At this
 			// precision the magnitude is already rounded away, so the sign is
 			// all that would survive, and "-0 km" reads as a typo rather than
 			// as a number. Escalating instead does not help: "%.1f km" of
@@ -2297,7 +2297,7 @@ func TestProgressReadout_IsInMetresExactlyWhenItsLabelsAre(t *testing.T) {
 func TestProgressCurrentDistance_ParksOnTheAxisOriginNotOnZero(t *testing.T) {
 	g := progressPlot{startD: 10200, endD: 12400}
 	sampleAt := func(d float64) Frame {
-		return Frame{HasSample: true, Sample: telemetry.Sample{HasDistance: true, Distance: d}}
+		return Frame{HasSample: true, Sample: fitactivity.Sample{HasDistance: true, Distance: d}}
 	}
 
 	for _, c := range []struct {
@@ -2340,7 +2340,7 @@ func TestRender_AClipScopedCourseStillDrawsBothDistanceGauges(t *testing.T) {
 		Width: w, Height: h,
 		Time:      time.Now(),
 		HasSample: true,
-		Sample:    telemetry.Sample{HasDistance: true, Distance: 11300},
+		Sample:    fitactivity.Sample{HasDistance: true, Distance: 11300},
 		Course: &Course{
 			StartDistance: 10200,
 			TotalDistance: 12400,
@@ -2374,7 +2374,7 @@ func clipScopedFrame(w, h int) Frame {
 		Width: w, Height: h,
 		Time:      time.Date(2026, 7, 4, 21, 0, 0, 0, time.UTC),
 		HasSample: true,
-		Sample:    telemetry.Sample{HasDistance: true, Distance: 11300},
+		Sample:    fitactivity.Sample{HasDistance: true, Distance: 11300},
 		Course: &Course{
 			StartDistance: 10200,
 			TotalDistance: 12400,
@@ -2578,7 +2578,7 @@ func TestRender_TheProfileMarkerParksOnTheAxisOwnEnds(t *testing.T) {
 				Width: w, Height: h,
 				Time:      time.Date(2026, 7, 4, 21, 0, 0, 0, time.UTC),
 				HasSample: true,
-				Sample:    telemetry.Sample{HasDistance: true, Distance: c.at},
+				Sample:    fitactivity.Sample{HasDistance: true, Distance: c.at},
 				Course:    course,
 			})
 
@@ -2688,7 +2688,7 @@ func TestRender_TheReadoutOnTheCanvasIsTheClampedDistanceInTheAxisUnit(t *testin
 			f := Frame{
 				Width: w, Height: h,
 				HasSample: true,
-				Sample:    telemetry.Sample{HasDistance: true, Distance: c.at},
+				Sample:    fitactivity.Sample{HasDistance: true, Distance: c.at},
 				Course:    &Course{StartDistance: c.startD, TotalDistance: c.endD},
 			}
 			box := r.resolveBox(r.layout.Placements[0], f)
@@ -2789,25 +2789,25 @@ func TestOptPlaceholders(t *testing.T) {
 func TestPowerLine(t *testing.T) {
 	// A sample carrying both a native FIT power field and a Stryd developer
 	// field, with deliberately different values so we can tell them apart.
-	both := telemetry.Sample{
+	both := fitactivity.Sample{
 		HasPower: true, Power: 277,
-		DevFields: map[string]float64{telemetry.StrydPowerField: 159},
+		DevFields: map[string]float64{fitactivity.StrydPowerField: 159},
 	}
-	nativeOnly := telemetry.Sample{HasPower: true, Power: 277}
-	strydOnly := telemetry.Sample{DevFields: map[string]float64{telemetry.StrydPowerField: 159}}
+	nativeOnly := fitactivity.Sample{HasPower: true, Power: 277}
+	strydOnly := fitactivity.Sample{DevFields: map[string]float64{fitactivity.StrydPowerField: 159}}
 
 	cases := []struct {
 		name string
 		f    Frame
 		want string
 	}{
-		{"auto prefers stryd", Frame{HasSample: true, Sample: both, PowerSource: telemetry.PowerAuto}, "159 W"},
-		{"native forced", Frame{HasSample: true, Sample: both, PowerSource: telemetry.PowerNative}, "277 W"},
-		{"stryd forced", Frame{HasSample: true, Sample: both, PowerSource: telemetry.PowerStryd}, "159 W"},
-		{"auto falls back to native", Frame{HasSample: true, Sample: nativeOnly, PowerSource: telemetry.PowerAuto}, "277 W"},
-		{"stryd forced, none present", Frame{HasSample: true, Sample: nativeOnly, PowerSource: telemetry.PowerStryd}, "-- W"},
-		{"native forced, none present", Frame{HasSample: true, Sample: strydOnly, PowerSource: telemetry.PowerNative}, "-- W"},
-		{"no sample", Frame{HasSample: false, Sample: both, PowerSource: telemetry.PowerAuto}, "-- W"},
+		{"auto prefers stryd", Frame{HasSample: true, Sample: both, PowerSource: fitactivity.PowerAuto}, "159 W"},
+		{"native forced", Frame{HasSample: true, Sample: both, PowerSource: fitactivity.PowerNative}, "277 W"},
+		{"stryd forced", Frame{HasSample: true, Sample: both, PowerSource: fitactivity.PowerStryd}, "159 W"},
+		{"auto falls back to native", Frame{HasSample: true, Sample: nativeOnly, PowerSource: fitactivity.PowerAuto}, "277 W"},
+		{"stryd forced, none present", Frame{HasSample: true, Sample: nativeOnly, PowerSource: fitactivity.PowerStryd}, "-- W"},
+		{"native forced, none present", Frame{HasSample: true, Sample: strydOnly, PowerSource: fitactivity.PowerNative}, "-- W"},
+		{"no sample", Frame{HasSample: false, Sample: both, PowerSource: fitactivity.PowerAuto}, "-- W"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

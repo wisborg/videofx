@@ -31,7 +31,7 @@ import (
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/gomono"
 
-	"videofx/internal/telemetry"
+	"github.com/wisborg/fitactivity"
 )
 
 // Anchor is the frame reference point a gauge is positioned from. A gauge
@@ -61,7 +61,7 @@ type Frame struct {
 	// desired display timezone by the caller.
 	Time time.Time
 	// Elapsed is the time since the FIT activity's own start, as either
-	// telemetry.TimerModel.Elapsed or .Active depending on --hud-time,
+	// fitactivity.TimerModel.Elapsed or .Active depending on --hud-time,
 	// supplied by the caller (the telemetry-hud effect). It is activity-
 	// relative, computed from the FIT-clock instant, and is NEVER derivable
 	// from Time alone -- Time is a wall-clock instant that has already been
@@ -69,18 +69,18 @@ type Frame struct {
 	// so subtracting anything from it here would mix a timezone-shifted
 	// instant with an activity-relative one. TimeDateGauge is the only reader
 	// today; it is on Frame rather than computed inside that gauge because
-	// gauges have no access to the telemetry.TimerModel that produces it.
+	// gauges have no access to the fitactivity.TimerModel that produces it.
 	Elapsed time.Duration
 	// Sample is the telemetry interpolated to this instant; HasSample is
 	// false when the clip is outside the FIT's coverage (gauges then show
 	// placeholders rather than stale/zero data).
-	Sample    telemetry.Sample
+	Sample    fitactivity.Sample
 	HasSample bool
 	// PowerSource selects which power reading the metrics gauge displays when
 	// the FIT carries both a footpod (Stryd) developer field and the standard
-	// FIT power field; the zero value is telemetry.PowerAuto (prefer Stryd,
-	// fall back to native). See telemetry.Sample.ResolvedPower.
-	PowerSource telemetry.PowerSource
+	// FIT power field; the zero value is fitactivity.PowerAuto (prefer Stryd,
+	// fall back to native). See fitactivity.Sample.ResolvedPower.
+	PowerSource fitactivity.PowerSource
 	// Course carries the render-wide context (elevation profile, GPS track,
 	// splits, distance axis) the graphical gauges draw from; nil when the
 	// caller has none. It is the same pointer on every frame -- see Course.
@@ -91,7 +91,7 @@ type Frame struct {
 //
 // "Whole activity" is what it usually describes and no longer what it means:
 // the telemetry-hud effect can scope it to the stretch of an activity that
-// runs underneath the clip (telemetry.Scope), in which case every field here
+// runs underneath the clip (fitactivity.Scope), in which case every field here
 // describes that stretch. Nothing in this package needs to know which -- the
 // gauges draw whatever course they are given -- but a reader assuming the
 // numbers span a whole recording will misread StartDistance below.
@@ -105,7 +105,7 @@ type Course struct {
 	// clip scoped to 10.2..12.4 km of an activity draws and labels that
 	// stretch rather than 0..12.4 km. It is 0 for a whole activity and for a
 	// clip-rebased one (whose origin has already been subtracted from every
-	// sample) -- i.e. for everything but telemetry.ScopeClipAbsolute.
+	// sample) -- i.e. for everything but fitactivity.ScopeClipAbsolute.
 	//
 	// A zero origin leaves the bar's GEOMETRY exactly as it always was, and
 	// its labels too. It does not by itself leave the whole HUD unchanged, and
@@ -126,7 +126,7 @@ type Course struct {
 	// fails silently -- both layers draw, they just disagree.
 	//
 	// The elevation profile does NOT read this. Its axis is the elevation
-	// model's own (telemetry.ElevationModel.StartDistance), which can
+	// model's own (fitactivity.ElevationModel.StartDistance), which can
 	// legitimately differ; see that method for why the two must not be
 	// unified. Note that only THIS one responds to scoping -- the profile's is
 	// a property of the data its model was built from -- so the two axes can
@@ -136,12 +136,12 @@ type Course struct {
 	// (profile, gain/loss, incline) read; nil / Empty() when the FIT carried
 	// no usable elevation, in which case those gauges show placeholders or
 	// draw nothing. It carries its OWN distance axis -- see StartDistance.
-	Elevation *telemetry.ElevationModel
+	Elevation *fitactivity.ElevationModel
 	// Splits are the kilometre boundaries the splits gauge reads, numbered by
 	// the kilometres of whatever the course describes; nil / Empty() when
 	// there is no distance, or no lap with both of its bounding crossings in
 	// the data.
-	Splits *telemetry.Splits
+	Splits *fitactivity.Splits
 	// Route is the (downsampled) GPS track the course-map gauge draws; each
 	// point carries its time so the gauge can highlight the covered portion.
 	// Empty when the FIT carried no GPS fix.

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"videofx/internal/telemetry"
+	"github.com/wisborg/fitactivity"
 )
 
 // mPerDegLatTest/mPerDegLonTest mirror project's constants, for building
@@ -26,12 +26,12 @@ func latLonAt(lat0, lon0, east, north float64) (lat, lon float64) {
 	return lat, lon
 }
 
-func trackFromFixes(fixes []fix) *telemetry.Track {
-	samples := make([]telemetry.Sample, len(fixes))
+func trackFromFixes(fixes []fix) *fitactivity.Track {
+	samples := make([]fitactivity.Sample, len(fixes))
 	for i, f := range fixes {
-		samples[i] = telemetry.Sample{Time: f.t, HasGPS: true, Lat: f.lat, Lon: f.lon}
+		samples[i] = fitactivity.Sample{Time: f.t, HasGPS: true, Lat: f.lat, Lon: f.lon}
 	}
-	return &telemetry.Track{SourcePath: "test.fit", Samples: samples}
+	return &fitactivity.Track{SourcePath: "test.fit", Samples: samples}
 }
 
 // TestGPSFixes_SkipsNonFiniteCoordinates is finding 3's NaN-safety guard at
@@ -43,9 +43,9 @@ func trackFromFixes(fixes []fix) *telemetry.Track {
 // quietly stop producing usable headings. gpsFixes is where that gets cut
 // off, by simply not admitting the fix at all.
 func TestGPSFixes_SkipsNonFiniteCoordinates(t *testing.T) {
-	track := &telemetry.Track{
+	track := &fitactivity.Track{
 		SourcePath: "test.fit",
-		Samples: []telemetry.Sample{
+		Samples: []fitactivity.Sample{
 			{Time: t0, HasGPS: true, Lat: -33.0, Lon: 151.0},
 			{Time: t0.Add(time.Second), HasGPS: true, Lat: math.NaN(), Lon: 151.001},
 			{Time: t0.Add(2 * time.Second), HasGPS: true, Lat: -33.002, Lon: math.Inf(1)},

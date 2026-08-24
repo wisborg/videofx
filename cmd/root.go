@@ -16,13 +16,14 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/wisborg/fitactivity"
+
 	"videofx/internal/cliutil"
 	"videofx/internal/effects"
 	"videofx/internal/logging"
 	"videofx/internal/progress"
 	"videofx/internal/runner"
 	"videofx/internal/stabilize"
-	"videofx/internal/telemetry"
 	"videofx/internal/video"
 	"videofx/internal/vidio"
 )
@@ -345,7 +346,7 @@ func requireRotateDegrees(effectNames []string, degrees int) error {
 
 // requireStripMetadataNotBeforeTelemetry rejects a chain where strip-metadata
 // precedes telemetry or telemetry-hud. Both of those hard-fail when their
-// input carries no creation_time (telemetry.go's Apply, telemetryhud.go's),
+// input carries no creation_time (fitactivity.go's Apply, telemetryhud.go's),
 // and strip-metadata's whole job is removing creation_time -- see
 // vidio.MetadataStripArgs. Without this check, that failure would surface
 // only after every earlier effect in the chain has already run -- sometimes
@@ -628,10 +629,10 @@ func validateHUDLayout(mode string) error {
 
 // powerSourceModes maps the --power-source flag values to their telemetry
 // enum; it is the single source of truth for both validation and parsing.
-var powerSourceModes = map[string]telemetry.PowerSource{
-	"auto":   telemetry.PowerAuto,
-	"stryd":  telemetry.PowerStryd,
-	"native": telemetry.PowerNative,
+var powerSourceModes = map[string]fitactivity.PowerSource{
+	"auto":   fitactivity.PowerAuto,
+	"stryd":  fitactivity.PowerStryd,
+	"native": fitactivity.PowerNative,
 }
 
 // validatePowerSource rejects an unknown --power-source up front.
@@ -644,20 +645,20 @@ func validatePowerSource(mode string) error {
 
 // parsePowerSource maps a --power-source value to its enum; an unknown value
 // (already rejected by validatePowerSource) falls back to PowerAuto.
-func parsePowerSource(mode string) telemetry.PowerSource {
+func parsePowerSource(mode string) fitactivity.PowerSource {
 	return powerSourceModes[mode] // zero value is PowerAuto
 }
 
 // hudTimeModes maps the --hud-time flag values to their telemetry enum; like
 // powerSourceModes it is the single source of truth for both validation and
-// parsing, and is bound to telemetry.TimeMode.String() by
+// parsing, and is bound to fitactivity.TimeMode.String() by
 // TestHUDTimeModes_RoundTripsEveryTimeModeSpelling for the same reason
 // TestPowerSourceModes_RoundTripsEveryPowerSourceSpelling binds
 // powerSourceModes.
-var hudTimeModes = map[string]telemetry.TimeMode{
-	"clock":   telemetry.TimeClock,
-	"elapsed": telemetry.TimeElapsed,
-	"active":  telemetry.TimeActive,
+var hudTimeModes = map[string]fitactivity.TimeMode{
+	"clock":   fitactivity.TimeClock,
+	"elapsed": fitactivity.TimeElapsed,
+	"active":  fitactivity.TimeActive,
 }
 
 // validateHUDTime rejects an unknown --hud-time up front.
@@ -670,7 +671,7 @@ func validateHUDTime(mode string) error {
 
 // parseHUDTime maps a --hud-time value to its enum; an unknown value
 // (already rejected by validateHUDTime) falls back to TimeClock.
-func parseHUDTime(mode string) telemetry.TimeMode {
+func parseHUDTime(mode string) fitactivity.TimeMode {
 	return hudTimeModes[mode] // zero value is TimeClock
 }
 
@@ -678,7 +679,7 @@ func parseHUDTime(mode string) telemetry.TimeMode {
 // enum; like powerSourceModes it is the single source of truth for both
 // validation and parsing.
 //
-// The three keys are also exactly what telemetry.Scope.String() renders, and
+// The three keys are also exactly what fitactivity.Scope.String() renders, and
 // nothing in the type system ties the two tables together -- rename a value in
 // one and the other keeps spelling it the old way, so the flag and the log line
 // that narrates what it did drift apart. That is bound by
@@ -689,7 +690,7 @@ func parseHUDTime(mode string) telemetry.TimeMode {
 // log-line spelling would rename a user's CLI value with nothing failing,
 // whereas the round-trip test makes drift loud in both. And Scope has no
 // enumeration API, so deriving would mean exporting an AllScopes() from
-// internal/telemetry whose only caller is this map. The vocabulary is written
+// fitactivity whose only caller is this map. The vocabulary is written
 // out here because it is a published interface; the test is what makes the
 // duplication safe.
 //
@@ -697,10 +698,10 @@ func parseHUDTime(mode string) telemetry.TimeMode {
 // values let the error message below teach the whole choice in one line, and
 // "clip" beside "clip-absolute" would read as "the not-absolute one" rather
 // than naming what it actually does.
-var telemetryScopeModes = map[string]telemetry.Scope{
-	"full":          telemetry.ScopeActivity,
-	"clip-rebased":  telemetry.ScopeClipRebased,
-	"clip-absolute": telemetry.ScopeClipAbsolute,
+var telemetryScopeModes = map[string]fitactivity.Scope{
+	"full":          fitactivity.ScopeActivity,
+	"clip-rebased":  fitactivity.ScopeClipRebased,
+	"clip-absolute": fitactivity.ScopeClipAbsolute,
 }
 
 // validateTelemetryScope rejects an unknown --telemetry-scope up front. The
@@ -718,7 +719,7 @@ func validateTelemetryScope(mode string) error {
 // parseTelemetryScope maps a --telemetry-scope value to its enum; an unknown
 // value (already rejected by validateTelemetryScope) falls back to
 // ScopeActivity, which is today's whole-activity behaviour.
-func parseTelemetryScope(mode string) telemetry.Scope {
+func parseTelemetryScope(mode string) fitactivity.Scope {
 	return telemetryScopeModes[mode] // zero value is ScopeActivity
 }
 
@@ -862,7 +863,7 @@ func validateTrim(start, end cliutil.TimeSpec) error {
 //
 // An absolute timestamp resolves through the same clock model the telemetry
 // sync uses -- fit_time = creation_time + offset + pts, so
-// pts = timestamp - creation_time - offset (see telemetry.Resolve). That makes
+// pts = timestamp - creation_time - offset (see fitactivity.Resolve). That makes
 // a timestamp read off a HUD or a watch mean the same instant here as it does
 // there, which is the whole point of honoring --offset.
 //
@@ -932,7 +933,7 @@ func resolveTrimWindow(path string, start, end cliutil.TimeSpec, info vidio.Info
 
 // resolveInstant maps one time spec onto seconds into a particular clip: a
 // relative spec is already that, and an absolute one is measured from the
-// clip's creation_time (less the clock-skew offset, per telemetry.Resolve's
+// clip's creation_time (less the clock-skew offset, per fitactivity.Resolve's
 // fit_time = creation_time + offset + pts).
 //
 // The result may fall outside the clip -- negative, or past its end. Deciding

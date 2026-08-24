@@ -51,7 +51,7 @@ type Info struct {
 
 	// CreationTime is the container's format-level creation_time tag
 	// (ffprobe's format_tags.creation_time), the wall-clock instant the
-	// recording device believes the file started. internal/telemetry's
+	// recording device believes the file started. fitactivity's
 	// sync engine (Phase 2 of the FIT-telemetry-overlay feature) anchors
 	// its fit_time(pts) = creation_time + offset + pts model on this
 	// value. It is valid only when HasCreationTime is true.

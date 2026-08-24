@@ -18,15 +18,16 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/wisborg/fitactivity"
+	"github.com/wisborg/fitactivity/fittest"
+
 	"videofx/internal/calibrate"
 	"videofx/internal/cliutil"
 	"videofx/internal/effects"
-	"videofx/internal/fittest"
 	"videofx/internal/hud"
 	"videofx/internal/logging"
 	"videofx/internal/progress"
 	"videofx/internal/stabilize"
-	"videofx/internal/telemetry"
 	"videofx/internal/video"
 	"videofx/internal/vidio"
 )
@@ -1466,7 +1467,7 @@ func TestValidatePowerSource(t *testing.T) {
 
 // TestPowerSourceModes_RoundTripsEveryPowerSourceSpelling binds the two
 // tables that spell "auto"/"stryd"/"native": powerSourceModes here, and
-// telemetry.PowerSource.String() in the other package -- exactly as
+// fitactivity.PowerSource.String() in the other package -- exactly as
 // TestTelemetryScopeModes_RoundTripsEveryScopeSpelling binds Scope's two
 // tables, and for the same reason: nothing in the type system connects them,
 // so renaming a value in one leaves the other -- the flag the user types, or
@@ -1483,7 +1484,7 @@ func TestPowerSourceModes_RoundTripsEveryPowerSourceSpelling(t *testing.T) {
 
 	named := 0
 	for i := range scan {
-		s := telemetry.PowerSource(i)
+		s := fitactivity.PowerSource(i)
 		name := s.String()
 		if name == "unknown" {
 			continue // not a defined power source
@@ -1491,7 +1492,7 @@ func TestPowerSourceModes_RoundTripsEveryPowerSourceSpelling(t *testing.T) {
 		named++
 		got, ok := powerSourceModes[name]
 		if !ok {
-			t.Errorf("telemetry.PowerSource(%d) spells itself %q, but --power-source does not accept that value; add it to powerSourceModes and to the flag's help text", i, name)
+			t.Errorf("fitactivity.PowerSource(%d) spells itself %q, but --power-source does not accept that value; add it to powerSourceModes and to the flag's help text", i, name)
 			continue
 		}
 		if got != s {
@@ -1535,7 +1536,7 @@ func TestValidateHUDTime(t *testing.T) {
 
 // TestHUDTimeModes_RoundTripsEveryTimeModeSpelling binds the two tables that
 // spell "clock"/"elapsed"/"active": hudTimeModes here, and
-// telemetry.TimeMode.String() in the other package -- exactly as
+// fitactivity.TimeMode.String() in the other package -- exactly as
 // TestPowerSourceModes_RoundTripsEveryPowerSourceSpelling binds
 // PowerSource's two tables, and for the same reason: nothing in the type
 // system connects them, so renaming a value in one leaves the other -- the
@@ -1548,7 +1549,7 @@ func TestHUDTimeModes_RoundTripsEveryTimeModeSpelling(t *testing.T) {
 
 	named := 0
 	for i := range scan {
-		m := telemetry.TimeMode(i)
+		m := fitactivity.TimeMode(i)
 		name := m.String()
 		if name == "unknown" {
 			continue
@@ -1556,7 +1557,7 @@ func TestHUDTimeModes_RoundTripsEveryTimeModeSpelling(t *testing.T) {
 		named++
 		got, ok := hudTimeModes[name]
 		if !ok {
-			t.Errorf("telemetry.TimeMode(%d) spells itself %q, but --hud-time does not accept that value; add it to hudTimeModes and to the flag's help text", i, name)
+			t.Errorf("fitactivity.TimeMode(%d) spells itself %q, but --hud-time does not accept that value; add it to hudTimeModes and to the flag's help text", i, name)
 			continue
 		}
 		if got != m {
@@ -1598,7 +1599,7 @@ func TestConfigureEffect_HUDTimeFlagStringReachesTheEffect(t *testing.T) {
 	if err := configureEffect(h, root.Flags()); err != nil {
 		t.Fatalf("configureEffect: %v", err)
 	}
-	if h.TimeMode != telemetry.TimeActive {
+	if h.TimeMode != fitactivity.TimeActive {
 		t.Errorf("TimeMode = %v, want TimeActive -- the --hud-time flag string did not reach the effect", h.TimeMode)
 	}
 }
@@ -2064,7 +2065,7 @@ func TestConfigureTelemetry(t *testing.T) {
 		t.Errorf("OmitLocation = %v, want %v (--location=%v is an opt-out, so the field is its inverse)",
 			tel.OmitLocation, !location, location)
 	}
-	if tel.Scope != telemetry.ScopeClipAbsolute {
+	if tel.Scope != fitactivity.ScopeClipAbsolute {
 		t.Errorf("Scope = %v, want clip-absolute -- --telemetry-scope did not reach the effect", tel.Scope)
 	}
 
@@ -2973,9 +2974,9 @@ func TestConfigureEffect_TelemetryHUDAllFields(t *testing.T) {
 			ElevationGain:      -1,
 			ElevationLoss:      -1,
 			LayoutMode:         "POISON",
-			PowerSource:        telemetry.PowerStryd,
-			Scope:              telemetry.ScopeClipAbsolute,
-			TimeMode:           telemetry.TimeActive,
+			PowerSource:        fitactivity.PowerStryd,
+			Scope:              fitactivity.ScopeClipAbsolute,
+			TimeMode:           fitactivity.TimeActive,
 		}
 	}
 
@@ -3005,13 +3006,13 @@ func TestConfigureEffect_TelemetryHUDAllFields(t *testing.T) {
 		if h.LayoutMode != "vertical" {
 			t.Errorf("LayoutMode = %q, want %q -- --hud-layout did not reach the effect", h.LayoutMode, "vertical")
 		}
-		if h.PowerSource != telemetry.PowerNative {
+		if h.PowerSource != fitactivity.PowerNative {
 			t.Errorf("PowerSource = %v, want PowerNative -- --power-source did not reach the effect", h.PowerSource)
 		}
-		if h.Scope != telemetry.ScopeClipRebased {
+		if h.Scope != fitactivity.ScopeClipRebased {
 			t.Errorf("Scope = %v, want clip-rebased -- --telemetry-scope did not reach the effect", h.Scope)
 		}
-		if h.TimeMode != telemetry.TimeElapsed {
+		if h.TimeMode != fitactivity.TimeElapsed {
 			t.Errorf("TimeMode = %v, want TimeElapsed -- --hud-time did not reach the effect", h.TimeMode)
 		}
 	})
@@ -3022,7 +3023,7 @@ func TestConfigureEffect_TelemetryHUDAllFields(t *testing.T) {
 		if err := configureEffect(h, pflag.NewFlagSet("test", pflag.ContinueOnError)); err != nil {
 			t.Fatalf("configureEffect: %v", err)
 		}
-		if h.PowerSource != telemetry.PowerAuto {
+		if h.PowerSource != fitactivity.PowerAuto {
 			t.Errorf("PowerSource = %v, want PowerAuto", h.PowerSource)
 		}
 	})
@@ -3037,7 +3038,7 @@ func TestConfigureEffect_TelemetryHUDAllFields(t *testing.T) {
 		if err := configureEffect(h, pflag.NewFlagSet("test", pflag.ContinueOnError)); err != nil {
 			t.Fatalf("configureEffect: %v", err)
 		}
-		if h.TimeMode != telemetry.TimeClock {
+		if h.TimeMode != fitactivity.TimeClock {
 			t.Errorf("TimeMode = %v, want TimeClock", h.TimeMode)
 		}
 	})
@@ -3053,7 +3054,7 @@ func TestConfigureEffect_TelemetryHUDAllFields(t *testing.T) {
 		if err := configureEffect(h, pflag.NewFlagSet("test", pflag.ContinueOnError)); err != nil {
 			t.Fatalf("configureEffect: %v", err)
 		}
-		if h.Scope != telemetry.ScopeActivity {
+		if h.Scope != fitactivity.ScopeActivity {
 			t.Errorf("Scope = %v, want full -- --telemetry-scope full must restore the whole-activity default, not leave whatever was there", h.Scope)
 		}
 	})
@@ -3077,7 +3078,7 @@ func TestConfigureEffect_RotateAllFields(t *testing.T) {
 }
 
 // TestNewRootCmd_TelemetryScopeDefaultsToFull pins the default, which is the
-// whole point of shipping this opt-in: "full" maps to telemetry.ScopeActivity,
+// whole point of shipping this opt-in: "full" maps to fitactivity.ScopeActivity,
 // the behaviour every existing invocation already gets. Flipping the default to
 // a clip mode would silently re-origin every HUD gauge and every SRT distance
 // column in a run whose command line did not change.
@@ -3089,7 +3090,7 @@ func TestNewRootCmd_TelemetryScopeDefaultsToFull(t *testing.T) {
 	if f.DefValue != "full" {
 		t.Errorf("--telemetry-scope default = %q, want \"full\"", f.DefValue)
 	}
-	if got := parseTelemetryScope(f.DefValue); got != telemetry.ScopeActivity {
+	if got := parseTelemetryScope(f.DefValue); got != fitactivity.ScopeActivity {
 		t.Errorf("the default value %q parses to %v, want the whole activity", f.DefValue, got)
 	}
 }
@@ -3137,7 +3138,7 @@ func TestValidateTelemetryScope_AcceptsExactlyTheThreeCanonicalValues(t *testing
 
 // TestTelemetryScopeModes_RoundTripsEveryScopeSpelling binds the two tables
 // that spell these three words: telemetryScopeModes here, and
-// telemetry.Scope.String() in the other package. Nothing in the type system
+// fitactivity.Scope.String() in the other package. Nothing in the type system
 // connects them, so renaming a value in one leaves the other -- the flag the
 // user types, or the log line that narrates what it did -- saying the old word,
 // with every existing test still green.
@@ -3153,7 +3154,7 @@ func TestValidateTelemetryScope_AcceptsExactlyTheThreeCanonicalValues(t *testing
 // is the realistic drift -- one of the two tables updated and not the other, in
 // either direction -- which for a three-value hand-written enum is the right
 // amount. A scope defined in neither table is not caught by any test here or in
-// internal/telemetry; what it has instead is a loud runtime symptom, since
+// fitactivity; what it has instead is a loud runtime symptom, since
 // every log line naming it reads "unknown".
 func TestTelemetryScopeModes_RoundTripsEveryScopeSpelling(t *testing.T) {
 	// 32 is arbitrary but far past any plausible count; Scope is a small
@@ -3162,7 +3163,7 @@ func TestTelemetryScopeModes_RoundTripsEveryScopeSpelling(t *testing.T) {
 
 	named := 0
 	for i := range scan {
-		s := telemetry.Scope(i)
+		s := fitactivity.Scope(i)
 		name := s.String()
 		if name == "unknown" {
 			continue // not a defined scope
@@ -3170,7 +3171,7 @@ func TestTelemetryScopeModes_RoundTripsEveryScopeSpelling(t *testing.T) {
 		named++
 		got, ok := telemetryScopeModes[name]
 		if !ok {
-			t.Errorf("telemetry.Scope(%d) spells itself %q, but --telemetry-scope does not accept that value; add it to telemetryScopeModes and to the flag's help text", i, name)
+			t.Errorf("fitactivity.Scope(%d) spells itself %q, but --telemetry-scope does not accept that value; add it to telemetryScopeModes and to the flag's help text", i, name)
 			continue
 		}
 		if got != s {
@@ -3255,12 +3256,12 @@ func TestConfigureEffect_TelemetryScopeReachesTheImpliedTelemetryEffect(t *testi
 		switch eff := e.(type) {
 		case *effects.TelemetryHUD:
 			sawHUD = true
-			if eff.Scope != telemetry.ScopeClipRebased {
+			if eff.Scope != fitactivity.ScopeClipRebased {
 				t.Errorf("telemetry-hud Scope = %v, want clip-rebased", eff.Scope)
 			}
 		case *effects.Telemetry:
 			sawTelemetry = true
-			if eff.Scope != telemetry.ScopeClipRebased {
+			if eff.Scope != fitactivity.ScopeClipRebased {
 				t.Errorf("the implied telemetry effect's Scope = %v, want clip-rebased -- its SRT would describe the whole activity under a clip-scoped HUD", eff.Scope)
 			}
 		}
@@ -3292,17 +3293,17 @@ func TestConfigureEffect_TelemetryScopeReachesTheImpliedTelemetryEffect(t *testi
 func TestParseTelemetryScope_UnknownValueFallsBackToTheWholeActivity(t *testing.T) {
 	cases := []struct {
 		mode string
-		want telemetry.Scope
+		want fitactivity.Scope
 		why  string
 	}{
-		{"full", telemetry.ScopeActivity, "the canonical spelling"},
-		{"clip-rebased", telemetry.ScopeClipRebased, "the canonical spelling"},
-		{"clip-absolute", telemetry.ScopeClipAbsolute, "the canonical spelling"},
-		{"", telemetry.ScopeActivity, "an unset flag must not select a clip mode"},
-		{"clip", telemetry.ScopeActivity, "the alias that deliberately does not exist"},
-		{"clipabsolute", telemetry.ScopeActivity, "the typo that motivated the validator"},
-		{"Clip-Rebased", telemetry.ScopeActivity, "the lookup is case-sensitive, and a near-miss must not narrow anything"},
-		{"activity", telemetry.ScopeActivity, "the enum's Go name is not a CLI value"},
+		{"full", fitactivity.ScopeActivity, "the canonical spelling"},
+		{"clip-rebased", fitactivity.ScopeClipRebased, "the canonical spelling"},
+		{"clip-absolute", fitactivity.ScopeClipAbsolute, "the canonical spelling"},
+		{"", fitactivity.ScopeActivity, "an unset flag must not select a clip mode"},
+		{"clip", fitactivity.ScopeActivity, "the alias that deliberately does not exist"},
+		{"clipabsolute", fitactivity.ScopeActivity, "the typo that motivated the validator"},
+		{"Clip-Rebased", fitactivity.ScopeActivity, "the lookup is case-sensitive, and a near-miss must not narrow anything"},
+		{"activity", fitactivity.ScopeActivity, "the enum's Go name is not a CLI value"},
 	}
 	for _, c := range cases {
 		t.Run(c.mode, func(t *testing.T) {
@@ -3381,7 +3382,7 @@ func genHUDClipAt(t *testing.T, path string, seconds int, creation time.Time) {
 // about the scope and not about naming.Resolve.
 //
 // The readout line is pipe-separated with distance first (see
-// telemetry.formatSRTCueBody); the GPS line above it has no pipes and no km
+// fitactivity.formatSRTCueBody); the GPS line above it has no pipes and no km
 // suffix, and the pace field renders "M:SS/km" rather than "N.NN km", so
 // neither is picked up here.
 // It returns hundredths of a kilometre as integers, which is exactly the

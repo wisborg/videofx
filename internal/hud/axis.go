@@ -58,7 +58,7 @@ import (
 // only; the label functions below carry their own consequences and point back.
 //
 // The unit is shared: nothing distinguishes a 2.2 km clip of a marathon from a
-// 2.2 km activity at this layer, and nothing should, because telemetry.Scope
+// 2.2 km activity at this layer, and nothing should, because fitactivity.Scope
 // does not reach internal/hud and must not. The kilometre precision is NOT
 // shared, because the bar has always printed one decimal and the profile whole
 // kilometres. Unifying them is not a tidy-up: it would move one of the two

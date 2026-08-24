@@ -1,6 +1,6 @@
 // Command fitdump is a developer tool, not part of the videofx CLI
 // surface (it is not wired into cmd/root.go and ships no user-facing
-// guarantees) -- the internal/telemetry equivalent of cmd/vidiobench. It
+// guarantees) -- the fitactivity equivalent of cmd/vidiobench. It
 // exists to answer questions cheaply and repeatably while building the
 // FIT-telemetry-overlay feature.
 //
@@ -14,7 +14,7 @@
 // Passing -video (without -emit) switches to Phase 2's dry-run mode: it
 // decodes -file, probes -video for its container creation_time and
 // duration, resolves the clip's telemetry window against the FIT file's
-// coverage per internal/telemetry.Resolve (creation_time + -offset + [0,
+// coverage per internal/fitactivity.Resolve (creation_time + -offset + [0,
 // duration]), and prints the interpolated telemetry at the window's
 // start. This is the offset-tuning aid -- run it at a few candidate
 // -offset values and check whether the reported GPS point/distance/speed
@@ -22,9 +22,9 @@
 //
 // Passing -emit=<prefix> (together with -video) switches to Phase 3's
 // emit mode: it does everything dry-run mode does to resolve the clip's
-// window, then builds internal/telemetry.ClipPoints across that window
-// (telemetry.BuildClipPoints) and writes <prefix>.gpx / <prefix>.srt via
-// telemetry.WriteGPX / telemetry.WriteSRT -- the actual sidecars Phase
+// window, then builds internal/fitactivity.ClipPoints across that window
+// (fitactivity.BuildClipPoints) and writes <prefix>.gpx / <prefix>.srt via
+// fitactivity.WriteGPX / fitactivity.WriteSRT -- the actual sidecars Phase
 // 4's effect will eventually produce, minus the ffmpeg mux step itself.
 // It prints a short summary (point/trkpt/trkseg counts, first/last GPX
 // <time>, a couple of sample SRT cues) so a human can sanity-check the
@@ -50,8 +50,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wisborg/fitactivity"
+
 	"videofx/internal/logging"
-	"videofx/internal/telemetry"
 	"videofx/internal/vidio"
 )
 
@@ -103,10 +104,10 @@ const dryRunTSFormat = "2006-01-02T15:04:05.000Z"
 // dryRun implements fitdump's -video mode: resolve fitPath's Track
 // against videoPath's container creation_time and offsetSeconds, and
 // print everything a human needs to judge whether that offset lands on
-// the right point in the recorded activity. See internal/telemetry's
+// the right point in the recorded activity. See fitactivity's
 // Resolve and Track.At for the mechanics.
 func dryRun(fitPath, videoPath string, offsetSeconds float64) error {
-	track, err := telemetry.Decode(fitPath)
+	track, err := fitactivity.Decode(fitPath)
 	if err != nil {
 		return fmt.Errorf("decoding %s: %w", fitPath, err)
 	}
@@ -127,7 +128,7 @@ func dryRun(fitPath, videoPath string, offsetSeconds float64) error {
 
 	offset := time.Duration(offsetSeconds * float64(time.Second))
 	duration := time.Duration(info.Duration * float64(time.Second))
-	sync := telemetry.Resolve(track, info.CreationTime, offset, duration)
+	sync := fitactivity.Resolve(track, info.CreationTime, offset, duration)
 
 	covStart, covEnd := track.Coverage()
 	fmt.Printf("FIT file:         %s\n", fitPath)
@@ -144,10 +145,10 @@ func dryRun(fitPath, videoPath string, offsetSeconds float64) error {
 	fmt.Printf("coverage overlap: %s\n", sync.Overlap)
 
 	switch sync.Overlap {
-	case telemetry.NoOverlap:
+	case fitactivity.NoOverlap:
 		fmt.Println("\nno FIT data at all in this window -- the offset is very likely wrong, or this is the wrong FIT file for this clip")
 		return nil
-	case telemetry.PartialOverlap:
+	case fitactivity.PartialOverlap:
 		fmt.Println("\nwarning: only part of this clip's window falls inside the FIT file's coverage")
 	}
 
@@ -185,14 +186,14 @@ func dryRun(fitPath, videoPath string, offsetSeconds float64) error {
 // emitRun implements fitdump's -emit mode (Phase 3): resolve fitPath's
 // Track against videoPath's container creation_time and offsetSeconds
 // (exactly as dryRun does), build the clip's re-based ClipPoints via
-// telemetry.BuildClipPoints, and write outPrefix+".gpx" /
-// outPrefix+".srt" via telemetry.WriteGPX / telemetry.WriteSRT.
+// fitactivity.BuildClipPoints, and write outPrefix+".gpx" /
+// outPrefix+".srt" via fitactivity.WriteGPX / fitactivity.WriteSRT.
 func emitRun(fitPath, videoPath string, offsetSeconds float64, outPrefix string) error {
 	if videoPath == "" {
 		return fmt.Errorf("-emit requires -video")
 	}
 
-	track, err := telemetry.Decode(fitPath)
+	track, err := fitactivity.Decode(fitPath)
 	if err != nil {
 		return fmt.Errorf("decoding %s: %w", fitPath, err)
 	}
@@ -213,43 +214,43 @@ func emitRun(fitPath, videoPath string, offsetSeconds float64, outPrefix string)
 
 	offset := time.Duration(offsetSeconds * float64(time.Second))
 	duration := time.Duration(info.Duration * float64(time.Second))
-	sync := telemetry.Resolve(track, info.CreationTime, offset, duration)
+	sync := fitactivity.Resolve(track, info.CreationTime, offset, duration)
 
 	switch sync.Overlap {
-	case telemetry.NoOverlap:
+	case fitactivity.NoOverlap:
 		return fmt.Errorf("no FIT data at all in this clip's window (resolved %s .. %s against FIT coverage %s .. %s) -- refusing to emit sidecars with no telemetry in them; the offset is very likely wrong, or this is the wrong FIT file for this clip",
 			sync.Start.Format(dryRunTSFormat), sync.End.Format(dryRunTSFormat), sync.CoverageStart.Format(dryRunTSFormat), sync.CoverageEnd.Format(dryRunTSFormat))
-	case telemetry.PartialOverlap:
+	case fitactivity.PartialOverlap:
 		log.Warnf("only part of this clip's window falls inside %s's coverage; the emitted sidecars will have gaps (or be entirely empty) outside FIT coverage", fitPath)
 	}
 
 	// BuildClipPoints re-bases the lookup (done on the FIT/watch clock,
 	// creation_time+offset+pts) onto the video's own clock
 	// (creation_time+pts) for every emitted point -- see its doc comment
-	// in internal/telemetry/points.go. This is the one call that has to
+	// in fitactivity/points.go. This is the one call that has to
 	// get the offset direction right; everything below just renders
 	// whatever it returns.
-	points := telemetry.BuildClipPoints(track, info.CreationTime, offset, duration, telemetry.DefaultCadence)
+	points := fitactivity.BuildClipPoints(track, info.CreationTime, offset, duration, fitactivity.DefaultCadence)
 	if len(points) == 0 {
 		return fmt.Errorf("BuildClipPoints produced zero points for this window -- likely entirely inside a data gap wider than the default max-gap tolerance")
 	}
 
 	gpxPath, srtPath := outPrefix+".gpx", outPrefix+".srt"
-	fields := telemetry.DefaultFieldOptions()
+	fields := fitactivity.DefaultFieldOptions()
 
 	var gpxBuf, srtBuf bytes.Buffer
 	if err := writeSidecar(gpxPath, &gpxBuf, func(w io.Writer) error {
-		return telemetry.WriteGPX(w, points, telemetry.GPXOptions{Fields: fields})
+		return fitactivity.WriteGPX(w, points, fitactivity.GPXOptions{Fields: fields})
 	}); err != nil {
 		return err
 	}
 	if err := writeSidecar(srtPath, &srtBuf, func(w io.Writer) error {
-		return telemetry.WriteSRT(w, points, telemetry.SRTOptions{Fields: fields})
+		return fitactivity.WriteSRT(w, points, fitactivity.SRTOptions{Fields: fields})
 	}); err != nil {
 		return err
 	}
 
-	trkptCount, trkSegCount := countGPXTrkPtsAndSegs(points, telemetry.DefaultCadence)
+	trkptCount, trkSegCount := countGPXTrkPtsAndSegs(points, fitactivity.DefaultCadence)
 
 	fmt.Printf("FIT file:        %s\n", fitPath)
 	fmt.Printf("video file:      %s\n", videoPath)
@@ -269,7 +270,7 @@ func emitRun(fitPath, videoPath string, offsetSeconds float64, outPrefix string)
 	return nil
 }
 
-// rfc3339UTC mirrors internal/telemetry's own private constant of the
+// rfc3339UTC mirrors fitactivity's own private constant of the
 // same name (gpx.go): a UTC-only RFC3339 layout with a literal "Z", used
 // here purely for this command's own printed summary -- it has no effect
 // on what WriteGPX itself writes to the .gpx file.
@@ -298,11 +299,11 @@ func writeSidecar(path string, buf *bytes.Buffer, write func(io.Writer) error) e
 // is emitted per GPS-having point, and a new <trkseg> starts whenever
 // two consecutive GPS-having points are spaced more than cadence apart
 // in PTS (see WriteGPX's doc comment on gap-driven trkseg splitting in
-// internal/telemetry/gpx.go). This mirrors that logic rather than
+// fitactivity/gpx.go). This mirrors that logic rather than
 // importing it (it isn't exported) since it's only needed here for a
 // human-readable summary line, not for anything that has to match byte
 // for byte.
-func countGPXTrkPtsAndSegs(points []telemetry.ClipPoint, cadence time.Duration) (trkpts, trksegs int) {
+func countGPXTrkPtsAndSegs(points []fitactivity.ClipPoint, cadence time.Duration) (trkpts, trksegs int) {
 	var lastPTS time.Duration
 	inSeg := false
 	for _, p := range points {
@@ -342,7 +343,7 @@ func indentLines(s, prefix string) string {
 }
 
 func run(file string, index int) error {
-	track, err := telemetry.Decode(file)
+	track, err := fitactivity.Decode(file)
 	if err != nil {
 		return fmt.Errorf("decoding %s: %w", file, err)
 	}
@@ -411,7 +412,7 @@ func run(file string, index int) error {
 
 // printSample prints one Sample's every field, explicit about presence
 // rather than just printing the (possibly meaningless, if absent) value.
-func printSample(index int, s telemetry.Sample) {
+func printSample(index int, s fitactivity.Sample) {
 	fmt.Printf("\nsample[%d]:\n", index)
 	fmt.Printf("  time:        %s\n", s.Time.Format("2006-01-02T15:04:05Z"))
 	if s.HasGPS {

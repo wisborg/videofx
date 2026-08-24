@@ -30,7 +30,7 @@ const maxInterpGap = 3 * time.Second
 // At returns the linearly-interpolated value of s at t, and whether one
 // could be produced. t before the first sample or after the last is
 // unresolvable (this package never extrapolates outside a series' actual
-// coverage, the same rule internal/telemetry.Track.At follows) and returns
+// coverage, the same rule fitactivity.Track.At follows) and returns
 // ok=false, as does t falling inside a gap wider than maxInterpGap.
 func (s Series) At(t time.Time) (float64, bool) {
 	n := len(s.Times)
@@ -72,7 +72,7 @@ func (s Series) At(t time.Time) (float64, bool) {
 //     DY, rotation, log-scale) carry a real, roughly linear drift all the
 //     way to the clip's edges (steady forward motion reading as optical
 //     divergence) that must be preserved, not flattened.
-//   - telemetry.gaussianSmooth (internal/telemetry/elevation.go) clamps to
+//   - telemetry.gaussianSmooth (fitactivity/elevation.go) clamps to
 //     the edge value, because an elevation profile has no reason to trend
 //     toward zero or reflect -- the terrain just continues at roughly the
 //     same height past a clipped window.

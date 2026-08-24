@@ -1,6 +1,6 @@
 // Package timesync estimates the clock-skew offset between a video's own
 // camera clock and the clock a Garmin FIT activity's GPS track was recorded
-// on -- the number videofx's --offset flag (and telemetry.Resolve's
+// on -- the number videofx's --offset flag (and fitactivity.Resolve's
 // fit_time = creation_time + offset + pts) needs to line the two up.
 //
 // # The algorithm
@@ -114,7 +114,7 @@
 // # What the number means, and its accuracy
 //
 // tau is exactly the offset in fit_time = creation_time + offset + pts (the
-// same quantity internal/telemetry.Resolve and BuildClipPoints use) -- NOT
+// same quantity fitactivity.Resolve and BuildClipPoints use) -- NOT
 // the corrected creation_time the telemetry effect stamps on its output,
 // which is creation_time + offset.
 //

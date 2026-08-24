@@ -5,18 +5,18 @@ import (
 	"testing"
 	"time"
 
-	"videofx/internal/telemetry"
+	"github.com/wisborg/fitactivity"
 )
 
 // benchCourse builds a realistic whole-marathon course (elevation model,
 // splits, and a downsampled route) for the render benchmarks.
-func benchCourse() (*Course, telemetry.Sample, time.Time) {
+func benchCourse() (*Course, fitactivity.Sample, time.Time) {
 	base := time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC)
 	n := 16000 // ~4.5 h at 1 Hz
-	samples := make([]telemetry.Sample, n)
+	samples := make([]fitactivity.Sample, n)
 	for i := 0; i < n; i++ {
 		d := float64(i) * 2.6 // ~2.6 m/s -> ~42 km
-		samples[i] = telemetry.Sample{
+		samples[i] = fitactivity.Sample{
 			Time:         base.Add(time.Duration(i) * time.Second),
 			HasDistance:  true,
 			Distance:     d,
@@ -27,11 +27,11 @@ func benchCourse() (*Course, telemetry.Sample, time.Time) {
 			Lon:          153.42 + 0.00002*float64(i%2000),
 		}
 	}
-	track := &telemetry.Track{Samples: samples}
+	track := &fitactivity.Track{Samples: samples}
 	course := &Course{
 		TotalDistance: samples[n-1].Distance,
-		Elevation:     telemetry.BuildElevationModel(track, telemetry.ElevationOptions{Sigma: 8}),
-		Splits:        telemetry.BuildSplits(track),
+		Elevation:     fitactivity.BuildElevationModel(track, fitactivity.ElevationOptions{Sigma: 8}),
+		Splits:        fitactivity.BuildSplits(track),
 		Route:         downsampleRoute(track),
 	}
 	// A "current" sample ~halfway.
@@ -39,7 +39,7 @@ func benchCourse() (*Course, telemetry.Sample, time.Time) {
 	return course, cur, cur.Time
 }
 
-func downsampleRoute(track *telemetry.Track) []GeoPoint {
+func downsampleRoute(track *fitactivity.Track) []GeoPoint {
 	var pts []GeoPoint
 	for _, s := range track.Samples {
 		if s.HasGPS {

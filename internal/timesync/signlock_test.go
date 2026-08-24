@@ -14,8 +14,9 @@ import (
 
 	"gocv.io/x/gocv"
 
+	"github.com/wisborg/fitactivity"
+
 	"videofx/internal/stabilize"
-	"videofx/internal/telemetry"
 )
 
 // TestSignLock_RecoversAKnownInjectedOffset is the hermetic sign-lock this
@@ -290,7 +291,7 @@ func encodeGrayFramesTest(t *testing.T, path string, frames []gocv.Mat, w, h, fp
 	}
 }
 
-// buildMatchingTrack builds an in-memory telemetry.Track whose GPS path
+// buildMatchingTrack builds an in-memory fitactivity.Track whose GPS path
 // turns at a constant rateDegPerSec ONLY during the video-pts window
 // (pulseStartSec, pulseEndSec] -- matching the synthetic clip's injected
 // windowed yaw pulse, shifted onto the FIT clock by the injected offset
@@ -300,7 +301,7 @@ func encodeGrayFramesTest(t *testing.T, path string, frames []gocv.Mat, w, h, fp
 // calling test). Sampled at 1Hz from well before the clip's
 // creation_time+tau0 to well after it, so Estimate's tau scan has real
 // coverage everywhere it looks.
-func buildMatchingTrack(creationTime time.Time, tau0, rateDegPerSec, pulseStartSec, pulseEndSec, clipDuration float64) *telemetry.Track {
+func buildMatchingTrack(creationTime time.Time, tau0, rateDegPerSec, pulseStartSec, pulseEndSec, clipDuration float64) *fitactivity.Track {
 	const (
 		lat0, lon0 = -33.0, 151.0
 		speed      = 3.0 // m/s, a plausible running pace
@@ -316,13 +317,13 @@ func buildMatchingTrack(creationTime time.Time, tau0, rateDegPerSec, pulseStartS
 	end := creationTime.Add(time.Duration((tau0 + clipDuration) * float64(time.Second))).Add(pad)
 
 	rateRad := rateDegPerSec * math.Pi / 180
-	var samples []telemetry.Sample
+	var samples []fitactivity.Sample
 	east, north := 0.0, 0.0
 	heading := 0.0 // radians, clockwise from north
 	for tt := start; !tt.After(end); tt = tt.Add(time.Second) {
 		lat := lat0 + north/111132.0
 		lon := lon0 + east/(111320.0*math.Cos(lat0*math.Pi/180))
-		samples = append(samples, telemetry.Sample{Time: tt, HasGPS: true, Lat: lat, Lon: lon})
+		samples = append(samples, fitactivity.Sample{Time: tt, HasGPS: true, Lat: lat, Lon: lon})
 		east += speed * math.Sin(heading)
 		north += speed * math.Cos(heading)
 
@@ -331,5 +332,5 @@ func buildMatchingTrack(creationTime time.Time, tau0, rateDegPerSec, pulseStartS
 			heading += rateRad
 		}
 	}
-	return &telemetry.Track{SourcePath: "signlock.fit", Samples: samples}
+	return &fitactivity.Track{SourcePath: "signlock.fit", Samples: samples}
 }

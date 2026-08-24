@@ -5,10 +5,11 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/wisborg/fitactivity"
+
 	"videofx/internal/logging"
 	"videofx/internal/progress"
 	"videofx/internal/stabilize"
-	"videofx/internal/telemetry"
 	"videofx/internal/timesync"
 	"videofx/internal/vidio"
 )
@@ -47,7 +48,7 @@ func resolveAutoOffset(ctx context.Context, log *logging.Logger, video, fitPath,
 		// loadUsableSidecarForAutoOffset's doc comment.
 	}
 
-	track, err := telemetry.Decode(fitPath)
+	track, err := fitactivity.Decode(fitPath)
 	if err != nil {
 		return 0, fmt.Errorf("--offset auto: decoding %s: %w", fitPath, err)
 	}

@@ -37,6 +37,10 @@ repository.
                              Cobra contributors
   mousetrap (github.com/inconshreveable/mousetrap)
                              Copyright 2022 Alan Shreve (@inconshreveable)
+  fitactivity (github.com/wisborg/fitactivity)
+                             Copyright 2026 Jesper Wisborg Krogh.  The FIT
+                             decoding and activity models, factored out of this
+                             project so fitdash can share them.
 
 
 -------------------------------------------------------------------------------

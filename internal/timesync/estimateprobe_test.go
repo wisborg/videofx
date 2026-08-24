@@ -6,8 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wisborg/fitactivity"
+
 	"videofx/internal/stabilize"
-	"videofx/internal/telemetry"
 	"videofx/internal/vidio"
 )
 
@@ -68,7 +69,7 @@ func TestEstimateProbe(t *testing.T) {
 		t.Logf("warning: %s", w)
 	}
 
-	track, err := telemetry.Decode(fitPath)
+	track, err := fitactivity.Decode(fitPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +131,7 @@ func TestEstimateProbe_Corner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	track, err := telemetry.Decode(fitPath)
+	track, err := fitactivity.Decode(fitPath)
 	if err != nil {
 		t.Fatal(err)
 	}
