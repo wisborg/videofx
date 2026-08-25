@@ -66,11 +66,14 @@ paths: take the clip and the FIT activity as **arguments** (or read them from
 - `internal/effects/` — one file per effect, registered through the `Effect` interface.
 - `internal/stabilize/` — all the motion estimation, smoothing and warping.
 - `internal/vidio/` — decode/encode/probe/trim; `internal/hud/` — the gauge overlay.
-- FIT parsing lives OUTSIDE this repo, in `github.com/wisborg/fitactivity` (checked out
-  at `../fitactivity`, wired in by a `replace` directive in `go.mod` until it is
-  published). What used to be `internal/telemetry` and `internal/fittest` is that module
-  now; it is shared with the fitdash project, so a change there lands in two consumers
-  and belongs in the library's own branch and test run, not in a videofx commit.
+- FIT parsing lives OUTSIDE this repo, in `github.com/wisborg/fitactivity`, an ordinary
+  tagged dependency. What used to be `internal/telemetry` and `internal/fittest` is that
+  module now; it is shared with the fitdash project, so a change there lands in two
+  consumers and belongs in the library's own repository, branch and test run, not in a
+  videofx commit. To work on both at once, add a temporary
+  `replace github.com/wisborg/fitactivity => ../fitactivity` and take it out before
+  committing — a `replace` on `main` makes the build depend on a checkout nobody else
+  has.
 
 ## Measurement tools
 

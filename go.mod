@@ -20,5 +20,3 @@ require (
 )
 
 require github.com/wisborg/fitactivity v0.1.0
-
-replace github.com/wisborg/fitactivity => ../fitactivity
