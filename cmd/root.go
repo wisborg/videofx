@@ -101,6 +101,14 @@ func NewRootCmd() *cobra.Command {
 		Long: "videofx applies visual effects (e.g. warp stabilization) to one or more\n" +
 			"video files. Inputs are never modified; each result is written to a new\n" +
 			"file named after the input plus a suffix describing the effect.",
+		// Setting Version is what makes cobra add --version at all.
+		//
+		// Cobra answers it BEFORE it validates Args, which is what makes the
+		// flag usable on a root command declaring MinimumNArgs(1): asking a
+		// program what it is should not require handing it a video to work
+		// on. TestVersionFlag_NeedsNoInputVideo pins that ordering, because
+		// it is cobra's behaviour rather than a guarantee this package makes.
+		Version:       version(),
 		Args:          cobra.MinimumNArgs(1),
 		RunE:          runRoot,
 		SilenceUsage:  true,
