@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"sort"
 
-	"videofx/internal/logging"
-	"videofx/internal/progress"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/progress"
 )
 
 // Input carries everything an Effect needs to process a single video.

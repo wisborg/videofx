@@ -10,7 +10,7 @@ import (
 
 	"gocv.io/x/gocv"
 
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 // TestParallaxProbe asks the question that the residual accounting left open:

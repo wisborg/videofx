@@ -5,7 +5,7 @@ import (
 	"math"
 	"time"
 
-	"videofx/internal/stabilize"
+	"github.com/wisborg/videofx/internal/stabilize"
 )
 
 const (

@@ -7,11 +7,11 @@ import (
 
 	"github.com/wisborg/fitactivity"
 
-	"videofx/internal/logging"
-	"videofx/internal/progress"
-	"videofx/internal/stabilize"
-	"videofx/internal/timesync"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/progress"
+	"github.com/wisborg/videofx/internal/stabilize"
+	"github.com/wisborg/videofx/internal/timesync"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 // resolveAutoOffset is --offset auto's expensive path: probe video, load or

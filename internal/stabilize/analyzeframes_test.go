@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 // generateAnalysisSource builds a synthetic ffmpeg lavfi test-pattern source

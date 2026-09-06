@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"videofx/internal/stabilize"
+	"github.com/wisborg/videofx/internal/stabilize"
 )
 
 // reliableLens builds a LensCalibration that Reliable() accepts (Forced,

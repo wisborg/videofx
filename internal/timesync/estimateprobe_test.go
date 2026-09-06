@@ -8,8 +8,8 @@ import (
 
 	"github.com/wisborg/fitactivity"
 
-	"videofx/internal/stabilize"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/stabilize"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 // TestEstimateProbe is the acceptance run for this package: given a real

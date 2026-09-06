@@ -10,7 +10,7 @@ import (
 
 	"gocv.io/x/gocv"
 
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 // EdgeMode selects how Render hides (or fills) the border artifacts a

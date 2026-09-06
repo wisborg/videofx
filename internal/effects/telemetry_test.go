@@ -18,8 +18,8 @@ import (
 	"github.com/wisborg/fitactivity"
 	"github.com/wisborg/fitactivity/fittest"
 
-	"videofx/internal/logging"
-	"videofx/internal/runner"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/runner"
 )
 
 // fitFixture caches the generated activity across the tests in this package.

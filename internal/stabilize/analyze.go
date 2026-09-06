@@ -6,7 +6,7 @@ import (
 
 	"gocv.io/x/gocv"
 
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 // lensCalibrationPairs is how many frame pairs the rotation model buffers to

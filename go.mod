@@ -1,4 +1,4 @@
-module videofx
+module github.com/wisborg/videofx
 
 go 1.25.0
 

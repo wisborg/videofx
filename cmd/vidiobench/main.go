@@ -94,9 +94,9 @@ import (
 	"syscall"
 	"time"
 
-	"videofx/internal/logging"
-	"videofx/internal/stabilize"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/stabilize"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 func main() {

@@ -11,11 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"videofx/internal/effects"
-	"videofx/internal/logging"
-	"videofx/internal/naming"
-	"videofx/internal/progress"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/effects"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/naming"
+	"github.com/wisborg/videofx/internal/progress"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 // Job describes a single video to process.

@@ -31,8 +31,8 @@ import (
 
 	"gocv.io/x/gocv"
 
-	"videofx/internal/logging"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 func main() {

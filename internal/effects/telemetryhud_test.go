@@ -24,10 +24,10 @@ import (
 	"github.com/wisborg/fitactivity"
 	"github.com/wisborg/fitactivity/fittest"
 
-	"videofx/internal/hud"
-	"videofx/internal/logging"
-	"videofx/internal/progress"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/hud"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/progress"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 func TestTelemetryHUD_NameAndSlug(t *testing.T) {

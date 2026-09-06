@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strconv"
 
-	"videofx/internal/logging"
-	"videofx/internal/runner"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/runner"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 func init() {

@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	"videofx/internal/logging"
-	"videofx/internal/progress"
-	"videofx/internal/stabilize"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/progress"
+	"github.com/wisborg/videofx/internal/stabilize"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 func init() {

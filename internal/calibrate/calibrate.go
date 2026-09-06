@@ -28,8 +28,8 @@ import (
 	"strconv"
 	"strings"
 
-	"videofx/internal/runner"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/runner"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 // DefaultCandidates is the -q:v sweep used when Options.Candidates is empty.

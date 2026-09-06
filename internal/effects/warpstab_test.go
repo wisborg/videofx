@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"videofx/internal/logging"
-	"videofx/internal/progress"
-	"videofx/internal/runner"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/progress"
+	"github.com/wisborg/videofx/internal/runner"
 )
 
 type fakeCall struct {

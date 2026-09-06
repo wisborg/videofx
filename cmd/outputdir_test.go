@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/logging"
 )
 
 func TestPrepareOutputDir_CreatesAMissingDirectoryIncludingParents(t *testing.T) {

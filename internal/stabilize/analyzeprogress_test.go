@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 // TestAnalyze_ProgressCallbackFiresOncePerDecodedFrameInOrder pins the

@@ -11,10 +11,10 @@ import (
 
 	"github.com/wisborg/output/table"
 
-	"videofx/internal/calibrate"
-	"videofx/internal/cliutil"
-	"videofx/internal/logging"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/calibrate"
+	"github.com/wisborg/videofx/internal/cliutil"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 var (

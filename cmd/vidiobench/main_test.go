@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"videofx/internal/stabilize"
+	"github.com/wisborg/videofx/internal/stabilize"
 )
 
 // TestRenderModelResolution covers which correction path -mode=render selects.

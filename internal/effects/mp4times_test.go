@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"videofx/internal/logging"
-	"videofx/internal/runner"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/runner"
 )
 
 // patchFirstTrakTkhdCreationTime writes value into the creation_time field of

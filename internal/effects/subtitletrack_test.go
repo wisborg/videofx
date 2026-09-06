@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"videofx/internal/logging"
-	"videofx/internal/runner"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/runner"
 )
 
 // subtitleTrackState reports, for the single subtitle track of an mp4, whether

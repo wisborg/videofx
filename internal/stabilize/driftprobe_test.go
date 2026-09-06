@@ -10,7 +10,7 @@ import (
 
 	"gocv.io/x/gocv"
 
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 // TestDriftProbe is a THROWAWAY probe (delete once the long-track question is

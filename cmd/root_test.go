@@ -21,15 +21,15 @@ import (
 	"github.com/wisborg/fitactivity"
 	"github.com/wisborg/fitactivity/fittest"
 
-	"videofx/internal/calibrate"
-	"videofx/internal/cliutil"
-	"videofx/internal/effects"
-	"videofx/internal/hud"
-	"videofx/internal/logging"
-	"videofx/internal/progress"
-	"videofx/internal/stabilize"
-	"videofx/internal/video"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/calibrate"
+	"github.com/wisborg/videofx/internal/cliutil"
+	"github.com/wisborg/videofx/internal/effects"
+	"github.com/wisborg/videofx/internal/hud"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/progress"
+	"github.com/wisborg/videofx/internal/stabilize"
+	"github.com/wisborg/videofx/internal/video"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 // getEffect resolves one effect by name through the registry, so these tests

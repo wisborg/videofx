@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"videofx/internal/logging"
-	"videofx/internal/runner"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/runner"
 )
 
 // The metadata key this project was measured to lose across effects that

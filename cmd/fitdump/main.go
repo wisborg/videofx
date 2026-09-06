@@ -52,8 +52,8 @@ import (
 
 	"github.com/wisborg/fitactivity"
 
-	"videofx/internal/logging"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 // log is where fitdump's warnings and failures go. Its REPORT -- the counts,

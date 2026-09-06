@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"videofx/internal/runner"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/runner"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 // TestComposedDisplayRotation pins the clockwise-composition math: the value

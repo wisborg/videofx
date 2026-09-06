@@ -18,14 +18,14 @@ import (
 
 	"github.com/wisborg/fitactivity"
 
-	"videofx/internal/cliutil"
-	"videofx/internal/effects"
-	"videofx/internal/logging"
-	"videofx/internal/progress"
-	"videofx/internal/runner"
-	"videofx/internal/stabilize"
-	"videofx/internal/video"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/cliutil"
+	"github.com/wisborg/videofx/internal/effects"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/progress"
+	"github.com/wisborg/videofx/internal/runner"
+	"github.com/wisborg/videofx/internal/stabilize"
+	"github.com/wisborg/videofx/internal/video"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 var (

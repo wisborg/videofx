@@ -9,9 +9,9 @@ import (
 
 	"github.com/wisborg/fitactivity"
 
-	"videofx/internal/stabilize"
-	"videofx/internal/timesync"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/stabilize"
+	"github.com/wisborg/videofx/internal/timesync"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 func TestParseEstimateOffsetFlags_Defaults(t *testing.T) {

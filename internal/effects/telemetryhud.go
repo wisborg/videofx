@@ -10,10 +10,10 @@ import (
 
 	"github.com/wisborg/fitactivity"
 
-	"videofx/internal/hud"
-	"videofx/internal/logging"
-	"videofx/internal/progress"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/hud"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/progress"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 func init() {

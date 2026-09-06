@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"videofx/internal/effects"
-	"videofx/internal/timesync"
+	"github.com/wisborg/videofx/internal/effects"
+	"github.com/wisborg/videofx/internal/timesync"
 )
 
 func TestParseOffsetSpec_AcceptsAutoAndSignedDecimals(t *testing.T) {

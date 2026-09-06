@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 // appleQuickTimeLocationTag is the one location key QuickTime, Photos and

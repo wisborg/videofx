@@ -16,7 +16,7 @@ import (
 
 	"github.com/wisborg/fitactivity"
 
-	"videofx/internal/stabilize"
+	"github.com/wisborg/videofx/internal/stabilize"
 )
 
 // TestSignLock_RecoversAKnownInjectedOffset is the hermetic sign-lock this

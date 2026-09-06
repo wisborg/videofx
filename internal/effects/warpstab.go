@@ -10,10 +10,10 @@ import (
 	"strconv"
 	"strings"
 
-	"videofx/internal/logging"
-	"videofx/internal/progress"
-	"videofx/internal/runner"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/progress"
+	"github.com/wisborg/videofx/internal/runner"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 func init() {

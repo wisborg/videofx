@@ -12,9 +12,9 @@ import (
 	"strings"
 	"testing"
 
-	"videofx/internal/logging"
-	"videofx/internal/runner"
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/logging"
+	"github.com/wisborg/videofx/internal/runner"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 // identifyingChapterOne, identifyingChapterTwo are the two chapter titles

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 // generateTinyTestSource builds a small, fast-to-decode/encode synthetic

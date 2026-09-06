@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 func TestParseVMAFScore(t *testing.T) {

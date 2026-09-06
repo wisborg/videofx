@@ -10,7 +10,7 @@ import (
 
 	"gocv.io/x/gocv"
 
-	"videofx/internal/vidio"
+	"github.com/wisborg/videofx/internal/vidio"
 )
 
 // TestLensProbe is the measurement that justifies the rotation model, kept so

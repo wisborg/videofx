@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"videofx/internal/runner"
+	"github.com/wisborg/videofx/internal/runner"
 )
 
 // TestVerifyStripped_PassesACleanOutput is the control for the tests below:

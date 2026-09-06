@@ -1,6 +1,6 @@
 package main
 
-import "videofx/cmd"
+import "github.com/wisborg/videofx/cmd"
 
 func main() {
 	cmd.Execute()
