@@ -31,6 +31,11 @@ func TestFormatVersion(t *testing.T) {
 		want: "devel (186f3580a4e4, dirty)",
 		why:  "a dirty build is not the commit it names and must say so once",
 	}, {
+		name: "dirty at a tag says dirty once, not twice",
+		main: "v0.1.0+dirty", rev: rev, dirt: true,
+		want: "v0.1.0 (186f3580a4e4, dirty)",
+		why:  "+dirty is build metadata repeating what the dirty flag already reports",
+	}, {
 		name: "checkout with no module version",
 		main: "(devel)", rev: rev,
 		want: "devel (186f3580a4e4)",

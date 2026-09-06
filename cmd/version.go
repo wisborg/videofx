@@ -65,7 +65,13 @@ func version() string {
 //     is reported even when no revision came with it, so a stamped
 //     modification can never pass for a clean build.
 func formatVersion(mainVersion, revision, built, goVersion string, dirty bool) string {
-	v := mainVersion
+	// The toolchain appends "+dirty" as semver build metadata when the tree
+	// was modified. Dirtiness is already reported beside the revision, in one
+	// place, for every build -- so keeping the suffix as well prints the same
+	// fact twice and makes a tagged dirty build read as though "+dirty" were
+	// part of the release's name, which it is not. The suffix goes; the
+	// dirty flag is what reports it.
+	v := strings.TrimSuffix(mainVersion, "+dirty")
 	if v == "" || v == "(devel)" || (revision != "" && strings.Contains(v, shortRevision(revision))) {
 		v = "devel"
 	}
