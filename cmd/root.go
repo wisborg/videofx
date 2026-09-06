@@ -236,6 +236,20 @@ func NewRootCmd() *cobra.Command {
 	// process a clip either.
 	root.AddCommand(newEstimateOffsetCmd())
 
+	// cobra creates the `completion` command lazily, during Execute, so it
+	// is asked for explicitly here in order to hang `install` beneath it.
+	// The alternative -- a top-level command of our own -- would put the
+	// install step somewhere nobody looks: a person who wants completion
+	// types `videofx completion` first, and should find the whole story
+	// there rather than two commands that do not mention each other.
+	root.InitDefaultCompletionCmd()
+	for _, c := range root.Commands() {
+		if c.Name() == "completion" {
+			c.AddCommand(newCompletionInstallCmd(root))
+			break
+		}
+	}
+
 	return root
 }
 
