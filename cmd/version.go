@@ -5,20 +5,43 @@ import (
 	"strings"
 )
 
+// described is set at link time by the Makefile to `git describe --tags`,
+// e.g. "v0.1.0-1-ge9c0288" -- the last release, how far past it this commit
+// is, and which commit.
+//
+// It exists because the build information alone cannot answer "which release
+// is this near". The toolchain records the revision but not the nearest tag,
+// so a build one commit past a release reports only "devel", and finding out
+// what that is near takes a second lookup in the repository. That is a poor
+// answer to somebody holding a binary and asking what it is.
+//
+// This is NOT the hardcoded version string this file otherwise refuses. It is
+// derived from the repository at build time, by the same git the VCS stamp
+// comes from, so it cannot be forgotten or bumped wrongly -- the failure mode
+// of a written-down version is that somebody has to remember it, and nobody
+// has to remember this.
+//
+// Empty when built any other way (a bare `go build`, which this project
+// warns against for its own reasons, or `go install` from a published tag).
+// Both fall back to the build information, which for an installed release
+// names the tag outright and needs no help.
+var described string
+
 // version reports what this binary actually is, read from the build
 // information the Go toolchain embeds rather than from a constant in the
 // source.
 //
-// A hardcoded version string is a value somebody has to remember to bump, and
-// the failure it produces is silent: a binary confidently naming the release
-// before the one it was actually cut from, with nothing anywhere to reveal
-// the mistake. Reading it from the build means the fact is never written down
+// A hardcoded version string is a value that has to be remembered, and the
+// failure it produces is silent: a binary confidently naming the release
+// before the one it was actually cut from, with nothing to reveal the
+// mistake. Reading it from the build means the fact is never written down
 // twice, so it cannot come to disagree with itself.
 //
-// This matters more here than in most programs. videofx renders take a long
-// time and their output is a file somebody keeps; being able to ask a
-// finished render's producer what it was is how a result gets traced back to
-// the code that made it.
+// This matters more here than in most programs. A render takes a long time
+// and its output is a file somebody keeps, sometimes long after the source
+// has moved on; being able to ask a finished render's producer what it was
+// is how a result gets traced back to the code that made it.
+
 func version() string {
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
@@ -38,13 +61,13 @@ func version() string {
 			dirty = s.Value == "true"
 		}
 	}
-	return formatVersion(info.Main.Version, revision, built, info.GoVersion, dirty)
+	return formatVersion(described, info.Main.Version, revision, built, info.GoVersion, dirty)
 }
 
 // formatVersion composes the reported version from the four facts the build
 // carries. It is separate from version() so the judgements below can be
 // tested against inputs a test can actually produce -- a test binary's own
-// build information describes the test binary, not a release, so it could
+// build information describes the test binary, not a release, so it can
 // never exercise the case that matters most.
 //
 // The judgements, in order:
@@ -54,17 +77,24 @@ func version() string {
 //     restates the revision and the dirty flag, so printing it beside them
 //     says everything twice and buries the one word a reader wants, which is
 //     that this is not a release at all. It is detected by asking whether it
-//     contains the revision -- exactly the question being asked, does this
-//     version add anything the revision has not already said, rather than a
-//     guess at the toolchain's format that a later Go release could quietly
-//     invalidate.
+//     contains the revision -- which is exactly the question being asked,
+//     does this version add anything the revision has not already said,
+//     rather than a guess at the toolchain's format.
 //
 //   - vcs.modified is reported prominently, because a binary built from a
 //     dirty tree IS NOT the commit it names, and a bug report quoting that
-//     commit would send somebody to read source that was never compiled. It
-//     is reported even when no revision came with it, so a stamped
+//     commit would send somebody to read source that was never compiled.
+//     It is reported even when no revision came with it, so a stamped
 //     modification can never pass for a clean build.
-func formatVersion(mainVersion, revision, built, goVersion string, dirty bool) string {
+func formatVersion(described, mainVersion, revision, built, goVersion string, dirty bool) string {
+	// A git describe string already names the commit ("...-ge9c0288"), so
+	// the revision is suppressed rather than printed again beside it. What
+	// stays is the dirty flag, which describe is deliberately not asked for
+	// (--dirty) precisely so there is one spelling of that fact and not two.
+	if described != "" {
+		return joinVersion(described, "", built, goVersion, dirty)
+	}
+
 	// The toolchain appends "+dirty" as semver build metadata when the tree
 	// was modified. Dirtiness is already reported beside the revision, in one
 	// place, for every build -- so keeping the suffix as well prints the same
@@ -75,6 +105,12 @@ func formatVersion(mainVersion, revision, built, goVersion string, dirty bool) s
 	if v == "" || v == "(devel)" || (revision != "" && strings.Contains(v, shortRevision(revision))) {
 		v = "devel"
 	}
+	return joinVersion(v, revision, built, goVersion, dirty)
+}
+
+// joinVersion assembles the reported line from an already-chosen version
+// string. An empty revision means the version already names the commit.
+func joinVersion(v, revision, built, goVersion string, dirty bool) string {
 	parts := []string{v}
 
 	switch {

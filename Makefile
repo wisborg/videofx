@@ -10,8 +10,21 @@ export CGO_CXXFLAGS := --std=c++11
 
 .PHONY: build test run vet clean check-deps
 
+# -X stamps `git describe` into cmd.described, so a binary built from a
+# checkout can say which release it is near instead of only "devel" plus a
+# hash, which takes a second lookup to interpret. It is DERIVED, not written
+# down: nobody has to remember to bump it.
+#
+# Deliberately not --dirty. A modified tree is already reported from the
+# toolchain's own vcs.modified stamp, for every build however it was made,
+# and asking describe for it too would print the fact twice.
+#
+# Empty if the repository has no tags yet, and empty for anyone running
+# `go build` directly; cmd.version falls back to the build information.
+DESCRIBED := $(shell git describe --tags 2>/dev/null)
+
 build:
-	go build -o videofx .
+	go build -ldflags "-X 'github.com/wisborg/videofx/cmd.described=$(DESCRIBED)'" -o videofx .
 
 test:
 	go test ./...
