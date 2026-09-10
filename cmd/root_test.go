@@ -2277,19 +2277,19 @@ func TestBuildProgressConfig(t *testing.T) {
 	infoLog := logging.New(io.Discard, logging.LevelInfo)
 	warnLog := logging.New(io.Discard, logging.LevelWarn)
 
-	if got := buildProgressConfig(0, infoLog); got != nil {
-		t.Errorf("buildProgressConfig(0, infoLog) = %+v, want nil (0 means off)", got)
+	if got := buildProgressConfig(0, infoLog, nil); got != nil {
+		t.Errorf("buildProgressConfig(0, infoLog, nil) = %+v, want nil (0 means off)", got)
 	}
-	if got := buildProgressConfig(-5, infoLog); got != nil {
-		t.Errorf("buildProgressConfig(-5, infoLog) = %+v, want nil", got)
+	if got := buildProgressConfig(-5, infoLog, nil); got != nil {
+		t.Errorf("buildProgressConfig(-5, infoLog, nil) = %+v, want nil", got)
 	}
-	if got := buildProgressConfig(300, warnLog); got != nil {
-		t.Errorf("buildProgressConfig(300, warnLog) = %+v, want nil (--log-level warn drops info-level progress lines anyway)", got)
+	if got := buildProgressConfig(300, warnLog, nil); got != nil {
+		t.Errorf("buildProgressConfig(300, warnLog, nil) = %+v, want nil (--log-level warn drops info-level progress lines anyway)", got)
 	}
 
-	got := buildProgressConfig(300, infoLog)
+	got := buildProgressConfig(300, infoLog, nil)
 	if got == nil {
-		t.Fatal("buildProgressConfig(300, infoLog) = nil, want a Config")
+		t.Fatal("buildProgressConfig(300, infoLog, nil) = nil, want a Config")
 	}
 	if got.Interval != 300*time.Second {
 		t.Errorf("Interval = %v, want 300s", got.Interval)
@@ -2351,7 +2351,7 @@ func TestProgressWarmUp_FirstLineArrivesLongBeforeTheDefaultInterval(t *testing.
 		t.Fatalf("the --progress-interval default %q does not parse: %v", defValue, err)
 	}
 
-	cfg := buildProgressConfig(seconds, logging.New(io.Discard, logging.LevelInfo))
+	cfg := buildProgressConfig(seconds, logging.New(io.Discard, logging.LevelInfo), nil)
 	if cfg == nil {
 		t.Fatalf("buildProgressConfig(%v, an info logger) = nil; the shipped default must enable progress reporting", seconds)
 	}

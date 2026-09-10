@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/wisborg/fitactivity"
 
@@ -39,7 +40,8 @@ func resolveAutoOffset(ctx context.Context, log *logging.Logger, video, fitPath,
 	if series == nil {
 		opts := stabilize.DefaultOptions()
 		opts.WarpModel = stabilize.WarpModelRotation
-		analyzeProgress := progress.New(progressCfg, "analyzing (--offset auto)", func(m string) { log.Infof("%s", m) })
+		analyzeProgress := progress.NewFor(progressCfg, filepath.Base(video), "analyzing (--offset auto)", func(m string) { log.Infof("%s", m) })
+		defer analyzeProgress.Done()
 		series, err = stabilize.Analyze(ctx, video, opts, analyzeProgress.Report)
 		if err != nil {
 			return 0, fmt.Errorf("--offset auto: analyzing %s: %w", video, err)

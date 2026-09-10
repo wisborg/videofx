@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image"
 	"math"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -555,7 +556,8 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	// report one. Here frameCount already came out of the vidio.Probe this
 	// Apply needed anyway (for FPS/dimensions), so there is nothing extra to
 	// fetch before building the Reporter.
-	overlayProgress := progress.New(in.Progress, "overlaying", progressEmitter(log))
+	overlayProgress := progress.NewFor(in.Progress, filepath.Base(in.SourcePath), "overlaying", progressEmitter(log))
+	defer overlayProgress.Done()
 
 	for i := 0; i < frameCount; i++ {
 		if i%256 == 0 {

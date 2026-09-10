@@ -194,8 +194,16 @@ func (w *WarpStabilizer) Apply(ctx context.Context, in Input) error {
 	// unconditionally is cheap -- progress.New does no I/O, and a nil
 	// *progress.Config (in.Progress unset, or --progress-interval disabled)
 	// makes both nil with nothing else to check.
-	detectProgress := progress.New(in.Progress, "detecting", progressEmitter(log))
-	transformProgress := progress.New(in.Progress, "transforming", progressEmitter(log))
+	clip := filepath.Base(in.SourcePath)
+	detectProgress := progress.NewFor(in.Progress, clip, "detecting", progressEmitter(log))
+	transformProgress := progress.NewFor(in.Progress, clip, "transforming", progressEmitter(log))
+	// Both released here rather than when each pass ends: they are built
+	// together and up front (see above), and a bar for a pass that has not
+	// started yet reports 0 of an unknown total, which is honest -- the work
+	// is queued. Leaving them to the end of Apply keeps that symmetry and
+	// costs one extra line on screen during the first pass.
+	defer detectProgress.Done()
+	defer transformProgress.Done()
 
 	// A probe failure must disable progress for this job, never fail the
 	// render: reporting is a diagnostic layered on top of a render that was

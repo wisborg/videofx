@@ -4,7 +4,10 @@
 // Report(done, total) once per frame; everything about whether that turns
 // into visible output -- and what it says -- lives here.
 //
-// This package imports the standard library ONLY. internal/runner reports
+// This package has NO repo-internal dependencies, which is the constraint
+// that matters and is unchanged: it imports the standard library plus
+// github.com/wisborg/output/progress, the shared package that draws the bar.
+// internal/runner reports
 // progress through a bare onFrame func(frame int) (see ProgressRunner), not
 // this package's Reporter, precisely so it never has to import this package
 // or internal/effects (see the cycle note at the top of runner/ffmpeg.go);
@@ -22,6 +25,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	outprogress "github.com/wisborg/output/progress"
 )
 
 // Config controls how often a Reporter is willing to emit a line.
@@ -51,6 +56,20 @@ type Config struct {
 	// Now stands in for time.Now, so a test can drive the reporter with an
 	// injected clock instead of sleeping. A nil Now uses time.Now.
 	Now func() time.Time
+
+	// Display, when it is live, is where progress is DRAWN as a bar rather
+	// than emitted as log lines. A nil Display, or one writing somewhere
+	// that is not a terminal, leaves every Reporter on the emit path below,
+	// which is this package's original behaviour and stays the behaviour of
+	// any redirected run.
+	//
+	// The two are not interchangeable and the choice is not about taste. A
+	// bar is better to watch and useless to keep: it is overwritten in
+	// place, it carries no timestamp, and it is gone when the run ends. A
+	// log line is the opposite, and a redirected run is being kept -- so it
+	// goes on carrying its timestamp, its severity, and the clip it belongs
+	// to, filtered by --log-level like everything else videofx writes.
+	Display *outprogress.Display
 }
 
 // New builds a Reporter that emits through emit, prefixing every line with
@@ -77,11 +96,41 @@ type Config struct {
 // one into "disabled" would let that bug produce permanent silence with no
 // error -- this codebase's signature failure mode.
 func New(cfg *Config, phase string, emit func(string)) *Reporter {
+	return NewFor(cfg, "", phase, emit)
+}
+
+// NewFor is New with a label naming the work a live bar is reporting on --
+// the clip, ordinarily.
+//
+// It exists because the two output shapes identify the work differently and
+// only one of them can do it on its own. A log line is already attributed:
+// the caller's logger carries the effect's name and the file as a field, so
+// the line only has to say which phase it is. A bar has none of that, and
+// with --concurrency above one there are several on screen at once, so
+// without a label a viewer cannot tell which clip is which. The label is
+// therefore used ONLY on the bar, and the emitted line is unchanged -- adding
+// it there would repeat what the logger already prints beside it.
+func NewFor(cfg *Config, label, phase string, emit func(string)) *Reporter {
 	if cfg == nil || cfg.Interval <= 0 {
 		return nil
 	}
 	if emit == nil {
 		panic("progress: New called with a nil emit func")
+	}
+
+	if cfg.Display.Live() {
+		// Interval is deliberately NOT passed on to the display. It is the
+		// cadence for LINES -- how often a run should add to a log -- and a
+		// bar that redrew every five seconds would look broken. The display
+		// has its own redraw rate for the job of looking continuous.
+		if label == "" {
+			label = phase
+		} else {
+			label += " " + phase
+		}
+		return &Reporter{
+			bar: cfg.Display.Bar(outprogress.BarSpec{Label: label, Unit: "frames"}),
+		}
 	}
 
 	now := cfg.Now
@@ -127,6 +176,15 @@ func New(cfg *Config, phase string, emit func(string)) *Reporter {
 // overlay), and adding a mutex here would tax the hot, non-emitting path
 // that Report's performance contract exists to protect.
 type Reporter struct {
+	// bar is set when this Reporter draws instead of emitting. When it is
+	// set, every field below it is unused: the display owns the throttling,
+	// the rate and the estimate, and Report is a store and a comparison.
+	bar *outprogress.Bar
+	// lastTotal is what the bar was last told the job's size is, so the
+	// common Report -- same total, one more frame -- does not take the
+	// display's lock to say something it already knows.
+	lastTotal int
+
 	phase string
 	emit  func(string)
 
@@ -163,6 +221,17 @@ type Reporter struct {
 // built from a disabled Config (see New) needs no nil check of its own.
 func (r *Reporter) Report(done, total int) {
 	if r == nil {
+		return
+	}
+	if r.bar != nil {
+		// The total is told to the bar only when it changes. It arrives with
+		// every call and almost never differs, and SetTotal takes the
+		// display's lock -- which this path must not do once per frame.
+		if total != r.lastTotal {
+			r.lastTotal = total
+			r.bar.SetTotal(int64(total))
+		}
+		r.bar.Set(int64(done))
 		return
 	}
 
@@ -216,6 +285,21 @@ func (r *Reporter) Report(done, total int) {
 	// Anchoring to now means one late line simply shifts the whole
 	// schedule forward by the same amount it was late.
 	r.nextDue = now.Add(r.interval)
+}
+
+// Done releases this Reporter's bar, taking its line off the display.
+//
+// A phase that has finished is not live, and its bar must go: with several
+// phases and several clips in flight, leaving finished ones on screen would
+// fill the display with bars that never move again. It is a no-op on the
+// emit path -- a log line is already gone by the time the next one is
+// written -- and on a nil *Reporter, so a caller can defer it beside New
+// without knowing which path it got.
+func (r *Reporter) Done() {
+	if r == nil || r.bar == nil {
+		return
+	}
+	r.bar.Done()
 }
 
 // formatLine renders one progress line. It carries no timestamp, level,

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -139,7 +140,7 @@ func runEstimateOffset(cmd *cobra.Command, args []string) error {
 		log.Warnf("%s's creation_time tag has no timezone marker; treating it as UTC, which may be wrong", video)
 	}
 
-	series, err := loadOrAnalyzeForEstimate(ctx, log, video, estOffsetSidecar, buildProgressConfig(progressSeconds, log))
+	series, err := loadOrAnalyzeForEstimate(ctx, log, video, estOffsetSidecar, buildProgressConfig(progressSeconds, log, nil))
 	if err != nil {
 		return err
 	}
@@ -233,7 +234,8 @@ func loadOrAnalyzeForEstimate(ctx context.Context, log *logging.Logger, video, s
 
 	opts := stabilize.DefaultOptions()
 	opts.WarpModel = stabilize.WarpModelRotation
-	analyzeProgress := progress.New(progressCfg, "analyzing", func(m string) { log.Infof("%s", m) })
+	analyzeProgress := progress.NewFor(progressCfg, filepath.Base(video), "analyzing", func(m string) { log.Infof("%s", m) })
+	defer analyzeProgress.Done()
 	series, err := stabilize.Analyze(ctx, video, opts, analyzeProgress.Report)
 	if err != nil {
 		return nil, fmt.Errorf("estimate-offset: analyzing %s: %w", video, err)

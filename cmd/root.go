@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/wisborg/fitactivity"
+	outprogress "github.com/wisborg/output/progress"
 
 	"github.com/wisborg/videofx/internal/cliutil"
 	"github.com/wisborg/videofx/internal/effects"
@@ -136,7 +137,7 @@ func NewRootCmd() *cobra.Command {
 	root.Flags().IntVar(&rotateDeg, "rotate", 0,
 		"rotate effect only (--effect rotate): rotate the video this many degrees CLOCKWISE for display -- 90, 180, or 270. Lossless: it sets the display-rotation flag via stream copy (no re-encode) and composes with any rotation the source already has. Required (and must be 90/180/270) when --effect includes rotate")
 	root.Flags().StringVar(&progressInterval, "progress-interval", "5m",
-		"how often to log a progress line with an ETA during a long operation (analysis, render, HUD overlay). Takes a length: seconds (300), an h/m/s duration (5m, 90s) or a clock duration (5:00). A first line appears shortly after each phase starts, once a usable rate has been measured; 0 turns progress lines off, and so does \"\" -- unlike --duration on calibrate, where an empty value falls back to that command's own default, an empty --progress-interval parses to 0 and disables progress rather than restoring 5m. Lines are logged at info level, so --log-level warn silences them. With --sidecar, a cached run skips analysis entirely and so shows only the render phase")
+		"how often to log a progress line with an ETA during a long operation (analysis, render, HUD overlay). Takes a length: seconds (300), an h/m/s duration (5m, 90s) or a clock duration (5:00). A first line appears shortly after each phase starts, once a usable rate has been measured; 0 turns progress off, and so does \"\" -- unlike --duration on calibrate, where an empty value falls back to that command's own default, an empty --progress-interval parses to 0 and disables progress rather than restoring 5m. On a TERMINAL this draws a live bar per phase instead, labelled with the clip, and the interval does not apply -- a bar redraws at its own rate and this flag only decides whether progress is shown at all. Redirected output keeps the periodic lines, logged at info level, so --log-level warn silences progress either way. With --sidecar, a cached run skips analysis entirely and so shows only the render phase")
 
 	def := effects.DefaultPerfOptions()
 	root.Flags().StringVar(&preset, "preset", def.Preset,
@@ -1109,13 +1110,26 @@ const progressWarmUp = 10 * time.Second
 // nil *Reporter (see progress.Reporter.Report) -- so what this branch saves
 // is not the call itself but the clock read and comparison inside it, paid
 // on every decoded frame for no visible benefit.
-func buildProgressConfig(intervalSeconds float64, log *logging.Logger) *progress.Config {
+// display, when live, turns every Reporter built from this Config into a bar
+// instead of a stream of log lines. Passing a nil one (or one writing
+// somewhere that is not a terminal) leaves the whole feature exactly as it
+// was.
+//
+// The !log.Enabled(logging.LevelInfo) gate above governs the bar too, and
+// that is a deliberate choice rather than an oversight: a bar is not a log
+// line and is not filtered by level anywhere else, but --log-level warn has
+// always meant "show me less than this" and has always silenced progress. A
+// run that started drawing a bar under a flag that used to quiet it would be
+// a surprise introduced by an internal refactor, which is the wrong place for
+// one.
+func buildProgressConfig(intervalSeconds float64, log *logging.Logger, display *outprogress.Display) *progress.Config {
 	if intervalSeconds <= 0 || !log.Enabled(logging.LevelInfo) {
 		return nil
 	}
 	return &progress.Config{
 		Interval: time.Duration(intervalSeconds * float64(time.Second)),
 		WarmUp:   progressWarmUp,
+		Display:  display,
 	}
 }
 
@@ -1427,7 +1441,23 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	log := logging.New(cmd.ErrOrStderr(), level).Named("videofx")
+	// The display owns the bottom of the terminal, and the logger writes
+	// THROUGH it: a write erases the bars, emits the line, and redraws them
+	// beneath it, so log output scrolls up the screen as it always has while
+	// the bars stay put. On anything that is not a terminal the display
+	// passes writes straight through and draws nothing, so a redirected run
+	// is byte-for-byte what it was.
+	//
+	// Stopped on the way out, and deferred rather than called at the end:
+	// runRoot has many returns, and a display left running would leave its
+	// bars as the last thing on the terminal for the shell prompt to land on
+	// top of.
+	display := outprogress.New(cmd.ErrOrStderr(), outprogress.Options{
+		Palette: outprogress.DefaultGradient(),
+	})
+	defer display.Stop()
+
+	log := logging.New(display, level).Named("videofx")
 	logging.SetDefault(log)
 
 	effs, err := resolveEffects(effectNames)
@@ -1573,7 +1603,7 @@ func runRoot(cmd *cobra.Command, args []string) error {
 	// be in hand before any trim window is computed. requireAutoOffsetOneInputFile
 	// above already guarantees args has exactly one element here.
 	if offsetIsAuto {
-		resolved, err := resolveAutoOffset(cmd.Context(), log, args[0], fitPath, sidecarPath, buildProgressConfig(progressSeconds, log))
+		resolved, err := resolveAutoOffset(cmd.Context(), log, args[0], fitPath, sidecarPath, buildProgressConfig(progressSeconds, log, display))
 		if err != nil {
 			return err
 		}
@@ -1608,7 +1638,7 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		Suffix:      suffix,
 		Concurrency: concurrency,
 		Log:         log,
-		Progress:    buildProgressConfig(progressSeconds, log),
+		Progress:    buildProgressConfig(progressSeconds, log, display),
 	}
 
 	// Stream progress as the batch runs rather than printing everything at

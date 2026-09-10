@@ -3,6 +3,7 @@ package effects
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/wisborg/videofx/internal/logging"
@@ -356,7 +357,8 @@ func (g *GoCVStabilizer) Apply(ctx context.Context, in Input) error {
 
 	renderOpts := g.renderOptions(log, series, edgeMode, warpModel, rsRect, rho)
 
-	renderProgress := progress.New(in.Progress, "rendering", progressEmitter(log))
+	renderProgress := progress.NewFor(in.Progress, filepath.Base(in.SourcePath), "rendering", progressEmitter(log))
+	defer renderProgress.Done()
 	stats, err := stabilize.Render(ctx, in.SourcePath, series, result, renderOpts, in.OutputPath, renderProgress.Report)
 	if err != nil {
 		return fmt.Errorf("rendering %s: %w", in.SourcePath, err)
@@ -499,7 +501,8 @@ func (g *GoCVStabilizer) loadOrAnalyze(ctx context.Context, log *logging.Logger,
 		}
 	}
 
-	analyzeProgress := progress.New(progressCfg, "analyzing", progressEmitter(log))
+	analyzeProgress := progress.NewFor(progressCfg, filepath.Base(sourcePath), "analyzing", progressEmitter(log))
+	defer analyzeProgress.Done()
 	series, err := stabilize.Analyze(ctx, sourcePath, opts, analyzeProgress.Report)
 	if err != nil {
 		return nil, err
