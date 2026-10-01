@@ -40,14 +40,26 @@ func TestSpeedLine(t *testing.T) {
 	}
 }
 
-// TestCadenceLine pins the run-cadence doubling: FIT reports rpm per leg, the
-// readout shows steps/min = 2x.
+// TestCadenceLine pins cadence in its sport's unit: a run's per-leg rpm
+// doubled to steps a minute, a ride's revolutions as recorded -- not doubled
+// into "170 spm" -- and an unknown sport as recorded too. The rule itself is
+// fitactivity.CadenceUnit's; this pins that the line uses it, and the
+// placeholder's unit follows the sport as the reading's does.
 func TestCadenceLine(t *testing.T) {
-	if got := cadenceLine(true, 86); got != "172 spm" {
-		t.Errorf("cadenceLine(86 rpm) = %q, want %q (doubled to spm)", got, "172 spm")
-	}
-	if got := cadenceLine(false, 86); got != "-- spm" {
-		t.Errorf("cadenceLine(absent) = %q, want %q", got, "-- spm")
+	for _, c := range []struct {
+		present bool
+		sport   string
+		want    string
+	}{
+		{true, "running", "172 spm"},
+		{true, "cycling", "86 rpm"},
+		{true, "", "86 rpm"},
+		{false, "running", "-- spm"},
+		{false, "cycling", "-- rpm"},
+	} {
+		if got := cadenceLine(c.present, 86, c.sport); got != c.want {
+			t.Errorf("cadenceLine(%v, 86 rpm, %q) = %q, want %q", c.present, c.sport, got, c.want)
+		}
 	}
 }
 
@@ -98,13 +110,14 @@ func TestFormatElapsed(t *testing.T) {
 // semantics rather than observed:
 //
 //   - heart rate: optU8 prints the raw value and the unit -- 144 -> "144 bpm".
-//   - cadence: FIT reports run cadence per leg, so cadenceLine doubles it --
-//     86 rpm -> 172 -> "172 spm".
+//   - cadence: FIT reports run cadence per leg, and the frame's Course says
+//     the sport is running, so cadenceLine doubles it -- 86 rpm -> 172 ->
+//     "172 spm".
 //   - power: PowerSource's zero value is fitactivity.PowerAuto, which prefers
 //     Stryd and falls back to native; with no DevFields the native 250 is
 //     what resolves -> "250 W".
-//   - incline: Frame.Course is nil here, so inclineLine has no elevation
-//     model and renders its placeholder -> "-- %".
+//   - incline: Frame.Course has no elevation model, so inclineLine renders
+//     its placeholder -> "-- %".
 //   - pace: 1000 m / 3.0 m/s = 333.33 s/km = 5 min 33.33 s, truncated to the
 //     second -> "5:33/km".
 //   - speed: 3.0 m/s * 3.6 = 10.8 km/h, rounded to whole -> "11 km/h".
@@ -114,6 +127,8 @@ func TestFormatElapsed(t *testing.T) {
 func TestMetricsLines_ComposesTheReferenceRowOrder(t *testing.T) {
 	f := Frame{
 		HasSample: true,
+		// A run, with no elevation model, so incline is its placeholder.
+		Course: &Course{Sport: "running"},
 		Sample: fitactivity.Sample{
 			HasHeartRate: true, HeartRate: 144,
 			HasCadence: true, Cadence: 86,
@@ -177,6 +192,8 @@ func TestMetricsLines_ComposesTheReferenceRowOrder(t *testing.T) {
 func TestMetricsLines_OmitPowerDropsExactlyThePowerLine(t *testing.T) {
 	f := Frame{
 		HasSample: true,
+		// A run, with no elevation model, so incline is its placeholder.
+		Course: &Course{Sport: "running"},
 		Sample: fitactivity.Sample{
 			HasHeartRate: true, HeartRate: 144,
 			HasCadence: true, Cadence: 86,

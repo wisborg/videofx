@@ -45,7 +45,7 @@ func (g MetricsGauge) lines(f Frame) []string {
 	s := f.Sample
 	lines := []string{
 		optU8(f.HasSample && s.HasHeartRate, s.HeartRate, "bpm"),
-		cadenceLine(f.HasSample && s.HasCadence, s.Cadence),
+		cadenceLine(f.HasSample && s.HasCadence, s.Cadence, f.Course.sport()),
 	}
 	if !g.OmitPower {
 		lines = append(lines, powerLine(f))
@@ -391,14 +391,21 @@ func powerLine(f Frame) string {
 	return fmt.Sprintf("%.0f W", watts)
 }
 
-// cadenceLine renders running cadence in steps per minute. FIT reports run
-// cadence per leg (revolutions/min), so steps/min is twice that -- the same
-// doubling Garmin/Telemetry Overlay apply for the "spm" readout.
-func cadenceLine(present bool, rpm uint8) string {
+// cadenceLine renders cadence in the unit sport counts it in, by
+// fitactivity.CadenceUnit -- the rule fitdash and course use too. FIT
+// reports cadence in revolutions a minute, which for running, walking and
+// hiking is one leg's strides, so the steps a minute a runner knows are
+// twice it, as Garmin and Telemetry Overlay show them. For a ride, an
+// elliptical or a rower the recorded number is already the one shown; an
+// earlier version doubled every sport, and drew a ride's 85 rpm as
+// "170 spm". An unknown sport keeps the recorded number in its recorded
+// unit, the answer that cannot be wrong.
+func cadenceLine(present bool, rpm uint8, sport string) string {
+	factor, unit := fitactivity.CadenceUnit(sport)
 	if !present {
-		return "-- spm"
+		return "-- " + unit
 	}
-	return fmt.Sprintf("%d spm", int(rpm)*2)
+	return fmt.Sprintf("%.0f %s", float64(rpm)*factor, unit)
 }
 
 // paceLine formats speed (m/s) as running pace "M:SS/km"; speedMS <= 0

@@ -294,6 +294,7 @@ func buildCourse(scoped *fitactivity.ScopedActivity, elevOpts fitactivity.Elevat
 		elevOpts.TargetLoss = track.TotalDescent
 	}
 	return &hud.Course{
+		Sport:         track.Sport,
 		TotalDistance: trackTotalDistance(track),
 		StartDistance: scoped.StartDistance,
 		Elevation:     fitactivity.BuildElevationModel(track, elevOpts),

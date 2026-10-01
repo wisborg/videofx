@@ -96,6 +96,11 @@ type Frame struct {
 // gauges draw whatever course they are given -- but a reader assuming the
 // numbers span a whole recording will misread StartDistance below.
 type Course struct {
+	// Sport is the activity's sport, as fitactivity.Track.Sport has it,
+	// which decides the unit its cadence is shown in (see
+	// fitactivity.CadenceUnit): steps a minute for a run, revolutions a
+	// minute for a ride. Empty is unknown.
+	Sport string
 	// TotalDistance is the cumulative distance (m) the progress bar's axis
 	// ENDS at: the whole activity's total, or -- for a clip-scoped course --
 	// the clip's last cumulative distance. Paired with StartDistance it is an
@@ -570,4 +575,13 @@ func (r *Renderer) resolveBox(p Placement, f Frame) Box {
 		y = h - m
 	}
 	return Box{X: x + p.DX*w, Y: y + p.DY*h, Anchor: p.Anchor}
+}
+
+// sport is c's Sport, or unknown when there is no Course, as on a frame
+// rendered with no render-wide context at all.
+func (c *Course) sport() string {
+	if c == nil {
+		return ""
+	}
+	return c.Sport
 }
