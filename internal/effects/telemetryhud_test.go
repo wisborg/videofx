@@ -23,6 +23,7 @@ import (
 
 	"github.com/wisborg/fitactivity"
 	"github.com/wisborg/fitactivity/fittest"
+	"github.com/wisborg/fitactivity/units"
 
 	"github.com/wisborg/videofx/internal/hud"
 	"github.com/wisborg/videofx/internal/logging"
@@ -485,7 +486,7 @@ func hudScopeCourse(t *testing.T, scope fitactivity.Scope) (*hud.Course, *fitact
 	t.Helper()
 	track, sync := hudScopeFixture(t)
 	scoped := fitactivity.BuildScopedActivity(track, sync, scope)
-	return buildCourse(scoped, fitactivity.ElevationOptions{}), scoped
+	return buildCourse(scoped, fitactivity.ElevationOptions{}, units.Set{}), scoped
 }
 
 // TestBuildCourse_ClipScopingNarrowsEveryGaugeTheCourseFeeds is the assertion
@@ -663,7 +664,7 @@ func TestBuildCourse_AnExplicitSmoothingRequestSurvivesScoping(t *testing.T) {
 	track, sync := hudScopeFixture(t)
 	scoped := fitactivity.BuildScopedActivity(track, sync, fitactivity.ScopeClipAbsolute)
 
-	course := buildCourse(scoped, fitactivity.ElevationOptions{Sigma: 3.5})
+	course := buildCourse(scoped, fitactivity.ElevationOptions{Sigma: 3.5}, units.Set{})
 	if got := course.Elevation.Sigma(); got != 3.5 {
 		t.Errorf("elevation sigma = %v, want the requested 3.5", got)
 	}
@@ -1855,5 +1856,28 @@ func TestTelemetryHUD_Apply_ReportsEveryFrameAndEndsAtTheLastOne(t *testing.T) {
 	if last := lines[len(lines)-1]; !strings.HasPrefix(last, wantLast) {
 		t.Errorf("last progress line = %q, want it to start %q (the loop must report its final frame, "+
 			"and the total must be the clip's frame count)", last, wantLast)
+	}
+}
+
+// Under miles the course's splits are a mile long, built from the scoped
+// track, and numbered as kilometre laps are; the units reach the gauges.
+// With no units the scoping's own kilometre splits are handed on untouched.
+func TestBuildCourse_SplitsFollowTheDistanceUnit(t *testing.T) {
+	track, sync := hudScopeFixture(t)
+	scoped := fitactivity.BuildScopedActivity(track, sync, fitactivity.ScopeActivity)
+	imperial, _ := units.Of(units.Imperial)
+	c := buildCourse(scoped, fitactivity.ElevationOptions{}, imperial)
+	if c.Splits.Length() != 1609.344 || c.Units != imperial {
+		t.Fatalf("splits of %v m, units %+v; want a mile and imperial", c.Splits.Length(), c.Units)
+	}
+	if want := int(trackTotalDistance(scoped.Track) / 1609.344); c.Splits.Last() != want {
+		t.Errorf("last mile lap %d, want %d", c.Splits.Last(), want)
+	}
+	if plain := buildCourse(scoped, fitactivity.ElevationOptions{}, units.Set{}); plain.Splits != scoped.Splits {
+		t.Error("with no units the scoping's splits were rebuilt")
+	}
+	metric, _ := units.Of(units.Metric)
+	if km := buildCourse(scoped, fitactivity.ElevationOptions{}, metric); km.Splits != scoped.Splits {
+		t.Error("in kilometres the scoping's own kilometre splits were rebuilt")
 	}
 }

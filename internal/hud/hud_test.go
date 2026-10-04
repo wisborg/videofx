@@ -12,6 +12,7 @@ import (
 	"github.com/fogleman/gg"
 
 	"github.com/wisborg/fitactivity"
+	"github.com/wisborg/fitactivity/units"
 )
 
 func TestPaceLine(t *testing.T) {
@@ -25,17 +26,17 @@ func TestPaceLine(t *testing.T) {
 		{false, 5, "--:--/km"},            // no data
 	}
 	for _, c := range cases {
-		if got := paceLine(c.present, c.speed); got != c.want {
+		if got := paceLine(c.present, c.speed, units.MinutesPerKilometre); got != c.want {
 			t.Errorf("paceLine(%v, %v) = %q, want %q", c.present, c.speed, got, c.want)
 		}
 	}
 }
 
 func TestSpeedLine(t *testing.T) {
-	if got := speedLine(true, 10.0); got != "36 km/h" { // 10 m/s = 36 km/h
+	if got := speedLine(true, 10.0, units.KilometresPerHour); got != "36 km/h" { // 10 m/s = 36 km/h
 		t.Errorf("speedLine(10 m/s) = %q, want %q", got, "36 km/h")
 	}
-	if got := speedLine(false, 10); got != "-- km/h" {
+	if got := speedLine(false, 10, units.KilometresPerHour); got != "-- km/h" {
 		t.Errorf("speedLine(absent) = %q, want %q", got, "-- km/h")
 	}
 }
@@ -1363,7 +1364,7 @@ func TestElevRangeLabels_ThePrecisionFollowsTheRangeAndAFlatCourseGetsOneLabel(t
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got := elevRangeLabels(c.minE, c.maxE)
+			got := elevRangeLabels(c.minE, c.maxE, metric)
 			if len(got) != len(c.want) {
 				t.Fatalf("elevRangeLabels(%v, %v) = %q, want %q", c.minE, c.maxE, got, c.want)
 			}
@@ -1454,7 +1455,7 @@ func TestElevGeometry_ARangeTooSmallToPlotIsCentredNotPinnedToTheFloor(t *testin
 			// share elevRangeFlat: a centred trace under two end labels, or two
 			// labels beside a floor-pinned trace, is each half a fix.
 			centred := c.wantLoFrac > 0
-			if single := len(elevRangeLabels(c.loE, c.hiE)) == 1; single != centred {
+			if single := len(elevRangeLabels(c.loE, c.hiE, metric)) == 1; single != centred {
 				t.Errorf("the plot %s this range but its labels %s -- "+
 					"the label rule and the plot geometry disagree about what counts as flat",
 					map[bool]string{true: "centres", false: "stretches"}[centred],
@@ -1576,7 +1577,7 @@ func TestRenderStatic_TheProfilesYLabelsCarryThePrecisionItsRangeNeeds(t *testin
 	const wantTop, wantBottom = "15.6 m", "12.4 m"
 
 	m := elevProfileOpeningMidRange(loE, hiE)
-	if got := elevRangeLabels(m.Range()); len(got) != 2 || got[0] != wantTop || got[1] != wantBottom {
+	if got := rangeLabels(m); len(got) != 2 || got[0] != wantTop || got[1] != wantBottom {
 		t.Fatalf("elevRangeLabels over the fixture's range = %q, want %q..%q -- re-fixture this test "+
 			"rather than reading it as a wiring regression", got, wantTop, wantBottom)
 	}
@@ -1635,7 +1636,7 @@ func TestRenderStatic_AFlatProfileDrawsOneCentredLabelAndNotTwo(t *testing.T) {
 	const wantLabel = "-1.2 m"
 
 	m := elevProfileClimbing(loE, hiE)
-	if got := elevRangeLabels(m.Range()); len(got) != 1 || got[0] != wantLabel {
+	if got := rangeLabels(m); len(got) != 1 || got[0] != wantLabel {
 		t.Fatalf("elevRangeLabels over the fixture's range = %q, want the single label %q -- "+
 			"re-fixture this test rather than reading it as a wiring regression", got, wantLabel)
 	}
@@ -1933,7 +1934,7 @@ func TestElevProfile_TheLabelRuleAndThePlotGeometryCrossTheFlatThresholdTogether
 			if span >= elevProfileFlatRange {
 				want = 2
 			}
-			if got := len(elevRangeLabels(g.minE, g.maxE)); got != want {
+			if got := len(elevRangeLabels(g.minE, g.maxE, metric)); got != want {
 				t.Errorf("a %v m range gets %d label(s), want %d -- the labels and the plot geometry "+
 					"disagree about whether a range this size is a profile", span, got, want)
 			}
@@ -1967,7 +1968,7 @@ func TestRenderStatic_AWholeActivitysProfileStillLabelsWholeMetresAtBothEnds(t *
 
 	m := elevProfileOpeningMidRange(loE, hiE)
 	r, f, g := elevPlotOf(t, m, loE, hiE, w, h)
-	if got := elevRangeLabels(m.Range()); len(got) != 2 || got[0] != wantTop || got[1] != wantBottom {
+	if got := rangeLabels(m); len(got) != 2 || got[0] != wantTop || got[1] != wantBottom {
 		t.Fatalf("elevRangeLabels over the fixture's range = %q, want %q..%q -- re-fixture this test "+
 			"rather than reading it as a wiring regression", got, wantTop, wantBottom)
 	}
@@ -2046,10 +2047,10 @@ func TestRenderStatic_TheFlatProfilesOneLabelIsHungOnTheMidlineItself(t *testing
 		t.Fatalf("the two fixtures' plots are not the same box (%v..%v at %v px against %v..%v at %v px)",
 			gFlat.top, gFlat.axisY, gFlat.lblPx, gRise.top, gRise.axisY, gRise.lblPx)
 	}
-	if n := len(elevRangeLabels(gFlat.minE, gFlat.maxE)); n != 1 {
+	if n := len(elevRangeLabels(gFlat.minE, gFlat.maxE, metric)); n != 1 {
 		t.Fatalf("the flat fixture gets %d labels, want the single centred one", n)
 	}
-	if n := len(elevRangeLabels(gRise.minE, gRise.maxE)); n != 2 {
+	if n := len(elevRangeLabels(gRise.minE, gRise.maxE, metric)); n != 2 {
 		t.Fatalf("the rising fixture gets %d labels, want two", n)
 	}
 
@@ -2110,7 +2111,7 @@ func TestRenderStatic_TheFlatProfilesOneLabelIsHungOnTheMidlineItself(t *testing
 // Two rules meet here, and the table is the specification of both: a shared
 // unit taken from the axis's SPAN, and a per-gauge kilometre precision. Why
 // the unit is shared and the precision is not is argued once, on
-// metreAxisSpan; it is not restated here, so that there is one copy of it to
+// shortAxisSpan; it is not restated here, so that there is one copy of it to
 // keep true.
 //
 // Hence the row that matters most: a marathon's labels are byte for byte what
@@ -2253,10 +2254,10 @@ func TestAxisLabels_TheUnitFollowsTheSpanAndTheWholeActivityIsUnchanged(t *testi
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if s, e := progressAxisLabels(c.startD, c.endD); s != c.barStart || e != c.barEnd {
+			if s, e := progressAxisLabels(c.startD, c.endD, metric); s != c.barStart || e != c.barEnd {
 				t.Errorf("progress bar labels = %q..%q, want %q..%q", s, e, c.barStart, c.barEnd)
 			}
-			if s, e := elevAxisLabels(c.startD, c.endD); s != c.profileStart || e != c.profileEnd {
+			if s, e := elevAxisLabels(c.startD, c.endD, metric); s != c.profileStart || e != c.profileEnd {
 				t.Errorf("elevation profile labels = %q..%q, want %q..%q", s, e, c.profileStart, c.profileEnd)
 			}
 		})
@@ -2287,11 +2288,11 @@ func TestProgressReadout_IsInMetresExactlyWhenItsLabelsAre(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			g := progressPlot{startD: c.startD, endD: c.endD}
-			if got := g.readout(c.at); got != c.want {
+			if got := g.readout(c.at, metric); got != c.want {
 				t.Errorf("readout(%v) = %q, want %q", c.at, got, c.want)
 			}
 
-			startLbl, _ := progressAxisLabels(c.startD, c.endD)
+			startLbl, _ := progressAxisLabels(c.startD, c.endD, metric)
 			labelsInMetres := strings.HasSuffix(startLbl, " m")
 			readoutInMetres := !strings.Contains(c.want, ".")
 			if labelsInMetres != readoutInMetres {
@@ -2499,7 +2500,7 @@ func TestRenderStatic_TheProfileLabelsItsOwnOriginNotZero(t *testing.T) {
 	// a 10 km span keeps whole kilometres, and a 200 m origin escalates both
 	// ends to one decimal because "0 km" would claim the start line.
 	const wantStart, wantEnd = "0.2 km", "10.2 km"
-	if s, e := elevAxisLabels(200, 10200); s != wantStart || e != wantEnd {
+	if s, e := elevAxisLabels(200, 10200, metric); s != wantStart || e != wantEnd {
 		t.Fatalf("elevAxisLabels(200, 10200) = %q..%q, want %q..%q -- re-fixture this test rather than "+
 			"reading it as a wiring regression", s, e, wantStart, wantEnd)
 	}
@@ -2833,4 +2834,14 @@ func TestPowerLine(t *testing.T) {
 			}
 		})
 	}
+}
+
+// metric is the units every HUD drew in before Course.Units, and still the
+// one a Course without them gets.
+var metric, _ = units.Of(units.Metric)
+
+// rangeLabels is elevRangeLabels over a model's whole range, in metric.
+func rangeLabels(m *fitactivity.ElevationModel) []string {
+	lo, hi := m.Range()
+	return elevRangeLabels(lo, hi, metric)
 }

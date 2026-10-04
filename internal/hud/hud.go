@@ -32,6 +32,7 @@ import (
 	"golang.org/x/image/font/gofont/gomono"
 
 	"github.com/wisborg/fitactivity"
+	"github.com/wisborg/fitactivity/units"
 )
 
 // Anchor is the frame reference point a gauge is positioned from. A gauge
@@ -117,7 +118,7 @@ type Course struct {
 	// an earlier draft of this sentence claimed it did: the labels on both
 	// gauges also follow the axis's SPAN, so a course spanning less than a
 	// kilometre is labelled in metres and a profile spanning less than ten
-	// gains a decimal, origin or no origin. See metreAxisSpan for the rule and
+	// gains a decimal, origin or no origin. See shortAxisSpan for the rule and
 	// elevAxisLabels for which whole-activity renders it moves.
 	//
 	// It lives HERE, on the per-render Course, and must never move onto the
@@ -151,6 +152,14 @@ type Course struct {
 	// point carries its time so the gauge can highlight the covered portion.
 	// Empty when the FIT carried no GPS fix.
 	Route []GeoPoint
+	// Units are what every number the gauges write is written in: distance
+	// on the axes and splits, elevation on the profile and gain/loss, speed
+	// and pace in the metrics readout. The zero Set is metric, so a Course
+	// built without it draws what this HUD always drew. Read through units().
+	//
+	// Per render, here, rather than per frame, for StartDistance's reason:
+	// the static layer's axis labels are drawn from this Course alone.
+	Units units.Set
 }
 
 // GeoPoint is one GPS point of the course route, with the instant it was
@@ -579,6 +588,15 @@ func (r *Renderer) resolveBox(p Placement, f Frame) Box {
 
 // sport is c's Sport, or unknown when there is no Course, as on a frame
 // rendered with no render-wide context at all.
+// units is c.Units, or metric when c is nil or its Units were never set.
+func (c *Course) units() units.Set {
+	if c == nil || c.Units == (units.Set{}) {
+		m, _ := units.Of(units.Metric)
+		return m
+	}
+	return c.Units
+}
+
 func (c *Course) sport() string {
 	if c == nil {
 		return ""

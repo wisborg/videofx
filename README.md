@@ -20,7 +20,7 @@ several to apply them as a pipeline, see [Chaining effects](#chaining-effects)):
   to the clip. The video/audio are stream-copied (no re-encode — lossless and
   fast). See Telemetry below.
 - **`telemetry-hud`** — burns a telemetry **heads-up display** (gauges) onto the
-  video from a Garmin FIT file: metric readout, clock, km splits, distance progress,
+  video from a Garmin FIT file: metric readout, clock, km (or mile) splits, distance progress,
   course map, and elevation profile/gain-loss. Unlike `telemetry` this re-encodes
   the video (the overlay is burned in). See [Telemetry HUD](#telemetry-hud) below.
 - **`rotate`** — rotates the video's display orientation by 90, 180, or 270 degrees
@@ -173,8 +173,9 @@ Flags:
   **The wall clock is never rebased, in any mode** — the on-screen clock, the GPX `<time>` and the SRT datetime stay on real time, because Telemetry Overlay (and anything else matching on `creation_time`) depends on that. With `--start`/`--end`, the overlapping stretch is measured against the **trimmed** clip. For the `telemetry` effect the clip modes move only the SRT's cumulative distance column — its GPX/SRT already cover just the clip window — so `full` and `clip-absolute` there normally produce identical output (they can differ where a recording gap straddles a clip boundary); it is `telemetry-hud` where this flag visibly changes what you get.
 - `--hud-timezone` — telemetry-hud only: the timezone the on-screen clock displays in — an IANA name (e.g. `Australia/Brisbane`) or a fixed offset (e.g. `+10:00`). Default: **UTC**. Only the clock gauge is affected; telemetry sync is always UTC.
 - `--hud-time` — telemetry-hud only: what the upper-right time/date gauge shows in place of the on-screen time. `clock` (**default**) is the wall clock (in `--hud-timezone`, unchanged from before this flag existed). `elapsed` is the time since the FIT activity's own start, **including** any paused stretches — Garmin/Strava's "elapsed time". `active` is the same but **excluding** them — Garmin's "time", Stryd/Strava's "moving time". Video before the activity's start reads `0:00:00`; video after its end reads the final total. This is measured from the **whole activity's own start** regardless of `--telemetry-scope` — a clip-rebased clip's distances restart at zero, but its clock does not. The date line underneath is unchanged in every mode. `vertical` carries no time/date gauge at all, so `--hud-time elapsed`/`active` has no effect there (videofx warns).
-- `--elevation-gain` / `--elevation-loss` — telemetry-hud only: the known total elevation gain / loss for the activity in **meters** (e.g. an official course figure). The elevation smoothing is auto-tuned so the computed totals match — GPS/barometric elevation overcounts, so a known figure is the most reliable target. Default `0` = use the FIT device's own totals.
+- `--elevation-gain` / `--elevation-loss` — telemetry-hud only: the known total elevation gain / loss for the activity in **meters** — or **feet** under `--units imperial` or `--unit elevation=ft` (e.g. an official course figure). The elevation smoothing is auto-tuned so the computed totals match — GPS/barometric elevation overcounts, so a known figure is the most reliable target. Default `0` = use the FIT device's own totals.
 - `--elevation-smoothing` — telemetry-hud only: an explicit Gaussian smoothing width (in FIT samples, ≈ seconds) for the elevation series, instead of the gain/loss auto-tuning. Default `0` = auto.
+- `--units` / `--unit` — telemetry-hud only: the units the HUD's numbers are written in. `--units metric` (default: km, m, km/h, min/km) or `--units imperial` (mi, ft, mph, min/mi) sets them all; `--unit QUANTITY=UNIT`, repeatable, changes one after it — `distance=km|mi|nmi`, `elevation=m|ft`, `speed=km/h|mph|kn|m/s`, `pace=min/km|min/mi` — for the mixtures some activities are read in: a flight is `--units imperial --unit distance=nmi --unit speed=kn`. The progress bar, the elevation profile's axes, the gain/loss, the pace and speed lines and the splits all follow it; the splits become **laps of the distance unit**, a mile under imperial, with a header that says so (`1 mi lap 7/13`). Below one distance unit an axis is labelled in the elevation unit, feet below a mile as metres below a kilometre. What the `telemetry` effect writes — the SRT and the GPX — stays metric: other programs read them, and the DJI layout is fixed. The same two flags, spelt the same way, are in fitdash and course.
 - `--power-source` — telemetry-hud only: which power reading the lower-left metrics gauge shows when the FIT carries **both** a footpod (Stryd) developer-field power **and** the standard FIT `power` field — the two are different sensors and can disagree substantially. `auto` (default) prefers the Stryd developer field and falls back to the native field; `stryd` forces the footpod field (shows `-- W` if absent); `native` forces the standard FIT field. Only affects the on-screen HUD number — what the `telemetry` effect writes to its SRT/GPX is unchanged by this flag.
 - `--hud-layout` — telemetry-hud only: which gauge arrangement to use — `auto` (default), `default`, `default-no-power`, or `vertical`. `auto` picks the **vertical** layout for portrait (taller-than-wide) clips and the full **default** layout otherwise, keyed on the clip's *display* dimensions (a phone/action-cam clip stored landscape with a 90°/270° rotation flag is treated as the portrait it plays back as); `auto` also picks `default-no-power` in place of `default` when the FIT carries **no power reading** for the selected `--power-source` — pass `default` explicitly to keep the `-- W` placeholder line instead. `default-no-power` is the full landscape set with the power line removed from the lower-left readout and heart rate/cadence closed down into the gap, for a workout recorded without a power sensor. The vertical layout keeps only the three gauges that read well on a narrow frame — the distance progress bar (top), the course map (middle-right, as in the landscape layout), and the elevation-vs-distance profile (bottom) — each widened to use more of the narrow width; the default layout's seven gauges crowd a portrait frame. Force one with `default`/`default-no-power`/`vertical`.
 - `--srt-format` — telemetry only: embed a `mov_text` telemetry subtitle track in this format — `none` (default), `readable` (a human-readable per-second readout), or `dji` (the DJI-drone SRT layout that [Telemetry Overlay](#embedding-telemetry-for-telemetry-overlay) reads directly from the video). The location tag is written independently of this (see `--location`). A muxed track is **hidden by default** (see `--show-subtitle`).
@@ -466,14 +467,15 @@ its embedded subtitle/location dropped by that encode.
 
 **Gauges:**
 
-- Lower-left metric readout: heart rate, cadence, power, **incline**, pace, speed.
+- Lower-left metric readout: heart rate, cadence, power, **incline**, pace, speed, in
+  `--units` (pace rounded to the second; speed whole from 10 up and to a tenth below).
   When the FIT has both a footpod (Stryd) and native power, `--power-source` chooses
   which the power line shows (default `auto` = prefer Stryd).
 - Upper-right clock: time + date (in `--hud-timezone`). `--hud-time` swaps the time line
   for elapsed/active time since the FIT activity's start instead (see above); the date
   line is unaffected.
-- Upper-left **kilometre splits**: recent laps with the fastest highlighted, and the
-  in-progress lap's live timer.
+- Upper-left **kilometre splits** (mile splits under `--units imperial`): recent laps
+  with the fastest highlighted, and the in-progress lap's live timer.
 - Top-center **distance progress bar**: a full-width line, red from the start to the
   current position and white for the remainder, with the current distance above it.
 - Middle-right **course map**: the whole GPS route with the covered portion
@@ -489,7 +491,7 @@ elevation profile and gain/loss) to the stretch running under the clip.
 **Elevation smoothing.** GPS/barometric elevation is noisy, and a raw per-sample sum
 wildly overcounts gain/loss (and jitters the incline). The elevation gauges smooth it
 first; by default the smoothing is **auto-tuned to the FIT device's own total
-ascent/descent**. Override with `--elevation-gain`/`--elevation-loss` (meters — e.g.
+ascent/descent**. Override with `--elevation-gain`/`--elevation-loss` (meters, or feet in `--units imperial` — e.g.
 an official course figure) to tune to those instead, or `--elevation-smoothing` for an
 explicit Gaussian width. Either clip mode of `--telemetry-scope` drops the device
 totals — they describe the whole day, and tuning a 20-second clip's profile to hit them

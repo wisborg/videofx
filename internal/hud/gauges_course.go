@@ -8,6 +8,7 @@ import (
 	"github.com/fogleman/gg"
 
 	"github.com/wisborg/fitactivity"
+	"github.com/wisborg/fitactivity/units"
 )
 
 // SplitsGauge is the upper-left kilometre-splits list: a header (current lap /
@@ -24,12 +25,12 @@ func (SplitsGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
 	}
 	sp := f.Course.Splits
 	d := f.Sample.Distance
-	curKm := sp.CurrentKm(d)
+	curKm := sp.Current(d)
 	px := r.FontPx(f)
 	headerPx := px * 0.7
 	lineH := px * 1.15
 
-	r.Text(dc, fmt.Sprintf("1 km lap %d/%d", curKm, sp.TotalKm()), box.X, box.Y, 0, headerPx)
+	r.Text(dc, splitsHeader(f.Course, curKm), box.X, box.Y, 0, headerPx)
 
 	fastest := sp.Fastest()
 	y := box.Y + headerPx*1.4
@@ -47,6 +48,14 @@ func (SplitsGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
 		}
 		y += lineH
 	}
+}
+
+// splitsHeader is the splits gauge's first line at lap curKm: the lap's
+// length in the course's distance unit -- the splits are built a lap of that
+// unit long (see the telemetry-hud effect's buildCourse) -- the lap in
+// progress, and the last complete one. PRECONDITION: c.Splits is not nil.
+func splitsHeader(c *Course, curKm int) string {
+	return fmt.Sprintf("1 %s lap %d/%d", c.units().Distance.Name, curKm, c.Splits.Last())
 }
 
 // splitsRows picks the kilometre numbers SplitsGauge lists at lap curKm: the
@@ -80,7 +89,7 @@ func (SplitsGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
 func splitsRows(sp *fitactivity.Splits, curKm int) []int {
 	const maxWindow = 5
 	startKm := curKm - maxWindow + 1
-	if first := sp.FirstKm(); startKm < first {
+	if first := sp.First(); startKm < first {
 		startKm = first
 	}
 
@@ -177,7 +186,7 @@ func (ProgressBarGauge) DrawStatic(r *Renderer, dc *gg.Context, box Box, f Frame
 	dc.Stroke()
 
 	lblPx := g.px * 0.65
-	startLbl, endLbl := progressAxisLabels(g.startD, g.endD)
+	startLbl, endLbl := progressAxisLabels(g.startD, g.endD, f.Course.units())
 	r.Text(dc, startLbl, g.left, g.barY+g.barH, 0, lblPx)
 	r.Text(dc, endLbl, g.right, g.barY+g.barH, 1, lblPx)
 }
@@ -197,7 +206,7 @@ func (ProgressBarGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
 	dc.DrawLine(g.left, g.barY, xCur, g.barY)
 	dc.Stroke()
 
-	r.TextColored(dc, g.readout(curD), xCur, box.Y, 0.5, g.px*1.05, 1.0, 0.45, 0.1)
+	r.TextColored(dc, g.readout(curD, f.Course.units()), xCur, box.Y, 0.5, g.px*1.05, 1.0, 0.45, 0.1)
 }
 
 // readout is the live distance number drawn above the playhead.
@@ -211,11 +220,11 @@ func (ProgressBarGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
 // byte what it has always been, and a whole-activity bar can be nothing else.
 // The metre form is reachable only through a clip-scoped course, which is to
 // say only through a code path that did not exist before it did.
-func (g progressPlot) readout(d float64) string {
-	if axisInMetres(g.endD - g.startD) {
-		return fmt.Sprintf("%.0f", d)
+func (g progressPlot) readout(d float64, u units.Set) string {
+	if axisInShortUnit(g.endD-g.startD, u) {
+		return fmt.Sprintf("%.0f", u.Elevation.FromSI(d))
 	}
-	return fmt.Sprintf("%.1f", d/1000)
+	return fmt.Sprintf("%.1f", u.Distance.FromSI(d))
 }
 
 // CourseMapGauge is the middle-left course outline: the whole GPS route drawn

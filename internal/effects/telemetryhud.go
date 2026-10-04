@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wisborg/fitactivity"
+	"github.com/wisborg/fitactivity/units"
 
 	"github.com/wisborg/videofx/internal/hud"
 	"github.com/wisborg/videofx/internal/logging"
@@ -59,6 +60,12 @@ type TelemetryHUD struct {
 	// power field. The zero value is fitactivity.PowerAuto (prefer Stryd, fall
 	// back to native). Wired from --power-source.
 	PowerSource fitactivity.PowerSource
+	// Units are what the gauges write their numbers in (see hud.Course.Units),
+	// and the length of a split: a mile lap when distance is in miles. The
+	// zero Set is metric. Wired from --units and --unit. ElevationGain and
+	// ElevationLoss above stay in metres whatever this says; the flags that
+	// set them are converted on the way in.
+	Units units.Set
 	// LayoutMode selects the gauge arrangement by name: "auto" (the default)
 	// picks the vertical layout for portrait clips, else the default layout --
 	// or, when the FIT carries no power reading for PowerSource, the default
@@ -287,19 +294,33 @@ func buildRoute(track *fitactivity.Track) []hud.GeoPoint {
 // is deliberate: a clip-length model tuned to hit the whole day's 180 m of
 // ascent would be smoothed to the far end of its range, and the profile it
 // drew would not be the terrain.
-func buildCourse(scoped *fitactivity.ScopedActivity, elevOpts fitactivity.ElevationOptions) *hud.Course {
+//
+// # Splits in another unit
+//
+// scoped.Splits are kilometre laps. Under a distance unit other than the
+// kilometre they are rebuilt here, a lap of that unit long, from scoped.Track
+// -- the scoped track, already rebased or not, so a mile clip is numbered by
+// the same rule the scoping applied to its kilometres. Building them from the
+// original track instead would number a clip's laps by the whole activity
+// under clip-rebased.
+func buildCourse(scoped *fitactivity.ScopedActivity, elevOpts fitactivity.ElevationOptions, u units.Set) *hud.Course {
 	track := scoped.Track
 	if elevOpts.Sigma <= 0 && elevOpts.TargetGain <= 0 && elevOpts.TargetLoss <= 0 && track.HasElevationTotals {
 		elevOpts.TargetGain = track.TotalAscent
 		elevOpts.TargetLoss = track.TotalDescent
+	}
+	splits := scoped.Splits
+	if lap := u.Distance.ToSI(1); lap > 0 && (splits == nil || lap != splits.Length()) {
+		splits = fitactivity.BuildSplitsEvery(track, lap)
 	}
 	return &hud.Course{
 		Sport:         track.Sport,
 		TotalDistance: trackTotalDistance(track),
 		StartDistance: scoped.StartDistance,
 		Elevation:     fitactivity.BuildElevationModel(track, elevOpts),
-		Splits:        scoped.Splits,
+		Splits:        splits,
 		Route:         buildRoute(track),
+		Units:         u,
 	}
 }
 
@@ -455,7 +476,7 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 		Sigma:      t.ElevationSmoothing,
 		TargetGain: t.ElevationGain,
 		TargetLoss: t.ElevationLoss,
-	})
+	}, t.Units)
 
 	var layout hud.Layout
 	if t.Layout != nil {

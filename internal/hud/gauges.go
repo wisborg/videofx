@@ -8,6 +8,7 @@ import (
 	"github.com/fogleman/gg"
 
 	"github.com/wisborg/fitactivity"
+	"github.com/wisborg/fitactivity/units"
 )
 
 // MetricsGauge is the lower-left instantaneous readout: heart rate, cadence,
@@ -52,8 +53,8 @@ func (g MetricsGauge) lines(f Frame) []string {
 	}
 	return append(lines,
 		inclineLine(f),
-		paceLine(f.HasSample && s.HasSpeed, s.Speed),
-		speedLine(f.HasSample && s.HasSpeed, s.Speed),
+		paceLine(f.HasSample && s.HasSpeed, s.Speed, f.Course.units().Pace),
+		speedLine(f.HasSample && s.HasSpeed, s.Speed, f.Course.units().Speed),
 	)
 }
 
@@ -300,13 +301,13 @@ func (ElevationProfileGauge) DrawStatic(r *Renderer, dc *gg.Context, box Box, f 
 	// Each label hangs its bottom on the line it names (the axis line, or the
 	// midline the flat trace runs along), so it sits above that line rather
 	// than across it.
-	if lbls := elevRangeLabels(g.minE, g.maxE); len(lbls) == 1 {
+	if lbls := elevRangeLabels(g.minE, g.maxE, f.Course.units()); len(lbls) == 1 {
 		r.Text(dc, lbls[0], g.left, g.flatTraceY()-g.lblPx*1.15, 0, g.lblPx)
 	} else {
 		r.Text(dc, lbls[0], g.left, g.top, 0, g.lblPx)
 		r.Text(dc, lbls[1], g.left, g.axisY-g.lblPx*1.15, 0, g.lblPx)
 	}
-	startLbl, endLbl := elevAxisLabels(g.startD, g.endD)
+	startLbl, endLbl := elevAxisLabels(g.startD, g.endD, f.Course.units())
 	r.Text(dc, startLbl, g.left, g.axisY+g.lblPx*0.15, 0, g.lblPx)
 	r.Text(dc, endLbl, g.right, g.axisY+g.lblPx*0.15, 1, g.lblPx)
 }
@@ -345,12 +346,7 @@ type GainLossGauge struct{}
 func (GainLossGauge) Name() string { return "gain-loss" }
 
 func (GainLossGauge) Draw(r *Renderer, dc *gg.Context, box Box, f Frame) {
-	gain, loss := "Gain: -- m", "Loss: -- m"
-	if em := courseElevation(f); em != nil && f.HasSample && f.Sample.HasDistance {
-		_, g, l := em.AtDistance(f.Sample.Distance)
-		gain = fmt.Sprintf("Gain: %.1f m", g)
-		loss = fmt.Sprintf("Loss: %.1f m", l)
-	}
+	gain, loss := gainLossLines(f)
 	px := r.FontPx(f)
 	lineH := px * 1.35
 	top := box.Y - 2*lineH // two lines, bottom on the inset anchor
@@ -408,23 +404,38 @@ func cadenceLine(present bool, rpm uint8, sport string) string {
 	return fmt.Sprintf("%.0f %s", float64(rpm)*factor, unit)
 }
 
-// paceLine formats speed (m/s) as running pace "M:SS/km"; speedMS <= 0
-// (stopped, or no data) renders the no-pace marker rather than dividing by a
-// vanishing speed.
-func paceLine(present bool, speedMS float64) string {
-	if !present || speedMS <= 0 {
-		return "--:--/km"
+// gainLossLines are the gain/loss gauge's two lines at frame f, in the
+// course's elevation unit, or placeholders where there is no elevation or no
+// distance to read it at.
+func gainLossLines(f Frame) (gain, loss string) {
+	u := f.Course.units().Elevation
+	gain, loss = "Gain: -- "+u.Name, "Loss: -- "+u.Name
+	if em := courseElevation(f); em != nil && f.HasSample && f.Sample.HasDistance {
+		_, g, l := em.AtDistance(f.Sample.Distance)
+		gain = fmt.Sprintf("Gain: %.1f %s", u.FromSI(g), u.Name)
+		loss = fmt.Sprintf("Loss: %.1f %s", u.FromSI(l), u.Name)
 	}
-	secPerKm := 1000.0 / speedMS
-	m := int(secPerKm) / 60
-	s := int(secPerKm) % 60
-	return fmt.Sprintf("%d:%02d/km", m, s)
+	return gain, loss
 }
 
-// speedLine formats speed (m/s) as whole km/h.
-func speedLine(present bool, speedMS float64) string {
+// paceLine formats speed (m/s) as a pace in u, "M:SS/km" or "M:SS/mi";
+// speedMS <= 0 (stopped, or no data) renders the no-pace marker rather than
+// dividing by a vanishing speed. The formatting is fitactivity's
+// units.FormatPace, so fitdash and course print the same pace for the same
+// instant: rounded to the second, where this used to truncate.
+func paceLine(present bool, speedMS float64, u units.Unit) string {
 	if !present {
-		return "-- km/h"
+		speedMS = 0
 	}
-	return fmt.Sprintf("%.0f km/h", speedMS*3.6)
+	return units.FormatPace(speedMS, u)
+}
+
+// speedLine formats speed (m/s) in u -- whole units from 10 up, a tenth
+// below, as units.FormatSpeed has it, so a walk reads "5.4 km/h" rather
+// than a "5 km/h" that cannot tell a stroll from a march.
+func speedLine(present bool, speedMS float64, u units.Unit) string {
+	if !present {
+		return "-- " + u.Name
+	}
+	return units.FormatSpeed(speedMS, u)
 }

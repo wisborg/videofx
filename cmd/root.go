@@ -217,13 +217,14 @@ func NewRootCmd() *cobra.Command {
 	root.Flags().Float64Var(&elevSmoothing, "elevation-smoothing", 0,
 		"telemetry-hud only: Gaussian smoothing width (in FIT samples, ~seconds) applied to the noisy GPS/barometric elevation before the profile/gain-loss/incline gauges use it. 0 (default) = auto: tuned from --elevation-gain/--elevation-loss, or the FIT device's own totals, or a mild default")
 	root.Flags().Float64Var(&elevGain, "elevation-gain", 0,
-		"telemetry-hud only: known total elevation GAIN (meters) for the activity -- the smoothing is auto-tuned so the computed total matches (GPS elevation overcounts, so a known figure is the most reliable target). 0 = use the FIT's own total. Paired with --elevation-loss")
+		"telemetry-hud only: known total elevation GAIN (meters, or feet under --units imperial or --unit elevation=ft) for the activity -- the smoothing is auto-tuned so the computed total matches (GPS elevation overcounts, so a known figure is the most reliable target). 0 = use the FIT's own total. Paired with --elevation-loss")
 	root.Flags().Float64Var(&elevLoss, "elevation-loss", 0,
-		"telemetry-hud only: known total elevation LOSS (meters) for the activity; see --elevation-gain. 0 = use the FIT's own total")
+		"telemetry-hud only: known total elevation LOSS (meters, or feet as --elevation-gain) for the activity; see --elevation-gain. 0 = use the FIT's own total")
 	root.Flags().BoolVar(&telemetryStryd, "telemetry-stryd", false,
 		"telemetry only: include Stryd running-dynamics developer fields in the GPX sidecar and in a --srt-format readable SRT. NOT in --srt-format dji: that layout is the fixed set of tags Telemetry Overlay parses out of a DJI drone's SRT, with no place to put an arbitrary developer field, so this flag does not affect it")
 	root.Flags().BoolVar(&location, "location", true,
 		"telemetry only: write the clip's GPS position into the output's container metadata (the \"location\" tag and Apple's \"com.apple.quicktime.location.ISO6709\"). On by default. Pass --location=false to leave it out: the tag is read by YouTube, Photos, Immich and QuickTime, so a run that starts at your front door otherwise ships your home address in the file. It governs only the tag videofx WRITES: it does not remove telemetry-hud's course map, which is burned into the pixels, nor a position the camera itself recorded, which is carried over with the rest of the source metadata (strip that with --effect strip-metadata, as the last effect in the chain). Note --effect telemetry-hud implies --effect telemetry, so this applies to a HUD burn as well")
+	bindUnitFlags(root)
 
 	_ = root.MarkFlagRequired("effect")
 
@@ -1300,8 +1301,13 @@ func configureEffect(effect effects.Effect, flags *pflag.FlagSet) error {
 		h.Quality = quality
 		h.TimeZone = loc
 		h.ElevationSmoothing = elevSmoothing
-		h.ElevationGain = elevGain
-		h.ElevationLoss = elevLoss
+		u, err := parseUnits(hudUnits, hudUnitEach)
+		if err != nil {
+			return err
+		}
+		h.Units = u
+		h.ElevationGain = u.Elevation.ToSI(elevGain)
+		h.ElevationLoss = u.Elevation.ToSI(elevLoss)
 		h.LayoutMode = hudLayout
 		h.PowerSource = parsePowerSource(powerSource)
 		h.TimeMode = parseHUDTime(hudTime)
@@ -1509,6 +1515,9 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := validatePowerSource(powerSource); err != nil {
+		return err
+	}
+	if _, err := parseUnits(hudUnits, hudUnitEach); err != nil {
 		return err
 	}
 	if err := validateHUDTime(hudTime); err != nil {

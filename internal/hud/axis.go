@@ -3,6 +3,8 @@ package hud
 import (
 	"fmt"
 	"math"
+
+	"github.com/wisborg/fitactivity/units"
 )
 
 // This file holds the distance AXIS: the horizontal scale the two
@@ -32,22 +34,28 @@ import (
 //
 // The two axes' identifiers differ by one word, deliberately and consistently:
 // SPAN is always metres TRAVELLED along the horizontal axis, RANGE always
-// metres of ALTITUDE up the vertical one. Hence elevProfileDecimalSpan (10 000)
-// beside elevProfileDecimalRange (10), and elevAxisLabels beside
-// elevRangeLabels. Three orders of magnitude apart and one word apart, so
+// metres of ALTITUDE up the vertical one -- metres whatever units the labels
+// are written in (Course.Units), which a label converts to at the last moment.
+// Hence elevProfileDecimalSpan (ten distance units) beside
+// elevProfileDecimalRange (ten elevation units), and elevAxisLabels beside
+// elevRangeLabels. Equal numbers in different units and one word apart, so
 // swapping two of them compiles and quietly relabels an axis; the convention is
 // what makes the mistake nameable, and it is worth more than renaming either
 // pair to something longer.
 
-// metreAxisSpan and elevProfileDecimalSpan are the two spans at which a label
-// format stops carrying information, and both follow from one rule:
+// shortAxisSpan and elevProfileDecimalSpan are the two spans at which a label
+// format stops carrying information, counted in the distance unit the labels
+// are written in -- a kilometre or a mile, say -- and both follow from one
+// rule:
 //
 //	a label's rounding step must not exceed a tenth of the axis it labels.
 //
 // "%.1f km" steps by 100 m. On a 100 m axis -- a realistic 20-second clip of
 // a runner -- that is a scale with two gradations, and on a 30 m one both ends
 // print the same string, so the axis appears to span nothing. The rule puts
-// the switch to metres at a 1 km span.
+// the switch to metres at a 1 km span: to the short unit at one distance
+// unit's span. The short unit is the elevation unit, metres or feet, as it is
+// for every short distance the units package describes.
 //
 // "%.0f km" steps by 1 km, which is a tenth of a 10 km axis and 45% of a
 // 2.2 km one. That is the profile's threshold.
@@ -75,8 +83,8 @@ import (
 // shipped flag today, and it wants a decision made in front of a real render
 // rather than a fourth threshold guessed at here.
 const (
-	metreAxisSpan          = 1000.0
-	elevProfileDecimalSpan = 10000.0
+	shortAxisSpan          = 1.0
+	elevProfileDecimalSpan = 10.0
 )
 
 // axisX maps a cumulative distance onto the pixel range [left, right] of an
@@ -105,30 +113,33 @@ func clampToAxis(d, startD, endD float64) float64 {
 	return math.Max(startD, math.Min(d, endD))
 }
 
-// axisInMetres reports whether an axis of the given span is labelled in metres
-// rather than kilometres.
+// axisInShortUnit reports whether an axis of the given span is labelled in
+// metres (or feet) rather than kilometres (or miles).
 //
 // It is separate from axisLabel because the progress bar's live readout
 // carries no unit suffix of its own -- the two end labels supply it -- so the
 // readout has to follow the choice the labels made. On a bar labelled
 // "0 m".."100 m", a readout of "0.0" is not a smaller number, it is a
 // different scale.
-func axisInMetres(span float64) bool { return span < metreAxisSpan }
+func axisInShortUnit(span float64, u units.Set) bool {
+	return u.Distance.FromSI(span) < shortAxisSpan
+}
 
 // axisLabel renders d as one end label of an axis spanning span metres:
-// whole metres on a short axis, kilometres to kmDecimals places otherwise.
+// whole metres (or feet) on a short axis, kilometres (or miles) to kmDecimals
+// places otherwise.
 //
 // The unit comes from the SPAN and not from d, so both ends of an axis are
 // always spelled the same way, and so this package needs no idea whether it is
-// drawing a clip. See metreAxisSpan. The sign of a value that rounded away is
+// drawing a clip. See shortAxisSpan. The sign of a value that rounded away is
 // dropped by fixedNoNegZero -- see there, not here, since the elevation labels
 // need the same treatment for their own reasons.
-func axisLabel(d, span float64, kmDecimals int) string {
-	value, unit, decimals := d, " m", 0
-	if !axisInMetres(span) {
-		value, unit, decimals = d/1000, " km", kmDecimals
+func axisLabel(d, span float64, kmDecimals int, u units.Set) string {
+	value, unit, decimals := u.Elevation.FromSI(d), u.Elevation.Name, 0
+	if !axisInShortUnit(span, u) {
+		value, unit, decimals = u.Distance.FromSI(d), u.Distance.Name, kmDecimals
 	}
-	return fixedNoNegZero(value, decimals) + unit
+	return fixedNoNegZero(value, decimals) + " " + unit
 }
 
 // fixedNoNegZero formats v to decimals places, rendering a value that rounded
@@ -170,8 +181,8 @@ func fixedNoNegZero(v float64, decimals int) string {
 // threshold, so it answers the question the escalation in elevAxisLabels
 // actually asks, and it treats a signed zero as a zero because axisLabel has
 // already stripped the sign.
-func readsAsZero(d, span float64, kmDecimals int) bool {
-	return axisLabel(d, span, kmDecimals) == axisLabel(0, span, kmDecimals)
+func readsAsZero(d, span float64, kmDecimals int, u units.Set) bool {
+	return axisLabel(d, span, kmDecimals, u) == axisLabel(0, span, kmDecimals, u)
 }
 
 // progressAxisLabels renders the progress bar's two end labels for an axis
@@ -185,19 +196,19 @@ func readsAsZero(d, span float64, kmDecimals int) bool {
 //
 // This gauge needs no precision rule of its own, and that is the whole of the
 // difference from elevAxisLabels: one decimal already resolves any axis the
-// unit rule hands it. See metreAxisSpan for why the two differ at all.
+// unit rule hands it. See shortAxisSpan for why the two differ at all.
 //
 // It is a function rather than two Sprintf calls inline so that the
 // "unchanged" claim above is something a test can check against a string,
 // instead of against rasterized glyphs.
-func progressAxisLabels(startD, endD float64) (start, end string) {
+func progressAxisLabels(startD, endD float64, u units.Set) (start, end string) {
 	span := endD - startD
-	return axisLabel(startD, span, 1), axisLabel(endD, span, 1)
+	return axisLabel(startD, span, 1, u), axisLabel(endD, span, 1, u)
 }
 
 // elevAxisLabels renders the elevation profile's two x-axis labels for an axis
 // running startD..endD metres. The unit is the shared span-driven one; what is
-// decided here is only the kilometre precision. See metreAxisSpan for why this
+// decided here is only the kilometre precision. See shortAxisSpan for why this
 // gauge has a precision rule and the bar does not.
 //
 // Whole kilometres, as this gauge has always drawn them, until a kilometre of
@@ -250,23 +261,25 @@ func progressAxisLabels(startD, endD float64) (start, end string) {
 //     genuinely spans 200..42 000 m and is labelled "0.2 km" accordingly,
 //     which is not a regression to code around: labelling it "0 km" would be
 //     the lie, and the axis it is drawn against moved with it.
-func elevAxisLabels(startD, endD float64) (start, end string) {
+func elevAxisLabels(startD, endD float64, u units.Set) (start, end string) {
 	span := endD - startD
 	decimals := 0
-	if span < elevProfileDecimalSpan {
+	if u.Distance.FromSI(span) < elevProfileDecimalSpan {
 		decimals = 1
 	}
-	if decimals == 0 && readsAsZero(startD, span, 0) && !readsAsZero(startD, span, 1) {
+	if decimals == 0 && readsAsZero(startD, span, 0, u) && !readsAsZero(startD, span, 1, u) {
 		decimals = 1
 	}
-	return axisLabel(startD, span, decimals), axisLabel(endD, span, decimals)
+	return axisLabel(startD, span, decimals, u), axisLabel(endD, span, decimals, u)
 }
 
 // elevProfileDecimalRange and elevProfileFlatRange are the elevation profile's
 // VERTICAL thresholds. They are not new numbers: they are the rule the distance
 // spans above were derived from -- a label's rounding step must not exceed a
-// tenth of the axis it labels -- applied to metres of ALTITUDE rather than
-// metres travelled.
+// tenth of the axis it labels -- applied to ALTITUDE rather than distance
+// travelled, and so counted in the elevation unit, metres or feet. The flat
+// range alone stays in metres: it is a fact about the plot's geometry, not a
+// label's rounding, and the plot is the same whatever its labels say.
 //
 // "%.0f m" steps by 1 m, a tenth of a 10 m range. Above that, whole metres, as
 // this gauge has always drawn them; a whole activity's profile spans tens of
@@ -306,12 +319,12 @@ func elevRangeFlat(span float64) bool { return span < elevProfileFlatRange }
 // the span rather than reading the value it is given. A reading a few
 // centimetres under water is spelled "0 m" rather than "-0 m"; see
 // fixedNoNegZero.
-func elevLabel(e, span float64) string {
+func elevLabel(e, span float64, u units.Set) string {
 	decimals := 0
-	if span < elevProfileDecimalRange {
+	if u.Elevation.FromSI(span) < elevProfileDecimalRange {
 		decimals = 1
 	}
-	return fixedNoNegZero(e, decimals) + " m"
+	return fixedNoNegZero(u.Elevation.FromSI(e), decimals) + " " + u.Elevation.Name
 }
 
 // elevRangeLabels returns the elevation profile's y-axis labels for a smoothed
@@ -341,10 +354,10 @@ func elevLabel(e, span float64) string {
 //     rule's doing at all -- it comes of routing both label families through
 //     fixedNoNegZero -- but it is a whole-activity render that moves, so it
 //     belongs in a list that promises to be the list.
-func elevRangeLabels(minE, maxE float64) []string {
+func elevRangeLabels(minE, maxE float64, u units.Set) []string {
 	span := maxE - minE
 	if elevRangeFlat(span) {
-		return []string{elevLabel((minE+maxE)/2, span)}
+		return []string{elevLabel((minE+maxE)/2, span, u)}
 	}
-	return []string{elevLabel(maxE, span), elevLabel(minE, span)}
+	return []string{elevLabel(maxE, span, u), elevLabel(minE, span, u)}
 }
