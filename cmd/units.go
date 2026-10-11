@@ -21,7 +21,7 @@ func bindUnitFlags(root *cobra.Command) {
 	root.Flags().StringVar(&hudUnits, "units", string(units.Metric),
 		"telemetry-hud only: the units the HUD's numbers are written in -- \"metric\" (default: km, m, km/h, min/km) or \"imperial\" (mi, ft, mph, min/mi). Distance labels, splits (a mile lap under imperial), elevation, gain/loss, speed and pace all follow it, and so do --elevation-gain and --elevation-loss, which are read in its elevation unit. The SRT and GPX the telemetry effect writes stay metric: they are read by other programs, and the DJI layout is fixed")
 	root.Flags().StringArrayVar(&hudUnitEach, "unit", nil,
-		"telemetry-hud only: one quantity's unit, over --units (repeatable) -- distance=km|mi|nmi, elevation=m|ft, speed=km/h|mph|kn|m/s, pace=min/km|min/mi. For a flight's mixture: --units imperial --unit distance=nmi --unit speed=kn")
+		"telemetry-hud only: one quantity's unit, over --units (repeatable) -- distance=km|mi|nm, elevation=m|ft, speed=km/h|mph|kn|m/s, pace=min/km|min/mi. For a flight's mixture: --units imperial --unit distance=nm --unit speed=kn")
 }
 
 // parseUnits is the units --units and every --unit over it ask for. It is
