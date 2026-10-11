@@ -61,7 +61,7 @@ func TestParseUnits_Refusals(t *testing.T) {
 		want   string
 	}{
 		{"nautical", nil, "--units: \"nautical\" is not a system of units; use metric or imperial"},
-		{"metric", []string{"distance=ft"}, "--unit: \"ft\" is not a unit of distance; use km, mi, nmi"},
+		{"metric", []string{"distance=ft"}, "--unit: \"ft\" is not a unit of distance; use km, mi, nm"},
 		{"metric", []string{"distance"}, "--unit: \"distance\" is not quantity=unit"},
 	} {
 		if _, err := parseUnits(c.system, c.each); err == nil || !strings.Contains(err.Error(), c.want) {
