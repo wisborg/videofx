@@ -8,7 +8,7 @@ require (
 	github.com/muktihari/fit v0.28.1
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/pflag v1.0.5
-	github.com/wisborg/output v0.3.1
+	github.com/wisborg/output v0.8.0
 	gocv.io/x/gocv v0.43.0
 	golang.org/x/image v0.44.0
 )
@@ -16,7 +16,7 @@ require (
 require (
 	github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/mattn/go-runewidth v0.0.28 // indirect
+	github.com/mattn/go-runewidth v0.0.31 // indirect
 )
 
 require github.com/wisborg/fitactivity v0.14.0

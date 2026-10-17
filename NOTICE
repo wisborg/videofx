@@ -41,6 +41,9 @@ repository.
                              Copyright 2026 Jesper Wisborg Krogh.  The FIT
                              decoding and activity models, factored out of this
                              project so fitdash can share them.
+  output (github.com/wisborg/output)
+                             Copyright 2026 Jesper Wisborg Krogh.  Its table
+                             and progress packages.
 
 
 -------------------------------------------------------------------------------
@@ -71,6 +74,13 @@ MIT components
 -------------------------------------------------------------------------------
 
   github.com/fogleman/gg     Copyright (C) 2016 Michael Fogleman
+  github.com/mattn/go-runewidth
+                             Copyright (c) 2016 Yasuhiro Matsumoto.  Reached
+                             through output, which measures text in a
+                             terminal's columns with it.
+  github.com/clipperhouse/uax29/v2
+                             Copyright (c) 2020 Matt Sherman.  Grapheme
+                             clusters, beneath go-runewidth and in output.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
