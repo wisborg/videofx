@@ -19,4 +19,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.31 // indirect
 )
 
-require github.com/wisborg/fitactivity v0.14.0
+require (
+	github.com/wisborg/cobrakit v0.1.0
+	github.com/wisborg/fitactivity v0.14.0
+)

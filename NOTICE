@@ -44,6 +44,9 @@ repository.
   output (github.com/wisborg/output)
                              Copyright 2026 Jesper Wisborg Krogh.  Its table
                              and progress packages.
+  cobrakit (github.com/wisborg/cobrakit)
+                             Copyright 2026 Jesper Wisborg Krogh.  Its
+                             completion package: `completion install`.
 
 
 -------------------------------------------------------------------------------

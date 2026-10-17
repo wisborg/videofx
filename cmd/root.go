@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/wisborg/cobrakit/completion"
 	"github.com/wisborg/fitactivity"
 	outprogress "github.com/wisborg/output/progress"
 
@@ -238,19 +239,9 @@ func NewRootCmd() *cobra.Command {
 	// process a clip either.
 	root.AddCommand(newEstimateOffsetCmd())
 
-	// cobra creates the `completion` command lazily, during Execute, so it
-	// is asked for explicitly here in order to hang `install` beneath it.
-	// The alternative -- a top-level command of our own -- would put the
-	// install step somewhere nobody looks: a person who wants completion
-	// types `videofx completion` first, and should find the whole story
-	// there rather than two commands that do not mention each other.
-	root.InitDefaultCompletionCmd()
-	for _, c := range root.Commands() {
-		if c.Name() == "completion" {
-			c.AddCommand(newCompletionInstallCmd(root))
-			break
-		}
-	}
+	// `videofx completion install` puts the script where the shell reads
+	// it; see cobrakit's completion package.
+	completion.AddInstall(root)
 
 	return root
 }
