@@ -8,7 +8,7 @@ require (
 	github.com/muktihari/fit v0.28.1
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/pflag v1.0.5
-	github.com/wisborg/output v0.8.0
+	github.com/wisborg/output v0.9.0
 	gocv.io/x/gocv v0.43.0
 	golang.org/x/image v0.44.0
 )

@@ -22,8 +22,8 @@ github.com/wisborg/cobrakit v0.1.0 h1:aGgnYAAkDZLhNZdQ7mQrvnwccHuXScnwh5LGbEC2Ds
 github.com/wisborg/cobrakit v0.1.0/go.mod h1:1785BqY54G7m1lZrDJFtLJUXd/BapEyQZ5pDT47j1Oc=
 github.com/wisborg/fitactivity v0.14.0 h1:qqFO61C0pdj4Sr7qdabapgdco3CVnUAkSl9khWx2oNI=
 github.com/wisborg/fitactivity v0.14.0/go.mod h1:kGTRZjcYlV//SWgrLst0C2ArEEI5H9evTLQ/MZkbKTc=
-github.com/wisborg/output v0.8.0 h1:lSYTgpEKCE9qbKpWrD7/4XSGweOrt86EGwQUBjsUanU=
-github.com/wisborg/output v0.8.0/go.mod h1:CTzxq9OExkhow7YwUucDXfyshm1zPLVQ+m+dykApjyQ=
+github.com/wisborg/output v0.9.0 h1:RnMQoqPoymRWG87NXJx8woQwyyQuyB7kbE/cnOc/C54=
+github.com/wisborg/output v0.9.0/go.mod h1:CTzxq9OExkhow7YwUucDXfyshm1zPLVQ+m+dykApjyQ=
 gocv.io/x/gocv v0.43.0 h1:PFNpRUcV8fgBRDbVHHN+4BDZjjPnVveo5N/+e15BTuA=
 gocv.io/x/gocv v0.43.0/go.mod h1:zYdWMj29WAEznM3Y8NsU3A0TRq/wR/cy75jeUypThqU=
 golang.org/x/image v0.44.0 h1:+tDekMZED9+LrtB3G5xzRggpVh9CARjZqROla3R3R+I=
