@@ -952,6 +952,7 @@ func TestValidateHUDLayout(t *testing.T) {
 		{"default", false},
 		{"default-no-power", false},
 		{"vertical", false},
+		{"time", false},
 		{"", true},
 		{"portrait", true},
 		{"Vertical", true},        // case-sensitive
@@ -1001,7 +1002,7 @@ func TestHUDLayoutSpellings_EveryLayoutTheHUDShipsIsAValueTheCLIForces(t *testin
 	// added here is out of this test's reach -- but a new one added there and
 	// forgotten in validateHUDLayout, or in SelectLayout's switch, is exactly
 	// what it catches once the constructor is listed.
-	for _, l := range []hud.Layout{hud.DefaultLayout(), hud.VerticalLayout(), hud.NoPowerLayout()} {
+	for _, l := range []hud.Layout{hud.DefaultLayout(), hud.VerticalLayout(), hud.NoPowerLayout(), hud.TimeOnlyLayout()} {
 		t.Run(l.Name, func(t *testing.T) {
 			if l.Name == "" {
 				t.Fatal("a shipped layout has an empty Name; --hud-layout could not name it and the telemetry-hud log line would report nothing")
@@ -1918,6 +1919,24 @@ func TestImpliedEffects(t *testing.T) {
 		want := []string{"telemetry-hud", "telemetry"}
 		if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	// The implied pass, and only the implied pass, carries a clip the FIT
+	// does not cover through instead of failing: the HUD in front of it draws
+	// the clock alone on such a clip, and a trailing failure would discard
+	// that render. A telemetry the user listed is asking for telemetry, and
+	// keeps the error.
+	t.Run("only the implied telemetry tolerates an uncovered clip", func(t *testing.T) {
+		for _, e := range impliedEffects([]effects.Effect{get("telemetry-hud")}) {
+			if tel, ok := e.(*effects.Telemetry); ok && !tel.AllowUncovered {
+				t.Error("the implied telemetry pass has AllowUncovered false; an uncovered clip's clock-only HUD would be thrown away")
+			}
+		}
+		for _, e := range impliedEffects([]effects.Effect{get("telemetry-hud"), get("telemetry")}) {
+			if tel, ok := e.(*effects.Telemetry); ok && tel.AllowUncovered {
+				t.Error("an explicitly listed telemetry has AllowUncovered true; it must keep the no-overlap error")
+			}
 		}
 	})
 

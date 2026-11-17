@@ -2845,3 +2845,111 @@ func rangeLabels(m *fitactivity.ElevationModel) []string {
 	lo, hi := m.Range()
 	return elevRangeLabels(lo, hi, metric)
 }
+
+// TestTimeOnlyLayout_IsTheDefaultLayoutsClockAndNothingElse pins what the
+// "time" layout promises: the default layout's time/date placement, exactly
+// as the default layout has it, and no other gauge. Comparing the whole
+// Placement (gauge, anchor, nudge, enabled) and the layout-wide margin and font
+// scale is what makes "same placement and font as the other layouts" a checked
+// claim rather than a coincidence of two hand-written literals.
+//
+// The last check is the slice-aliasing trap WithElapsedTime documents:
+// TimeOnlyLayout filters Placements in place, which is only safe because it
+// filters a DefaultLayout() it built itself.
+func TestTimeOnlyLayout_IsTheDefaultLayoutsClockAndNothingElse(t *testing.T) {
+	def := DefaultLayout()
+	tl := TimeOnlyLayout()
+
+	if tl.Name != "time" {
+		t.Errorf("TimeOnlyLayout().Name = %q, want %q", tl.Name, "time")
+	}
+	if tl.Margin != def.Margin || tl.FontScale != def.FontScale {
+		t.Errorf("TimeOnlyLayout margin/font scale = %v/%v, want the default layout's %v/%v",
+			tl.Margin, tl.FontScale, def.Margin, def.FontScale)
+	}
+	if len(tl.Placements) != 1 {
+		t.Fatalf("TimeOnlyLayout has %d placements (%v), want exactly the time/date gauge", len(tl.Placements), gaugeNames(tl))
+	}
+
+	var defClock *Placement
+	for i, p := range def.Placements {
+		if _, ok := p.Gauge.(TimeDateGauge); ok {
+			defClock = &def.Placements[i]
+		}
+	}
+	if defClock == nil {
+		t.Fatal("DefaultLayout has no TimeDateGauge to compare against")
+	}
+	if tl.Placements[0] != *defClock {
+		t.Errorf("TimeOnlyLayout's placement = %+v, want the default layout's %+v", tl.Placements[0], *defClock)
+	}
+
+	if !tl.HasTimeDateGauge() || tl.HasMetricsReadout() {
+		t.Errorf("HasTimeDateGauge = %v, HasMetricsReadout = %v; want true, false", tl.HasTimeDateGauge(), tl.HasMetricsReadout())
+	}
+	if got := WithElapsedTime(tl).Name; got != "time+elapsed" {
+		t.Errorf("WithElapsedTime(TimeOnlyLayout()).Name = %q, want %q -- the clock is the one gauge it has, so --hud-time applies", got, "time+elapsed")
+	}
+
+	if n := len(DefaultLayout().Placements); n != len(def.Placements) {
+		t.Errorf("building TimeOnlyLayout changed a later DefaultLayout(): %d placements, want %d", n, len(def.Placements))
+	}
+}
+
+// TestRender_TimeOnlyLayoutDrawsTheClockExactlyWhereTheDefaultLayoutDoes is
+// the pixel version of the test above: everything the time layout draws sits
+// in the top-right quadrant, and every pixel of it is identical to the same
+// pixel of a full default-layout render of the same frame. A clock drawn at
+// another size or offset would differ there, and one that pulled another gauge
+// along would leave ink outside the quadrant.
+//
+// Both orientations, because a portrait clip under the time layout uses the
+// default layout's font scale rather than the vertical layout's -- the vertical
+// layout has no clock to match -- and FontPx sizing from the frame's smaller
+// side is what keeps that the same size as on a landscape frame.
+func TestRender_TimeOnlyLayoutDrawsTheClockExactlyWhereTheDefaultLayoutDoes(t *testing.T) {
+	for _, dim := range []struct {
+		name string
+		w, h int
+	}{
+		{"landscape", 1280, 720},
+		{"portrait", 720, 1280},
+	} {
+		t.Run(dim.name, func(t *testing.T) {
+			f := Frame{
+				Width: dim.w, Height: dim.h,
+				Time: time.Date(2026, 7, 5, 7, 12, 34, 0, time.UTC),
+			}
+			render := func(l Layout) *image.RGBA {
+				img := image.NewRGBA(image.Rect(0, 0, dim.w, dim.h))
+				NewRenderer(l).Render(img, f)
+				return img
+			}
+			only := render(TimeOnlyLayout())
+			full := render(DefaultLayout())
+
+			x0, y0, x1, y1 := dim.w, dim.h, -1, -1
+			for y := 0; y < dim.h; y++ {
+				for x := 0; x < dim.w; x++ {
+					if only.Pix[y*only.Stride+x*4+3] != 0 {
+						x0, y0 = min(x0, x), min(y0, y)
+						x1, y1 = max(x1, x), max(y1, y)
+					}
+				}
+			}
+			if x1 < 0 {
+				t.Fatal("the time layout drew nothing")
+			}
+			if x0 < dim.w/2 || y1 >= dim.h/2 {
+				t.Errorf("the time layout's ink spans x %d..%d, y %d..%d -- want all of it in the top-right quadrant", x0, x1, y0, y1)
+			}
+			for y := y0; y <= y1; y++ {
+				a := only.Pix[y*only.Stride+x0*4 : y*only.Stride+(x1+1)*4]
+				b := full.Pix[y*full.Stride+x0*4 : y*full.Stride+(x1+1)*4]
+				if !bytes.Equal(a, b) {
+					t.Fatalf("row %d of the clock differs from the default layout's render -- the time layout must draw the clock at the same place and size", y)
+				}
+			}
+		})
+	}
+}

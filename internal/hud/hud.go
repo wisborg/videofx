@@ -2,19 +2,19 @@
 // RGBA overlays, to be composited onto a video (see internal/vidio's
 // OverlayEncoder and the telemetry-hud effect).
 //
-// The design is built for future customization, though only three fixed
-// arrangements ship today (DefaultLayout, VerticalLayout, and NoPowerLayout --
-// DefaultLayout with its power line dropped -- chosen by --hud-layout or by
-// clip orientation/data): every gauge is a self-drawing Gauge placed by a
+// The design is built for future customization, though only four fixed
+// arrangements ship today (DefaultLayout, VerticalLayout, NoPowerLayout --
+// DefaultLayout with its power line dropped -- and TimeOnlyLayout, the clock
+// alone, chosen by --hud-layout or by clip orientation/data): every gauge is a self-drawing Gauge placed by a
 // Placement (an Anchor + a fractional offset + an Enabled flag) in a Layout.
 // Moving a gauge to another corner, or switching it off, is then just editing
 // its Placement -- no gauge or renderer change.
 //
 // Nothing in the CLI reaches an individual Placement: --hud-layout selects
 // between whole layouts and nothing finer, so a user cannot turn one gauge off
-// (NoPowerLayout drops one LINE of one gauge's readout, not a gauge). All three
-// layouts include the course map, which draws the whole route, and both
-// landscape layouts include heart rate -- worth keeping in mind when changing
+// (NoPowerLayout drops one LINE of one gauge's readout, not a gauge). Every
+// layout but TimeOnlyLayout includes the course map, which draws the whole
+// route, and both full landscape layouts include heart rate -- worth keeping in mind when changing
 // this package, because those are burned into the pixels and cannot be removed
 // downstream the way a metadata tag can.
 package hud
@@ -290,6 +290,32 @@ func NoPowerLayout() Layout {
 	return l
 }
 
+// TimeOnlyLayout is DefaultLayout reduced to its time/date gauge: the clock
+// (and date) in the top-right corner and nothing else. It is for a clip the
+// FIT activity does not cover at all -- footage shot before the watch was
+// started or after it was stopped -- where every other gauge could only draw
+// placeholders, but the time of day is still known from the clip's own
+// creation_time (plus --offset).
+//
+// Like NoPowerLayout it is DERIVED from DefaultLayout rather than restated, so
+// the clock sits exactly where it does on the full HUD, at the same margin and
+// font scale: a batch mixing covered and uncovered clips shows the clock in the
+// same place and the same size on every one of them. That holds on a portrait
+// frame too, and is why this layout is not orientation-aware the way auto's
+// full choice is: VerticalLayout has no clock to match, and FontPx sizes text
+// from the frame's SMALLER side, so DefaultLayout's FontScale already gives a
+// portrait clip the same pixel size a landscape one of the same resolution
+// gets.
+func TimeOnlyLayout() Layout {
+	l := DefaultLayout()
+	l.Name = "time"
+	l.Placements = slices.DeleteFunc(l.Placements, func(p Placement) bool {
+		_, ok := p.Gauge.(TimeDateGauge)
+		return !ok
+	})
+	return l
+}
+
 // WithElapsedTime is a derived-layout transform, in exactly the shape
 // NoPowerLayout already uses: it sets ShowElapsed on every TimeDateGauge
 // placement in l and suffixes Name with "+elapsed", rather than existing as
@@ -375,15 +401,23 @@ func (l Layout) HasTimeDateGauge() bool {
 // whether the activity carries no power reading for the caller's chosen
 // --power-source: "vertical" and "default" force those layouts, "default-no-
 // power" forces NoPowerLayout on any orientation (mirroring how "default"
-// forces the landscape layout onto a portrait frame), and "auto" (the
-// default) picks the vertical layout for portrait frames (height > width),
-// else the default layout or -- when omitPower says the FIT has nothing to
-// show there -- NoPowerLayout. An unknown mode is treated as "auto".
+// forces the landscape layout onto a portrait frame), "time" forces
+// TimeOnlyLayout, and "auto" (the default) picks the vertical layout for
+// portrait frames (height > width), else the default layout or -- when
+// omitPower says the FIT has nothing to show there -- NoPowerLayout. An
+// unknown mode is treated as "auto".
 //
 // omitPower is consulted ONLY in the auto branch, and only after the
-// portrait test: an explicit "default"/"vertical"/"default-no-power" always
-// wins over what the data says, the same way an explicit mode already wins
-// over the frame's aspect.
+// portrait test: an explicit "default"/"vertical"/"default-no-power"/"time"
+// always wins over what the data says, the same way an explicit mode already
+// wins over the frame's aspect.
+//
+// What this does NOT decide is auto's fallback for a clip the FIT activity
+// does not cover at all. That is TimeOnlyLayout too, but the telemetry-hud
+// effect makes that choice itself, before calling here: whether a clip is
+// covered is a property of the sync, not of the frame or the power data, and
+// the uncovered path skips building the course entirely rather than handing
+// this function a question about power in a window that has no samples.
 func SelectLayout(mode string, width, height int, omitPower bool) Layout {
 	switch mode {
 	case "vertical":
@@ -392,6 +426,8 @@ func SelectLayout(mode string, width, height int, omitPower bool) Layout {
 		return DefaultLayout()
 	case "default-no-power":
 		return NoPowerLayout()
+	case "time":
+		return TimeOnlyLayout()
 	default: // "auto" (and anything unexpected)
 		if IsPortrait(width, height) {
 			return VerticalLayout()

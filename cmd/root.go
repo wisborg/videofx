@@ -212,7 +212,7 @@ func NewRootCmd() *cobra.Command {
 	root.Flags().StringVar(&hudTime, "hud-time", "clock",
 		"telemetry-hud only: what the upper-right time/date gauge shows -- \"clock\" (default: the wall clock, in --hud-timezone), \"elapsed\" (time since the FIT activity's start, INCLUDING any pauses -- Garmin/Strava's \"elapsed time\"), or \"active\" (the same, EXCLUDING paused stretches -- Garmin's \"time\", Stryd/Strava's \"moving time\"). Video before the activity's start reads 0:00:00; video after its end reads the final total. Measured from the WHOLE activity's own start regardless of --telemetry-scope. The date line is unchanged in every mode")
 	root.Flags().StringVar(&hudLayout, "hud-layout", "auto",
-		"telemetry-hud only: gauge arrangement -- \"auto\" (default: picks a vertical layout for portrait clips, the full layout otherwise -- auto also picks \"default-no-power\" when the FIT carries no power reading for the selected --power-source; pass \"default\" to keep the placeholder line), \"default\" (the full landscape set), \"default-no-power\" (the full landscape set with the power line removed and the lines above it closed down into the gap, for a workout recorded without a power sensor), or \"vertical\" (distance/map/elevation only, for portrait videos)")
+		"telemetry-hud only: gauge arrangement -- \"auto\" (default: picks a vertical layout for portrait clips, the full layout otherwise -- auto also picks \"default-no-power\" when the FIT carries no power reading for the selected --power-source; pass \"default\" to keep the placeholder line), \"default\" (the full landscape set), \"default-no-power\" (the full landscape set with the power line removed and the lines above it closed down into the gap, for a workout recorded without a power sensor), \"vertical\" (distance/map/elevation only, for portrait videos), or \"time\" (the time of day alone, where the full layout has it, top right -- and needs no FIT data, so it draws on any clip). A clip the FIT activity does not cover at all is drawn with \"time\" under auto instead of failing (with a warning, since that is also what a wrong --offset looks like); under an explicit default/default-no-power/vertical it is still an error")
 	root.Flags().StringVar(&powerSource, "power-source", "auto",
 		"telemetry-hud only: which power reading the metrics gauge shows when the FIT carries both a footpod (Stryd) developer field and the standard FIT power field -- \"auto\" (default: prefer Stryd, fall back to native), \"stryd\" (force the footpod's developer field), or \"native\" (force the standard FIT power field). The two can disagree since they are different sensors")
 	root.Flags().Float64Var(&elevSmoothing, "elevation-smoothing", 0,
@@ -323,6 +323,14 @@ func impliedEffects(effs []effects.Effect) []effects.Effect {
 					insertAt = i
 					break
 				}
+			}
+			// The implied pass alone carries an uncovered clip through rather
+			// than failing it: the HUD in front of it draws the time of day on
+			// such a clip (see effects.TelemetryHUD.LayoutMode), and this pass
+			// failing would throw that render away. An explicit telemetry
+			// keeps the error -- see effects.Telemetry.AllowUncovered.
+			if t, ok := tel.(*effects.Telemetry); ok {
+				t.AllowUncovered = true
 			}
 			effs = slices.Insert(effs, insertAt, tel)
 		}
@@ -628,6 +636,7 @@ var hudLayoutModes = map[string]struct{}{
 	"auto":             {},
 	"default":          {},
 	"default-no-power": {},
+	"time":             {},
 	"vertical":         {},
 }
 
@@ -637,7 +646,7 @@ var hudLayoutModes = map[string]struct{}{
 // the message must read the same on every run.
 func validateHUDLayout(mode string) error {
 	if _, ok := hudLayoutModes[mode]; !ok {
-		return fmt.Errorf("--hud-layout %q is invalid; use auto, default, default-no-power, or vertical", mode)
+		return fmt.Errorf("--hud-layout %q is invalid; use auto, default, default-no-power, time, or vertical", mode)
 	}
 	return nil
 }

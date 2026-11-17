@@ -164,6 +164,21 @@ type Telemetry struct {
 	// two -- it declines to place a point the window has no data for -- but
 	// anyone diffing a real clip needs to know why the bytes moved.
 	Scope fitactivity.Scope
+
+	// AllowUncovered turns a clip the FIT activity does not cover at all from
+	// an error into a pass that carries the source through with nothing
+	// added: no GPX, no SRT, no location tag, because there is no sample to
+	// make any of them from -- but with creation_time still corrected by
+	// OffsetSeconds, which needs no FIT.
+	//
+	// It is set only on the pass cmd's impliedEffects appends behind
+	// telemetry-hud. That HUD draws the time of day alone over an uncovered
+	// clip (see TelemetryHUD.LayoutMode), and a trailing pass that then failed
+	// would throw away the render it was only there to add metadata to. A
+	// telemetry effect the user asked for by name keeps the error: emitting
+	// telemetry is the whole of what it was asked to do, and an uncovered clip
+	// is usually a wrong --offset or the wrong FIT file.
+	AllowUncovered bool
 }
 
 func (t *Telemetry) Name() string         { return "telemetry" }
@@ -233,9 +248,29 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 	// BuildClipPoints below).
 	correctedCreationTime := info.CreationTime.Add(offset)
 
+	// Only rewrite creation_time when the offset actually moved it -- with
+	// offset == 0 the corrected time equals the original, which
+	// -map_metadata 0 already carries through, so leave it untouched to
+	// keep that path identical to the pre-correction behavior.
+	var correctedCreationStr string
+	if offset != 0 {
+		correctedCreationStr = formatCreationTime(correctedCreationTime)
+	}
+
 	sync := fitactivity.Resolve(track, info.CreationTime, offset, duration)
 	switch sync.Overlap {
 	case fitactivity.NoOverlap:
+		if t.AllowUncovered {
+			// Info, not a warning: the HUD pass in front of this one has
+			// already warned about this clip, and a second warning about the
+			// same fact from the same run reads as a second problem.
+			log.Infof("clip is outside the FIT file's recorded coverage -- no GPX, subtitle or location tag to add; carrying it through")
+			return t.mux(ctx, log, muxConfig{
+				SourcePath:   in.SourcePath,
+				OutputPath:   in.OutputPath,
+				CreationTime: correctedCreationStr,
+			})
+		}
 		return fmt.Errorf("clip window [%s, %s] does not overlap %s's recorded coverage [%s, %s] at all -- "+
 			"wrong FIT file, or wrong --offset?",
 			sync.Start.Format(time.RFC3339), sync.End.Format(time.RFC3339), t.FitPath,
@@ -296,15 +331,7 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 	}
 
 	loc, hasLocation := firstGPSPoint(points)
-	// Only rewrite creation_time when the offset actually moved it -- with
-	// offset == 0 the corrected time equals the original, which
-	// -map_metadata 0 already carries through, so leave it untouched to
-	// keep that path identical to the pre-correction behavior.
-	var correctedCreationStr string
-	if offset != 0 {
-		correctedCreationStr = formatCreationTime(correctedCreationTime)
-	}
-	args := muxArgs(muxConfig{
+	if err := t.mux(ctx, log, muxConfig{
 		SourcePath:   in.SourcePath,
 		SRTPath:      srtPath,
 		OutputPath:   in.OutputPath,
@@ -315,21 +342,8 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 		HasAltitude:  loc.HasElevation,
 		Alt:          loc.Elevation,
 		CreationTime: correctedCreationStr,
-	})
-
-	// Keep ffmpeg quiet on success unless we are logging at debug: "error"
-	// level prints only real errors, so a normal run doesn't dump the
-	// banner/stream-info that otherwise clutters the output (this mux uses a
-	// plain ExecRunner whose stderr goes straight to the terminal, unlike the
-	// vidio pipe path which captures it). This is the subprocess's verbosity,
-	// not ours, but it answers to the same question the log level asks, so it
-	// is taken from there rather than from a second flag of its own.
-	runArgs := args
-	if !log.Enabled(logging.LevelDebug) {
-		runArgs = append([]string{"-hide_banner", "-loglevel", "error"}, args...)
-	}
-	if err := t.Runner.Run(ctx, "ffmpeg", runArgs...); err != nil {
-		return fmt.Errorf("muxing %s: %w", in.OutputPath, err)
+	}); err != nil {
+		return err
 	}
 
 	// Hide the subtitle track (unless asked to show it): embedded telemetry
@@ -342,6 +356,28 @@ func (t *Telemetry) Apply(ctx context.Context, in Input) error {
 		}
 	}
 
+	return nil
+}
+
+// mux runs the ffmpeg stream-copy muxArgs builds for cfg -- the one ffmpeg
+// invocation this effect makes, shared by the ordinary path and the
+// AllowUncovered carry-through.
+//
+// Keep ffmpeg quiet on success unless we are logging at debug: "error" level
+// prints only real errors, so a normal run doesn't dump the banner/stream-info
+// that otherwise clutters the output (this mux uses a plain ExecRunner whose
+// stderr goes straight to the terminal, unlike the vidio pipe path which
+// captures it). This is the subprocess's verbosity, not ours, but it answers to
+// the same question the log level asks, so it is taken from there rather than
+// from a second flag of its own.
+func (t *Telemetry) mux(ctx context.Context, log *logging.Logger, cfg muxConfig) error {
+	args := muxArgs(cfg)
+	if !log.Enabled(logging.LevelDebug) {
+		args = append([]string{"-hide_banner", "-loglevel", "error"}, args...)
+	}
+	if err := t.Runner.Run(ctx, "ffmpeg", args...); err != nil {
+		return fmt.Errorf("muxing %s: %w", cfg.OutputPath, err)
+	}
 	return nil
 }
 

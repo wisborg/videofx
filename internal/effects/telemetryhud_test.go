@@ -124,12 +124,20 @@ const blackHUDSourceW, blackHUDSourceH = 320, 240
 // the same synthetic FIT window.
 func generateBlackHUDSource(t *testing.T, dir string) string {
 	t.Helper()
+	return generateBlackHUDSourceAt(t, dir, hudSourceCreation)
+}
+
+// generateBlackHUDSourceAt is generateBlackHUDSource stamped with creation
+// instead, for a test that needs the black clip somewhere the fixture FIT does
+// NOT reach.
+func generateBlackHUDSourceAt(t *testing.T, dir string, creation time.Time) string {
+	t.Helper()
 	path := filepath.Join(dir, "black.mp4")
 	if out, err := exec.Command("ffmpeg",
 		"-hide_banner", "-loglevel", "error",
 		"-f", "lavfi", "-i", fmt.Sprintf("color=c=black:size=%dx%d:rate=10:duration=2",
 			blackHUDSourceW, blackHUDSourceH),
-		"-metadata", "creation_time=2026-07-04T21:00:00.000000Z",
+		"-metadata", "creation_time="+creation.Format("2006-01-02T15:04:05.000000Z"),
 		"-c:v", "libx264", "-pix_fmt", "yuv420p", "-y", path,
 	).CombinedOutput(); err != nil {
 		t.Fatalf("generating a black source: %v\n%s", err, out)
@@ -1879,5 +1887,126 @@ func TestBuildCourse_SplitsFollowTheDistanceUnit(t *testing.T) {
 	metric, _ := units.Of(units.Metric)
 	if km := buildCourse(scoped, fitactivity.ElevationOptions{}, metric); km.Splits != scoped.Splits {
 		t.Error("in kilometres the scoping's own kilometre splits were rebuilt")
+	}
+}
+
+// hudUncoveredCreation is an instant two hours after the synthetic FIT
+// fixture's coverage ends (01:06:19Z), so a clip stamped with it resolves to
+// fitactivity.NoOverlap.
+var hudUncoveredCreation = time.Date(2026, 7, 5, 3, 0, 0, 0, time.UTC)
+
+// TestTelemetryHUD_Apply_AnUncoveredClipGetsTheClockUnderAutoAndTime is the
+// feature: a clip the activity does not reach used to fail outright, and under
+// --hud-layout auto (and the forced "time") now renders the time of day alone.
+//
+// The pixel half is what proves it is the time layout and not the full HUD
+// drawing placeholders: over a black source, the top-right quadrant (the clock)
+// lifts above black, and the rest of the frame -- where the splits, progress
+// bar, course map, metrics, elevation profile and gain/loss would all have
+// drawn their placeholders and axes -- stays black.
+//
+// The log half pins the difference between the two modes: auto announces the
+// fallback as a warning, since it is also what a wrong --offset looks like;
+// a forced "time" asked for exactly this and says nothing about overlap.
+func TestTelemetryHUD_Apply_AnUncoveredClipGetsTheClockUnderAutoAndTime(t *testing.T) {
+	requireFFmpeg(t)
+	fit := testFITPath(t)
+
+	for _, c := range []struct {
+		mode     string
+		wantWarn bool
+	}{
+		{"auto", true},
+		{"", true}, // the zero value is auto
+		{"time", false},
+	} {
+		t.Run("mode="+c.mode, func(t *testing.T) {
+			dir := t.TempDir()
+			src := generateBlackHUDSourceAt(t, dir, hudUncoveredCreation)
+			out := filepath.Join(dir, "out.mp4")
+
+			var buf bytes.Buffer
+			e := &TelemetryHUD{FitPath: fit, LayoutMode: c.mode}
+			if err := e.Apply(context.Background(), Input{SourcePath: src, OutputPath: out, Log: logging.New(&buf, logging.LevelInfo)}); err != nil {
+				t.Fatalf("Apply on an uncovered clip: %v", err)
+			}
+			got := buf.String()
+
+			if !hudLayoutLogged(got, "time") {
+				t.Errorf("log does not report the time layout:\n%s", got)
+			}
+			if warned := strings.Contains(got, "does not overlap"); warned != c.wantWarn {
+				t.Errorf("overlap warning present = %v, want %v:\n%s", warned, c.wantWarn, got)
+			}
+
+			const w, h = blackHUDSourceW, blackHUDSourceH
+			if y := maxYAVGInBox(t, out, fmt.Sprintf("%d:%d:%d:0", w/2, h/2, w/2)); y <= 17 {
+				t.Errorf("top-right quadrant YAVG=%.2f over a black source -- the clock was not drawn", y)
+			}
+			for _, box := range []string{
+				fmt.Sprintf("%d:%d:0:0", w/2, h/2),     // top-left: splits, half the progress bar
+				fmt.Sprintf("%d:%d:0:%d", w, h/2, h/2), // bottom half: metrics, profile, gain/loss, map
+			} {
+				if y := maxYAVGInBox(t, out, box); y > 17 {
+					t.Errorf("box %s YAVG=%.2f -- the time layout drew something other than the clock", box, y)
+				}
+			}
+		})
+	}
+}
+
+// TestTelemetryHUD_Apply_AnUncoveredClipIsStillAnErrorUnderAFullLayout: an
+// explicitly requested gauge layout, or a caller-supplied one, cannot be drawn
+// from an activity that does not reach the clip, and an all-placeholder HUD
+// burned into the pixels is worse than the error. The message names the way
+// out.
+func TestTelemetryHUD_Apply_AnUncoveredClipIsStillAnErrorUnderAFullLayout(t *testing.T) {
+	requireFFmpeg(t)
+	fit := testFITPath(t)
+	dir := t.TempDir()
+	src := generateBlackHUDSourceAt(t, dir, hudUncoveredCreation)
+	custom := hud.DefaultLayout()
+
+	for _, e := range []*TelemetryHUD{
+		{FitPath: fit, LayoutMode: "default"},
+		{FitPath: fit, LayoutMode: "default-no-power"},
+		{FitPath: fit, LayoutMode: "vertical"},
+		{FitPath: fit, Layout: &custom},
+	} {
+		out := filepath.Join(dir, "out.mp4")
+		err := e.Apply(context.Background(), Input{SourcePath: src, OutputPath: out})
+		if err == nil {
+			t.Errorf("LayoutMode %q (Layout set: %v): Apply succeeded on an uncovered clip, want an error", e.LayoutMode, e.Layout != nil)
+			continue
+		}
+		if !strings.Contains(err.Error(), "does not overlap") || !strings.Contains(err.Error(), "--hud-layout auto or time") {
+			t.Errorf("LayoutMode %q: error %q should say the clip is uncovered and point at --hud-layout auto or time", e.LayoutMode, err)
+		}
+		if _, statErr := os.Stat(out); statErr == nil {
+			t.Errorf("LayoutMode %q: an output file was written despite the error", e.LayoutMode)
+		}
+	}
+}
+
+// TestTelemetryHUD_Apply_TimeIsAlsoALayoutForACoveredClip: "time" is a layout
+// in its own right, not only a fallback -- forced on a clip the activity does
+// cover, it still draws the clock alone.
+func TestTelemetryHUD_Apply_TimeIsAlsoALayoutForACoveredClip(t *testing.T) {
+	requireFFmpeg(t)
+	dir := t.TempDir()
+	src := generateBlackHUDSource(t, dir)
+	out := filepath.Join(dir, "out.mp4")
+
+	var buf bytes.Buffer
+	e := &TelemetryHUD{FitPath: testFITPath(t), LayoutMode: "time"}
+	if err := e.Apply(context.Background(), Input{SourcePath: src, OutputPath: out, Log: logging.New(&buf, logging.LevelInfo)}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !hudLayoutLogged(buf.String(), "time") {
+		t.Errorf("log does not report the time layout:\n%s", buf.String())
+	}
+	const w, h = blackHUDSourceW, blackHUDSourceH
+	if y := maxYAVGInBox(t, out, fmt.Sprintf("%d:%d:0:%d", w, h/2, h/2)); y > 17 {
+		t.Errorf("bottom half YAVG=%.2f -- a covered clip under --hud-layout time drew more than the clock", y)
 	}
 }

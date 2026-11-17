@@ -70,9 +70,15 @@ type TelemetryHUD struct {
 	// picks the vertical layout for portrait clips, else the default layout --
 	// or, when the FIT carries no power reading for PowerSource, the default
 	// layout with its power line dropped ("default-no-power") -- or
-	// "default"/"vertical"/"default-no-power" to force one regardless of the
-	// clip's orientation or the FIT's data. Wired from --hud-layout; ignored
-	// when Layout is set.
+	// "default"/"vertical"/"default-no-power"/"time" to force one regardless
+	// of the clip's orientation or the FIT's data. Wired from --hud-layout;
+	// ignored when Layout is set.
+	//
+	// A clip the FIT activity does not cover at all is the one case decided
+	// before any of that: under "auto" and "time" it gets hud.TimeOnlyLayout
+	// (the clock alone, which needs no FIT data) instead of an error, and under
+	// a forced full layout -- or a caller-supplied Layout -- it is still the
+	// error it always was. See uncoveredFallsBack.
 	LayoutMode string
 	// Layout, when non-nil, overrides LayoutMode with an explicit arrangement
 	// (for programmatic callers/tests). A caller building one as a struct
@@ -324,6 +330,37 @@ func buildCourse(scoped *fitactivity.ScopedActivity, elevOpts fitactivity.Elevat
 	}
 }
 
+// uncoveredFallsBack reports whether a clip the FIT activity does not cover at
+// all renders as hud.TimeOnlyLayout (true) or fails (false).
+//
+// Only "auto" and "time" fall back. A forced full layout keeps the error: the
+// caller asked for gauges that need the activity, and an all-placeholder HUD
+// burned into the pixels is a worse answer than being told the clip is outside
+// the activity -- which is usually a wrong --offset or the wrong FIT file. A
+// caller-supplied Layout keeps it too, for the same reason: nothing here knows
+// what it draws. Any mode SelectLayout does not recognise counts as auto, as it
+// does there.
+func (t *TelemetryHUD) uncoveredFallsBack() bool {
+	if t.Layout != nil {
+		return false
+	}
+	switch t.LayoutMode {
+	case "default", "default-no-power", "vertical":
+		return false
+	}
+	return true
+}
+
+// layoutModeName names the layout a no-overlap error refused to draw, for the
+// message: the mode the caller forced, or "custom" for a caller-supplied
+// Layout, matching what logLayoutOnce calls one.
+func (t *TelemetryHUD) layoutModeName() string {
+	if t.Layout != nil {
+		return "custom"
+	}
+	return t.LayoutMode
+}
+
 func (t *TelemetryHUD) Name() string                     { return "telemetry-hud" }
 func (t *TelemetryHUD) FilenameSlug() string             { return "hud" }
 func (t *TelemetryHUD) ValidateStrength(_ float64) error { return nil }
@@ -396,12 +433,31 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	correctedCreation := info.CreationTime.Add(offset)
 
 	sync := fitactivity.Resolve(track, info.CreationTime, offset, duration)
+	// uncovered is the clip the activity does not reach at all. It is not an
+	// error unless a full gauge layout was explicitly asked for: the time of
+	// day comes from the clip's own creation_time (plus the offset), not from
+	// the FIT, so the clock can still be drawn -- see uncoveredFallsBack.
+	uncovered := sync.Overlap == fitactivity.NoOverlap
 	switch sync.Overlap {
 	case fitactivity.NoOverlap:
-		return fmt.Errorf("clip window [%s, %s] does not overlap %s's recorded coverage [%s, %s] -- "+
-			"wrong FIT file, or wrong --offset?",
-			sync.Start.Format(time.RFC3339), sync.End.Format(time.RFC3339), t.FitPath,
-			sync.CoverageStart.Format(time.RFC3339), sync.CoverageEnd.Format(time.RFC3339))
+		if !t.uncoveredFallsBack() {
+			return fmt.Errorf("clip window [%s, %s] does not overlap %s's recorded coverage [%s, %s] -- "+
+				"wrong FIT file, or wrong --offset? (--hud-layout %s draws gauges that need the activity; "+
+				"--hud-layout auto or time draws just the time of day on a clip the activity does not cover)",
+				sync.Start.Format(time.RFC3339), sync.End.Format(time.RFC3339), t.FitPath,
+				sync.CoverageStart.Format(time.RFC3339), sync.CoverageEnd.Format(time.RFC3339),
+				t.layoutModeName())
+		}
+		// Forced "time" asked for exactly what it gets, so only auto has
+		// anything to announce. It is a warning rather than info because the
+		// same outcome is what a wrong --offset or the wrong FIT looks like,
+		// and this used to be the error that caught both.
+		if t.LayoutMode != "time" {
+			log.Warnf("clip window [%s, %s] does not overlap the FIT file's recorded coverage [%s, %s] -- "+
+				"drawing the time of day only (if the activity should cover this clip, check the FIT file and --offset)",
+				sync.Start.Format(time.RFC3339), sync.End.Format(time.RFC3339),
+				sync.CoverageStart.Format(time.RFC3339), sync.CoverageEnd.Format(time.RFC3339))
+		}
 	case fitactivity.PartialOverlap:
 		log.Warnf("clip window [%s, %s] only partially overlaps the FIT file's coverage [%s, %s] -- "+
 			"gauges show placeholders outside it",
@@ -439,65 +495,77 @@ func (t *TelemetryHUD) Apply(ctx context.Context, in Input) error {
 	// up. For an unrotated clip these equal the coded Width/Height.
 	dw, dh := info.DisplayWidth(), info.DisplayHeight()
 
-	// Scoping happens HERE, after the Resolve switch above, for the same
-	// reason it does in the telemetry effect: sync is what tells it which
-	// window to scope to. See BuildScopedActivity's doc comment, which also
-	// records why reversing the two would NOT quietly break the
-	// partial-overlap warning -- a plausible hazard that was checked and found
-	// to be false.
-	scoped := fitactivity.BuildScopedActivity(track, sync, t.Scope)
-	logClipScope(log, scoped)
-
-	// From here on `track` IS the scoped track.
-	//
-	// Today this rebinding serves exactly one consumer, the per-frame
-	// Track.At below, and that one matters: it reads the distances the
-	// course's axes were drawn from, so if the two came from different tracks
-	// a rebased render would place every playhead against an un-rebased
-	// number -- pinned at the right-hand end of a bar it agrees with in no
-	// other way. It renders, it does not warn, and only a pixel measurement
-	// tells the difference (see the effect's progress-fill test).
-	//
-	// Its real value, though, is prospective: a consumer added below this line
-	// is scoped because it cannot reach anything else, which is the whole
-	// thesis of doing this at the Track level rather than per gauge. That is
-	// worth one rebinding even while there is a single reader.
-	//
-	// The sibling Telemetry effect handles the same step the other way, passing
-	// scoped.Track explicitly to its one consumer and never rebinding. Both are
-	// defensible -- an explicit argument is clearer where there is exactly one
-	// call, a rebinding is safer where a loop and future code follow -- but a
-	// reader moving between the two effects meets the same idea in two dialects
-	// and should not read the difference as significant.
-	track = scoped.Track
-
-	// The whole-course context every graphical gauge reads, built once.
-	course := buildCourse(scoped, fitactivity.ElevationOptions{
-		Sigma:      t.ElevationSmoothing,
-		TargetGain: t.ElevationGain,
-		TargetLoss: t.ElevationLoss,
-	}, t.Units)
-
-	var layout hud.Layout
-	if t.Layout != nil {
-		// A caller-supplied layout is used exactly as given -- nothing here
-		// chose it from the clip's power data, so there is no omitPower to
-		// compute, and skipping it avoids scanning every scoped sample for a
-		// question this branch has no use for the answer to.
-		layout = *t.Layout
+	// The whole-course context every graphical gauge reads, and the gauges
+	// themselves. A clip the activity does not cover gets neither a course nor
+	// a choice: the clock is the only gauge that has anything true to draw,
+	// and scoping to a window with no samples in it would build a course of
+	// nothing for gauges that are not on screen.
+	var (
+		course *hud.Course
+		layout hud.Layout
+	)
+	if uncovered {
+		layout = hud.TimeOnlyLayout()
 	} else {
-		// omitPower asks the SCOPED track (not the whole-activity one Decode
-		// returned above) whether it carries power under the chosen source
-		// at all -- distinct from any one frame's ResolvedPower coming up
-		// empty. It must run after the `track = scoped.Track` rebind above:
-		// reading the unscoped track here would answer "does the whole
-		// activity have power" while every other course-driven gauge already
-		// answers "does the clip".
-		omitPower := !track.HasPower(t.PowerSource)
-		layout = hud.SelectLayout(t.LayoutMode, dw, dh, omitPower)
+		// Scoping happens HERE, after the Resolve switch above, for the same
+		// reason it does in the telemetry effect: sync is what tells it which
+		// window to scope to. See BuildScopedActivity's doc comment, which also
+		// records why reversing the two would NOT quietly break the
+		// partial-overlap warning -- a plausible hazard that was checked and found
+		// to be false.
+		scoped := fitactivity.BuildScopedActivity(track, sync, t.Scope)
+		logClipScope(log, scoped)
+
+		// From here on `track` IS the scoped track.
+		//
+		// Today this rebinding serves exactly one consumer, the per-frame
+		// Track.At below, and that one matters: it reads the distances the
+		// course's axes were drawn from, so if the two came from different tracks
+		// a rebased render would place every playhead against an un-rebased
+		// number -- pinned at the right-hand end of a bar it agrees with in no
+		// other way. It renders, it does not warn, and only a pixel measurement
+		// tells the difference (see the effect's progress-fill test).
+		//
+		// Its real value, though, is prospective: a consumer added below this line
+		// is scoped because it cannot reach anything else, which is the whole
+		// thesis of doing this at the Track level rather than per gauge. That is
+		// worth one rebinding even while there is a single reader.
+		//
+		// The sibling Telemetry effect handles the same step the other way, passing
+		// scoped.Track explicitly to its one consumer and never rebinding. Both are
+		// defensible -- an explicit argument is clearer where there is exactly one
+		// call, a rebinding is safer where a loop and future code follow -- but a
+		// reader moving between the two effects meets the same idea in two dialects
+		// and should not read the difference as significant.
+		track = scoped.Track
+
+		// The whole-course context every graphical gauge reads, built once.
+		course = buildCourse(scoped, fitactivity.ElevationOptions{
+			Sigma:      t.ElevationSmoothing,
+			TargetGain: t.ElevationGain,
+			TargetLoss: t.ElevationLoss,
+		}, t.Units)
+
+		if t.Layout != nil {
+			// A caller-supplied layout is used exactly as given -- nothing here
+			// chose it from the clip's power data, so there is no omitPower to
+			// compute, and skipping it avoids scanning every scoped sample for a
+			// question this branch has no use for the answer to.
+			layout = *t.Layout
+		} else {
+			// omitPower asks the SCOPED track (not the whole-activity one Decode
+			// returned above) whether it carries power under the chosen source
+			// at all -- distinct from any one frame's ResolvedPower coming up
+			// empty. It must run after the `track = scoped.Track` rebind above:
+			// reading the unscoped track here would answer "does the whole
+			// activity have power" while every other course-driven gauge already
+			// answers "does the clip".
+			omitPower := !track.HasPower(t.PowerSource)
+			layout = hud.SelectLayout(t.LayoutMode, dw, dh, omitPower)
+		}
 	}
 
-	// Applied to BOTH branches above rather than duplicated inside each:
+	// Applied to every branch above rather than duplicated inside each:
 	// --hud-time swaps what the time/date gauge prints, not which layout is
 	// chosen, so it belongs after the layout is settled regardless of how it
 	// was settled. hud.WithElapsedTime itself is the no-op-and-don't-rename

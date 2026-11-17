@@ -1608,3 +1608,59 @@ func TestTelemetry_Apply_OmitLocation_EndToEnd(t *testing.T) {
 		})
 	}
 }
+
+// TestTelemetry_Apply_AnUncoveredClip covers AllowUncovered both ways. The
+// implied pass behind telemetry-hud (AllowUncovered) must carry an uncovered
+// clip through rather than fail the HUD render in front of it -- with nothing
+// FIT-derived added, even when GPX and an SRT sidecar were asked for, but with
+// creation_time still corrected by the offset, which needs no FIT. An explicit
+// telemetry effect keeps the error and runs nothing.
+func TestTelemetry_Apply_AnUncoveredClip(t *testing.T) {
+	requireFFmpeg(t)
+	fitPath := testFITPath(t)
+	dir := t.TempDir()
+	// Two hours after the fixture's coverage ends.
+	src := generateSyntheticSource(t, dir, "uncovered.mp4", "2026-07-05T03:00:00.000000Z")
+
+	t.Run("implied pass carries it through", func(t *testing.T) {
+		out := filepath.Join(dir, "implied.mp4")
+		fr := &fakeRunner{}
+		tel := &Telemetry{
+			Runner: fr, FitPath: fitPath, OffsetSeconds: 2,
+			GPX: true, SRTFormat: "dji", SRTSidecar: true,
+			AllowUncovered: true,
+		}
+		if err := tel.Apply(context.Background(), Input{SourcePath: src, OutputPath: out}); err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+		if len(fr.calls) != 1 {
+			t.Fatalf("ffmpeg ran %d times, want one stream copy", len(fr.calls))
+		}
+		args := fr.calls[0].args
+		if !containsAdjacent(args, "-metadata", "creation_time=2026-07-05T03:00:02.000000Z") {
+			t.Errorf("args %v: want creation_time corrected by the 2 s offset", args)
+		}
+		for _, a := range args {
+			if strings.HasPrefix(a, "location=") || a == "-c:s" {
+				t.Errorf("args %v: an uncovered clip has no location or subtitle to add, but got %q", args, a)
+			}
+		}
+		for _, sidecar := range []string{gpxSidecarPath(out), srtSidecarPath(out)} {
+			if _, err := os.Stat(sidecar); err == nil {
+				t.Errorf("%s was written for a clip with no telemetry in it", sidecar)
+			}
+		}
+	})
+
+	t.Run("explicit telemetry still fails", func(t *testing.T) {
+		fr := &fakeRunner{}
+		tel := &Telemetry{Runner: fr, FitPath: fitPath}
+		err := tel.Apply(context.Background(), Input{SourcePath: src, OutputPath: filepath.Join(dir, "explicit.mp4")})
+		if err == nil || !strings.Contains(err.Error(), "does not overlap") {
+			t.Fatalf("Apply = %v, want the no-overlap error", err)
+		}
+		if len(fr.calls) != 0 {
+			t.Errorf("ffmpeg ran %d times for a refused clip", len(fr.calls))
+		}
+	})
+}

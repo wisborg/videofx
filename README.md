@@ -177,7 +177,7 @@ Flags:
 - `--elevation-smoothing` — telemetry-hud only: an explicit Gaussian smoothing width (in FIT samples, ≈ seconds) for the elevation series, instead of the gain/loss auto-tuning. Default `0` = auto.
 - `--units` / `--unit` — telemetry-hud only: the units the HUD's numbers are written in. `--units metric` (default: km, m, km/h, min/km) or `--units imperial` (mi, ft, mph, min/mi) sets them all; `--unit QUANTITY=UNIT`, repeatable, changes one after it — `distance=km|mi|nm`, `elevation=m|ft`, `speed=km/h|mph|kn|m/s`, `pace=min/km|min/mi` — for the mixtures some activities are read in: a flight is `--units imperial --unit distance=nm --unit speed=kn`. The progress bar, the elevation profile's axes, the gain/loss, the pace and speed lines and the splits all follow it; the splits become **laps of the distance unit**, a mile under imperial, with a header that says so (`1 mi lap 7/13`). Below one distance unit an axis is labelled in the elevation unit, feet below a mile as metres below a kilometre. What the `telemetry` effect writes — the SRT and the GPX — stays metric: other programs read them, and the DJI layout is fixed. The same two flags, spelt the same way, are in fitdash and course.
 - `--power-source` — telemetry-hud only: which power reading the lower-left metrics gauge shows when the FIT carries **both** a footpod (Stryd) developer-field power **and** the standard FIT `power` field — the two are different sensors and can disagree substantially. `auto` (default) prefers the Stryd developer field and falls back to the native field; `stryd` forces the footpod field (shows `-- W` if absent); `native` forces the standard FIT field. Only affects the on-screen HUD number — what the `telemetry` effect writes to its SRT/GPX is unchanged by this flag.
-- `--hud-layout` — telemetry-hud only: which gauge arrangement to use — `auto` (default), `default`, `default-no-power`, or `vertical`. `auto` picks the **vertical** layout for portrait (taller-than-wide) clips and the full **default** layout otherwise, keyed on the clip's *display* dimensions (a phone/action-cam clip stored landscape with a 90°/270° rotation flag is treated as the portrait it plays back as); `auto` also picks `default-no-power` in place of `default` when the FIT carries **no power reading** for the selected `--power-source` — pass `default` explicitly to keep the `-- W` placeholder line instead. `default-no-power` is the full landscape set with the power line removed from the lower-left readout and heart rate/cadence closed down into the gap, for a workout recorded without a power sensor. The vertical layout keeps only the three gauges that read well on a narrow frame — the distance progress bar (top), the course map (middle-right, as in the landscape layout), and the elevation-vs-distance profile (bottom) — each widened to use more of the narrow width; the default layout's seven gauges crowd a portrait frame. Force one with `default`/`default-no-power`/`vertical`.
+- `--hud-layout` — telemetry-hud only: which gauge arrangement to use — `auto` (default), `default`, `default-no-power`, `vertical`, or `time`. `auto` picks the **vertical** layout for portrait (taller-than-wide) clips and the full **default** layout otherwise, keyed on the clip's *display* dimensions (a phone/action-cam clip stored landscape with a 90°/270° rotation flag is treated as the portrait it plays back as); `auto` also picks `default-no-power` in place of `default` when the FIT carries **no power reading** for the selected `--power-source` — pass `default` explicitly to keep the `-- W` placeholder line instead. `default-no-power` is the full landscape set with the power line removed from the lower-left readout and heart rate/cadence closed down into the gap, for a workout recorded without a power sensor. The vertical layout keeps only the three gauges that read well on a narrow frame — the distance progress bar (top), the course map (middle-right, as in the landscape layout), and the elevation-vs-distance profile (bottom) — each widened to use more of the narrow width; the default layout's seven gauges crowd a portrait frame. `time` draws the time of day **alone**, in the same place and at the same size as the full layout's clock (top right), and needs no data from the FIT. A clip the FIT activity **does not cover at all** — filmed before the watch was started or after it was stopped — gets `time` under `auto` instead of failing, with a warning (it is also what a wrong `--offset` or the wrong FIT looks like); under an explicit `default`/`default-no-power`/`vertical` it is still an error. Force one with `default`/`default-no-power`/`vertical`/`time`.
 - `--srt-format` — telemetry only: embed a `mov_text` telemetry subtitle track in this format — `none` (default), `readable` (a human-readable per-second readout), or `dji` (the DJI-drone SRT layout that [Telemetry Overlay](#embedding-telemetry-for-telemetry-overlay) reads directly from the video). The location tag is written independently of this (see `--location`). A muxed track is **hidden by default** (see `--show-subtitle`).
 - `--srt-sidecar` — telemetry only: write the `--srt-format` SRT as a **separate `.srt` file** next to the output (like `--gpx`) **instead of embedding it** — e.g. `clip - telemetry.srt` beside `clip - telemetry.mp4`. Nothing is muxed into the video, so nothing can display during playback, while Telemetry Overlay reads the separate file (matching DJI's own `NAME.MP4` + `NAME.SRT` pairing). **The reliable way to keep telemetry off screen** (see below). Off by default (the SRT is embedded); requires `--srt-format readable` or `dji`, and requires `telemetry` to be the last effect in a chain (see [Chaining effects](#chaining-effects)).
 - `--show-subtitle` — telemetry only: keep the **embedded** subtitle track visible/auto-displayed. **Off by default** — an embedded subtitle is flagged hidden (its track-`enabled` flag cleared), but **macOS players (QuickTime, Quick Look) auto-display subtitles regardless of that flag**, so this doesn't reliably hide it; use `--srt-sidecar` instead. The cleared flag also does not survive a later remux — any effect chained after `telemetry` re-muxes the file and the mp4 muxer marks every track enabled again (videofx warns about this; see [Chaining effects](#chaining-effects)). Ignored with `--srt-sidecar`.
@@ -342,7 +342,11 @@ into the file itself.)
 
 If the clip's resolved time window falls entirely outside the FIT file's
 recorded coverage, `telemetry` fails with an error (wrong FIT file, or a
-wrong `--offset`, are the two likely causes). If only part of the window
+wrong `--offset`, are the two likely causes). The one exception is the
+`telemetry` pass `telemetry-hud` adds behind itself: there the HUD has drawn
+just the clock (see [Telemetry HUD](#telemetry-hud)), so the pass copies the
+clip through with nothing added but the offset-corrected `creation_time`
+rather than throwing that render away. If only part of the window
 overlaps, it proceeds but warns on stderr and emits telemetry for the
 overlapping part only — it never silently truncates without saying so.
 
@@ -505,7 +509,21 @@ elevation profile (bottom) — since the full set crowds a narrow frame; `--hud-
 selects between them (default `auto` picks by the clip's display aspect). A third,
 `default-no-power`, is the landscape set with the power line dropped and heart
 rate/cadence closed down into the gap, for an activity with no power sensor — `auto`
-switches to it on its own when the FIT has no power reading for `--power-source`. See
+switches to it on its own when the FIT has no power reading for `--power-source`. A
+fourth, `time`, is the upper-right clock and nothing else.
+
+**A clip outside the activity gets the clock alone.** When a clip's time window does not
+overlap the FIT file's coverage at all, there is nothing for six of the seven gauges to
+show — but the time of day still comes from the clip's own `creation_time` (plus
+`--offset`). Under `auto` such a clip is drawn with the `time` layout and a warning, so a
+batch of clips around a run renders every one of them, the clock in the same place and
+size on all of them:
+
+```
+videofx warmup.mp4 run.mp4 cooldown.mp4 --effect telemetry-hud --fit "run.fit"
+```
+
+Forcing a full layout (`--hud-layout default`, …) on such a clip is still an error. See
 `--hud-layout` for details.
 
 ### What the HUD puts in the pixels
@@ -528,7 +546,7 @@ them before publishing one:
 uploaded to strips that tag and leaves every pixel of the map and the heart rate exactly
 where they are.
 
-**There is no per-gauge opt-out.** All three layouts include the course map, and
+**There is no per-gauge opt-out.** Every layout but `time` includes the course map, and
 `--hud-layout` chooses between whole layouts rather than between gauge sets —
 `default-no-power` is a **whole-layout choice** driven by whether the FIT has a power
 reading at all, not a per-gauge toggle a user reaches for. The way to publish a clip
