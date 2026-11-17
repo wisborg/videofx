@@ -196,7 +196,7 @@ func NewRootCmd() *cobra.Command {
 	root.Flags().StringVar(&fitPath, "fit", "",
 		"telemetry and telemetry-hud: path to a Garmin FIT activity file to sync GPS/telemetry from (required with either effect)")
 	root.Flags().StringVar(&offsetSpec, "offset", "0",
-		"clock-skew offset in seconds between the camera and the FIT-recording device, signed and fractional -- fit_time = creation_time + offset + pts, so a positive offset means the camera's clock reads behind the watch's. Applies to ANY effect whenever --start/--end is an absolute timestamp: the trim resolves through the same relation, so a cut and the telemetry it lines up with move together. With telemetry/telemetry-hud it also drives the FIT sync, and a non-zero offset rewrites the output's creation_time to the corrected instant (and re-bases the GPX/subtitle to match). Pass \"auto\" to MEASURE it instead of typing a number: this runs the same rotation-model matching `videofx estimate-offset` does, against --fit, and requires exactly one input file -- an offset is a property of the camera/watch PAIR, not of one clip, so the intended workflow is one `estimate-offset` run per pair and the resulting number reused across a batch with an explicit --offset, not \"auto\" on every run. \"auto\" stays opt-in for that reason: a wrong offset is silent (it just syncs to the wrong instant), so trading a one-time measurement for a per-run guess is not a safe default. A declined estimate is a hard error here, never a silent fall back to 0")
+		"clock-skew offset in seconds between the camera and the FIT-recording device, signed and fractional -- fit_time = creation_time + offset + pts, so a positive offset means the camera's clock reads behind the watch's. Applies to ANY effect whenever --start/--end is an absolute timestamp: the trim resolves through the same relation, so a cut and the telemetry it lines up with move together. --effect offset applies it on its own: a lossless copy with creation_time moved to the corrected instant, no FIT needed. With telemetry/telemetry-hud it also drives the FIT sync, and a non-zero offset rewrites the output's creation_time to the corrected instant (and re-bases the GPX/subtitle to match). Pass \"auto\" to MEASURE it instead of typing a number: this runs the same rotation-model matching `videofx estimate-offset` does, against --fit, and requires exactly one input file -- an offset is a property of the camera/watch PAIR, not of one clip, so the intended workflow is one `estimate-offset` run per pair and the resulting number reused across a batch with an explicit --offset, not \"auto\" on every run. \"auto\" stays opt-in for that reason: a wrong offset is silent (it just syncs to the wrong instant), so trading a one-time measurement for a per-run guess is not a safe default. A declined estimate is a hard error here, never a silent fall back to 0")
 	root.Flags().StringVar(&telemetryScope, "telemetry-scope", "full",
 		"telemetry and telemetry-hud: how much of the activity the clip's telemetry describes -- \"full\" (default, and what this has always done: the WHOLE recording, so the HUD's course map, elevation profile, splits and progress bar cover the entire run and distances stay cumulative from its start, however short the clip cut out of it is), \"clip-rebased\" (only the part of the activity that runs underneath the clip, with distance, splits/lap numbering and the progress bar all restarting at zero at the clip's first frame, as if the clip were its own activity), or \"clip-absolute\" (that same part, but with distance and lap numbers kept as the FIT recorded them, so a clip cut from 10.2 km into a marathon reads 10.2-12.4 km). The WALL CLOCK is never rebased, in any mode: the on-screen clock, the GPX <time> and the SRT datetime stay on real time, because Telemetry Overlay -- and anything else matching on creation_time -- depends on that. With --start/--end the overlapping part is measured against the TRIMMED clip. For the telemetry effect specifically the clip modes move only the SRT's cumulative distance column (its GPX/SRT already cover just the clip window), so \"full\" and \"clip-absolute\" there normally produce identical output -- they can differ where a recording gap straddles a clip boundary")
 	root.Flags().StringVar(&srtFormat, "srt-format", "none",
@@ -346,6 +346,35 @@ func impliedEffects(effs []effects.Effect) []effects.Effect {
 func requireFitPath(effectNames []string, fitPath string) error {
 	if (slices.Contains(effectNames, "telemetry") || slices.Contains(effectNames, "telemetry-hud")) && fitPath == "" {
 		return fmt.Errorf("--fit is required when --effect includes telemetry or telemetry-hud (path to a Garmin FIT activity file)")
+	}
+	return nil
+}
+
+// requireOffsetEffectOffset enforces the offset effect's two preconditions,
+// checked against the RESOLVED chain (post impliedEffects) like
+// requireStripMetadataNotBeforeTelemetry.
+//
+// It needs an offset: --offset's default of 0 would make it a slow copy that
+// changes nothing, so a missing flag fails here rather than producing a file
+// named for a correction it does not carry. offsetSpec is the raw flag, so
+// "auto" counts as given -- its value is measured later, and Apply rejects a
+// measured 0 itself.
+//
+// And it cannot share a chain with telemetry or telemetry-hud. Both already
+// apply --offset to the clip's creation_time -- telemetry writes the corrected
+// instant back onto its output -- so whichever of the two ran second would
+// read an already-corrected creation_time and correct it again: the HUD clock
+// and the FIT sync off by the offset, or the output's time shifted twice. With
+// a telemetry effect in the chain this one is redundant anyway.
+func requireOffsetEffectOffset(effectNames []string, offsetSpec string) error {
+	if !slices.Contains(effectNames, "offset") {
+		return nil
+	}
+	if slices.Contains(effectNames, "telemetry") || slices.Contains(effectNames, "telemetry-hud") {
+		return fmt.Errorf("--effect offset cannot be combined with telemetry or telemetry-hud: those already apply --offset to creation_time, so the clock would be shifted twice -- drop offset from the chain")
+	}
+	if secs, auto, err := parseOffsetSpec(offsetSpec); err == nil && !auto && secs == 0 {
+		return fmt.Errorf("--effect offset needs a non-zero --offset (seconds, or \"auto\" to measure it against --fit)")
 	}
 	return nil
 }
@@ -1321,6 +1350,9 @@ func configureEffect(effect effects.Effect, flags *pflag.FlagSet) error {
 	if rot, ok := effect.(*effects.Rotate); ok {
 		rot.Degrees = rotateDeg
 	}
+	if off, ok := effect.(*effects.Offset); ok {
+		setTelemetryOffset(off, offsetSeconds)
+	}
 	configureTelemetry(effect)
 	return nil
 }
@@ -1395,8 +1427,8 @@ func configureTelemetry(effect effects.Effect) {
 }
 
 // setTelemetryOffset applies seconds to effect's OffsetSeconds field if it
-// is a *effects.Telemetry or *effects.TelemetryHUD, and does nothing
-// otherwise. This is the ONE place that field is written, from TWO
+// is a *effects.Telemetry, *effects.TelemetryHUD or *effects.Offset, and does
+// nothing otherwise. This is the ONE place that field is written, from TWO
 // different call sites: configureEffect/configureTelemetry (using whatever
 // offsetSeconds holds at flag-configuration time -- the final value for a
 // literal --offset, a placeholder 0 for "auto") and, for "auto", a second
@@ -1411,6 +1443,8 @@ func setTelemetryOffset(effect effects.Effect, seconds float64) {
 	case *effects.Telemetry:
 		e.OffsetSeconds = seconds
 	case *effects.TelemetryHUD:
+		e.OffsetSeconds = seconds
+	case *effects.Offset:
 		e.OffsetSeconds = seconds
 	}
 }
@@ -1486,6 +1520,9 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if err := requireStripMetadataNotBeforeTelemetry(effectCanonicalNames); err != nil {
+		return err
+	}
+	if err := requireOffsetEffectOffset(effectCanonicalNames, offsetSpec); err != nil {
 		return err
 	}
 	if err := validateSuffix(suffix); err != nil {

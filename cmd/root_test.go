@@ -3826,3 +3826,70 @@ func TestRunRoot_WarnTelemetryNotLastReachesTheLog(t *testing.T) {
 		})
 	}
 }
+
+func TestRequireOffsetEffectOffset(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		effects []string
+		offset  string
+		wantErr string
+	}{
+		{"no offset effect, no offset", []string{"rotate"}, "0", ""},
+		{"a number", []string{"offset"}, "3.5", ""},
+		{"a negative number", []string{"offset"}, "-2", ""},
+		{"auto is measured later", []string{"offset"}, "auto", ""},
+		{"chained with a re-encoder", []string{"gocv-stabilizer", "offset"}, "1", ""},
+		{"the default zero", []string{"offset"}, "0", "non-zero --offset"},
+		{"an explicit zero", []string{"offset"}, "0.0", "non-zero --offset"},
+		{"with telemetry", []string{"offset", "telemetry"}, "1", "shifted twice"},
+		{"with the hud (and its implied pass)", []string{"offset", "telemetry-hud", "telemetry"}, "1", "shifted twice"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := requireOffsetEffectOffset(c.effects, c.offset)
+			switch {
+			case c.wantErr == "" && err != nil:
+				t.Errorf("unexpected error: %v", err)
+			case c.wantErr != "" && (err == nil || !strings.Contains(err.Error(), c.wantErr)):
+				t.Errorf("error = %v, want one containing %q", err, c.wantErr)
+			}
+		})
+	}
+}
+
+// TestSetTelemetryOffset_ReachesTheOffsetEffect: --offset auto writes the
+// measured value through setTelemetryOffset in a second pass, so an effect it
+// skips would run with the placeholder 0 -- which the offset effect refuses at
+// Apply, after the measurement has already been paid for.
+func TestSetTelemetryOffset_ReachesTheOffsetEffect(t *testing.T) {
+	e, err := effects.Get("offset")
+	if err != nil {
+		t.Fatalf("Get(offset): %v", err)
+	}
+	setTelemetryOffset(e, 2.75)
+	if got := e.(*effects.Offset).OffsetSeconds; got != 2.75 {
+		t.Errorf("OffsetSeconds = %v after setTelemetryOffset(2.75)", got)
+	}
+}
+
+// TestConfigureEffect_TheLiteralOffsetReachesTheOffsetEffect covers the path
+// TestSetTelemetryOffset_ReachesTheOffsetEffect does not: a literal --offset
+// is applied while the chain is configured, not in --offset auto's second
+// pass, and an effect configureEffect never hands to setTelemetryOffset runs
+// with 0 -- which the offset effect refuses, so `--effect offset --offset 2.7`
+// failed every file while every unit test of setTelemetryOffset passed.
+func TestConfigureEffect_TheLiteralOffsetReachesTheOffsetEffect(t *testing.T) {
+	orig := offsetSeconds
+	t.Cleanup(func() { offsetSeconds = orig })
+	offsetSeconds = 2.7
+
+	e, err := effects.Get("offset")
+	if err != nil {
+		t.Fatalf("Get(offset): %v", err)
+	}
+	if err := configureEffect(e, NewRootCmd().Flags()); err != nil {
+		t.Fatalf("configureEffect: %v", err)
+	}
+	if got := e.(*effects.Offset).OffsetSeconds; got != 2.7 {
+		t.Errorf("OffsetSeconds = %v after configuring with --offset 2.7", got)
+	}
+}

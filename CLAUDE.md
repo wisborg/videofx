@@ -1,7 +1,8 @@
 # videofx
 
 A Go CLI that applies effects to video: stabilization (`stabilize`, `warp-stabilizer`),
-lossless `rotate`, and Garmin FIT telemetry (`telemetry`, `telemetry-hud`).
+lossless `rotate` and `offset` (a `creation_time` clock correction), and Garmin FIT
+telemetry (`telemetry`, `telemetry-hud`).
 
 ## Building and testing
 
